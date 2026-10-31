@@ -67,8 +67,9 @@ interface TorTransport {
     ): PublishedService
 
     /**
-     * Retira el servicio. Solo actúa con Tor `Ready`; en cualquier otro estado no hace nada ni espera
-     * (un Tor parado, caído o arrancando no tiene servicios: se publican a partir de `Ready`).
+     * Retira el servicio, sin esperar nunca. Con Tor `Off`/`Error`, o antes del primer `Ready` de esta
+     * ejecución, no hace nada (no hay servicios: se publican a partir de `Ready`). Tras ese `Ready` actúa
+     * aunque el estado haya vuelto a `Starting` (p. ej. red desactivada), porque Tor los conserva.
      */
     suspend fun unpublishService(onion: String)
 
@@ -81,8 +82,8 @@ interface TorTransport {
     suspend fun addClientAuth(onion: String, privateKey: ByteArray)
 
     /**
-     * Quita la autorización de cliente de `onion`. Como [unpublishService], solo actúa con Tor `Ready`;
-     * en cualquier otro estado no hace nada ni espera (no hay ninguna registrada).
+     * Quita la autorización de cliente de `onion`; mismas reglas que [unpublishService] (nunca espera;
+     * no hace nada con Tor `Off`/`Error` ni antes del primer `Ready` de esta ejecución).
      */
     suspend fun removeClientAuth(onion: String)
 

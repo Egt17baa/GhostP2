@@ -57,6 +57,8 @@ internal fun TorConfig.BuilderScope.applyGhostConfig() {
  * Traduce el estado del runtime al de [TorTransport]. `processSeen`: ya hubo un proceso (o un intento
  * de arranque) en esta ejecución; un `Off`/`Stopping` después de eso, sin [KmpTorTransport.stop], es
  * un fallo. Devuelve `null` si no hay que cambiar nada (el `Off` previo al arranque).
+ * Ojo: tras `Ready` puede volver a `Starting(100)` (red desactivada) con los servicios aún publicados;
+ * por eso [KmpTorTransport] recuerda si ya hubo `Ready` en la ejecución para poder retirarlos.
  */
 internal fun mapRuntimeState(
     daemon: RuntimeState.Daemon,

@@ -65,7 +65,8 @@ sealed interface Notice {
     /**
      * Diagnóstico: al arrancar no se pudo volver a registrar en Tor la autorización de cliente de estos
      * contactos (error o tiempo agotado). No podremos llamarles hasta el siguiente arranque; ellos sí
-     * pueden llamarnos. Una vez por arranque como mucho.
+     * pueden llamarnos. Una vez por arranque como mucho. Puede incluir contactos que en realidad sí
+     * quedaron registrados: una orden cancelada por el tiempo máximo pudo haberse aplicado en Tor igualmente.
      */
     data class ClientAuthFailed(val contactIds: List<String>) : Notice
 }

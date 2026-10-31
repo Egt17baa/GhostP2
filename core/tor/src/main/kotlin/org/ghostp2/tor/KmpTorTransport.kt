@@ -68,11 +68,14 @@ class KmpTorTransport internal constructor(
     /** Serializa [start], [stop] y [wipeState]. */
     private val lifecycle = Mutex()
 
-    /** Protege [running], [run] y [processSeen] frente al hilo de eventos de kmp-tor. */
+    /** Protege [running], [run], [processSeen] y [readyThisRun] frente al hilo de eventos de kmp-tor. */
     private val lock = Any()
     private var running = false
     private var run = 0L
     private var processSeen = false
+
+    /** Ya hubo `Ready` en esta ejecución: desde entonces Tor puede tener servicios y autorizaciones. */
+    @Volatile private var readyThisRun = false
 
     @Volatile private var driver: TorDriver? = null
     private var startJob: Job? = null
@@ -84,6 +87,7 @@ class KmpTorTransport internal constructor(
             val myRun = synchronized(lock) {
                 running = true
                 processSeen = false
+                readyThisRun = false
                 mutableState.value = TorState.Starting(0) // R13: nunca Off al volver
                 ++run
             }
@@ -167,7 +171,7 @@ class KmpTorTransport internal constructor(
     }
 
     override suspend fun unpublishService(onion: String) {
-        val d = driverIfReady() ?: return
+        val d = driverForRemoval() ?: return
         d.command(TorCmd.Onion.Delete(addressOrIOException(onion)))
     }
 
@@ -183,7 +187,7 @@ class KmpTorTransport internal constructor(
     }
 
     override suspend fun removeClientAuth(onion: String) {
-        val d = driverIfReady() ?: return
+        val d = driverForRemoval() ?: return
         d.command(TorCmd.OnionClientAuth.Remove(addressOrIOException(onion)))
     }
 
@@ -201,7 +205,10 @@ class KmpTorTransport internal constructor(
         synchronized(lock) {
             if (!running || mutableState.value is TorState.Error) return
             if (s.daemon.isStarting || s.daemon.isOn) processSeen = true
-            mapRuntimeState(s.daemon, s.network, processSeen)?.let { mutableState.value = it }
+            mapRuntimeState(s.daemon, s.network, processSeen)?.let {
+                if (it == TorState.Ready) readyThisRun = true
+                mutableState.value = it
+            }
         }
     }
 
@@ -230,11 +237,16 @@ class KmpTorTransport internal constructor(
     }
 
     /**
-     * Driver para retirar algo, solo con Tor `Ready`. En cualquier otro estado no hay nada que retirar:
-     * un Tor parado o caído no guarda servicios ni autorizaciones, y uno que está arrancando tampoco
-     * (todo se registra a partir de `Ready`). Por eso no se espera.
+     * Driver para retirar algo, sin esperar nunca. Antes del primer `Ready` de esta ejecución no hay nada
+     * que retirar (todo se registra a partir de `Ready`): `null`. Después, se actúa en cualquier estado
+     * que no sea `Off`/`Error` (p. ej. `Starting(100)` con la red desactivada: Tor sigue teniendo los
+     * servicios). Con Tor parado o caído, `null`: no guarda nada.
      */
-    private fun driverIfReady(): TorDriver? = driver.takeIf { state.value == TorState.Ready }
+    private fun driverForRemoval(): TorDriver? {
+        val s = state.value
+        if (s == TorState.Off || s is TorState.Error) return null
+        return driver.takeIf { readyThisRun }
+    }
 
     private inline fun <T> keysOrIOException(block: () -> T): T = try {
         block()

@@ -259,6 +259,26 @@ class KmpTorTransportTest {
     }
 
     @Test
+    fun removalsAfterReadyStillActWhenBackToStarting() = runBlocking<Unit> {
+        startReady()
+        // Bootstrap completo pero red desactivada: el estado vuelve a Starting(100) y Tor conserva los servicios.
+        driver.emit(RuntimeState(RuntimeState.Daemon.On(100), RuntimeState.Network.Disabled))
+        assertEquals(TorState.Starting(100), tor.state.value)
+        withTimeout(1_000) {
+            tor.unpublishService(DUCKDUCKGO)
+            tor.removeClientAuth(DUCKDUCKGO)
+        }
+        assertTrue(driver.commands[0] is TorCmd.Onion.Delete)
+        assertTrue(driver.commands[1] is TorCmd.OnionClientAuth.Remove)
+        // Tras stop() y un arranque nuevo, sin Ready todavía, vuelven a ser no-ops.
+        tor.stop()
+        tor.start()
+        driver.emit(bootstrapping(40))
+        tor.unpublishService(DUCKDUCKGO)
+        assertEquals(2, driver.commands.size)
+    }
+
+    @Test
     fun wipeStateStopsAndDeletesTheTorDirectory() = runBlocking<Unit> {
         startReady()
         File(tor.torDir, "work/data").mkdirs()

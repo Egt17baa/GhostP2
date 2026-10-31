@@ -136,7 +136,9 @@ class FakeTorNetwork {
  * Implementación falsa de [TorTransport] sobre [FakeTorNetwork]. Modela la autorización de cliente v3:
  * un servicio con claves autorizadas solo acepta a quien haya llamado a [addClientAuth] con una clave
  * privada x25519 cuya pública esté en la lista. Las .onion son direcciones v3 válidas derivadas de una
- * clave ed25519; la `privateKey` publicada son 64 bytes = semilla ed25519(32) || pública(32).
+ * clave ed25519; la `privateKey` publicada son 64 bytes = semilla ed25519(32) || pública(32). Ese formato
+ * no es el del transporte real (`KmpTorTransport` usa la clave expandida de Tor, también de 64 bytes): el
+ * motor la trata como opaca y solo la guarda y la devuelve tal cual, así que la diferencia no le afecta.
  * `publishService`, `addClientAuth` y `connect` exigen estado [TorState.Ready] (`IOException` si no), como
  * el contrato de [TorTransport]; `stop` retira los servicios publicados por esta instancia.
  * Publicar una .onion que ya está publicada lanza `IOException("ya publicado")`, y `unpublishService`
