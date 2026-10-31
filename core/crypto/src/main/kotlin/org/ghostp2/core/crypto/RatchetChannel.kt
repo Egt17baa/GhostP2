@@ -78,6 +78,9 @@ class RatchetChannel private constructor(
             Primitives.wipe(mk)
         }
         try {
+            // Una trama auténtica con relleno no canónico se rechaza SIN avanzar la cadena. Como solo
+            // el par legítimo puede producirla, indica un emisor defectuoso o malicioso: la capa de
+            // sesión debe tratar esta excepción como fatal y cerrar la sesión.
             val plaintext = unpad(padded)
             // Solo tras autenticar y validar el relleno se avanza la cadena
             val nextCk = Primitives.hmacSha256(ck, CK_LABEL)
@@ -132,14 +135,16 @@ class RatchetChannel private constructor(
             var recvKey: ByteArray? = null
             var sendChain: ByteArray? = null
             var recvChain: ByteArray? = null
+            var h: ByteArray? = null
             try {
-                val h = hs.handshakeHash()
+                h = hs.handshakeHash()
                 sendKey = checkNotNull(send.key) { "CipherState de envío sin clave" }
                 recvKey = checkNotNull(recv.key) { "CipherState de recepción sin clave" }
                 sendChain = Primitives.hkdf(h, sendKey, CHAIN_INFO, 32)
                 recvChain = Primitives.hkdf(h, recvKey, CHAIN_INFO, 32)
                 return RatchetChannel(sendChain, recvChain, 0, 0)
             } finally {
+                h?.let { Primitives.wipe(it) }
                 sendKey?.let { Primitives.wipe(it) }
                 recvKey?.let { Primitives.wipe(it) }
                 sendChain?.let { Primitives.wipe(it) }
