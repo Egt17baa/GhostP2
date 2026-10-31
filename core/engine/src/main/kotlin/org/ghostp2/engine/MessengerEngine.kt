@@ -272,6 +272,7 @@ class MessengerEngine(
         val id = identities.load() ?: createIdentity()
         identity = id
         startTor(engineScope)
+        registerClientAuth()
         val c = Connections(
             tor, contacts, config, random, engineScope, KeyPair25519(id.identityPrivate, id.identityPublic),
             mutablePresence, mutableNotices, mutableSessionEvents,
@@ -289,6 +290,24 @@ class MessengerEngine(
         identity = p.sync(id, contacts.all())
         mutableMyOnion.value = p.publishedOnion
         c.start()
+    }
+
+    /**
+     * Tor guarda las autorizaciones de cliente solo en memoria: tras cada arranque (con Tor ya `Ready` y
+     * antes de lanzar los bucles de conexión) se registran de nuevo las de todos los contactos `ACTIVE`.
+     * Un fallo con un contacto no impide el arranque ni el registro de los demás (ese contacto no podrá
+     * conectarse hasta el siguiente arranque).
+     */
+    private suspend fun registerClientAuth() {
+        contacts.all().filter { it.status == ContactStatus.ACTIVE }.forEach { contact ->
+            try {
+                tor.addClientAuth(contact.peerOnion, contact.clientAuthPrivateForPeerOnion)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // Se ignora: ver KDoc.
+            }
+        }
     }
 
     /** Corta las esperas de reintento de todos los contactos, vuelve a la espera mínima y reintenta ya. */
@@ -566,7 +585,9 @@ class MessengerEngine(
      * (mejor esfuerzo, como mucho [WIPE_UNPAIR_MILLIS] en total), detiene el motor como [stop] y, en
      * la misma sección crítica (ningún [start] se cuela en medio), quita las autorizaciones de cliente
      * de cada contacto, borra contactos e identidad y rellena con ceros el material de claves: el que
-     * usaba la ejecución (identidad, enlaces de [Connections]) y las copias leídas para borrar. El siguiente [start] crea una identidad nueva y, al publicarse, una .onion nueva.
+     * usaba la ejecución (identidad, enlaces de [Connections]) y las copias leídas para borrar. También
+     * borra el estado de Tor en disco ([TorTransport.wipeState]). El siguiente [start] crea una identidad
+     * nueva y, al publicarse, una .onion nueva.
      * Funciona con el motor parado y aunque Tor falle (sus errores se ignoran); termina siempre en
      * `Stopped`. Solo lanza si falla el borrado de los repositorios (los fallos al detener el motor
      * se adjuntan como suprimidos de ese error, o se ignoran si el borrado fue bien).
@@ -593,6 +614,8 @@ class MessengerEngine(
                 } finally {
                     mutableStatus.value = EngineStatus.Stopped
                 }
+                // Estado de Tor en disco (guardas, caché, cookie de control): mejor esfuerzo, como el resto de Tor.
+                runCatching { tor.wipeState() }
                 try {
                     wipeStorage()
                 } catch (e: Exception) {

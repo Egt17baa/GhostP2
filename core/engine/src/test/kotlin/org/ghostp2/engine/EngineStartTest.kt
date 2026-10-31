@@ -356,4 +356,10 @@ private class ControlledTor(network: FakeTorNetwork) : TorTransport {
 
     override suspend fun connect(onion: String, port: Int, timeoutMillis: Long) =
         delegate.connect(onion, port, timeoutMillis)
+
+    override suspend fun wipeState() {
+        stopped = true
+        delegate.wipeState()
+        mutableState.value = TorState.Off
+    }
 }

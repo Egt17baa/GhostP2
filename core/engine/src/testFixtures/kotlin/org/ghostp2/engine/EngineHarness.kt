@@ -17,6 +17,8 @@ class EngineHarness(
     n: Int,
     val config: EngineConfig = EngineConfig(),
     val network: FakeTorNetwork = FakeTorNetwork(),
+    /** Ver [FakeTor]: `true` simula un Tor real que olvida las autorizaciones de cliente al detenerse. */
+    forgetClientAuthOnStop: Boolean = false,
 ) : AutoCloseable {
     /** Un motor con todas sus dependencias, accesibles para inspección o manipulación en pruebas. */
     class Node(
@@ -28,7 +30,7 @@ class EngineHarness(
     )
 
     val nodes: List<Node> = List(n) {
-        val tor = FakeTor(network)
+        val tor = FakeTor(network, forgetClientAuthOnStop)
         val identities = InMemoryIdentityRepository()
         val contacts = InMemoryContactRepository()
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)

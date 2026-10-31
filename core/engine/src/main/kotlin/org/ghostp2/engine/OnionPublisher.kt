@@ -65,9 +65,11 @@ internal class OnionPublisher(
         knownPrivateKey = service.privateKey.copyOf()
         // Misma clave que ya tiene la identidad: se conserva ese array (el que se borra al borrar todo)
         // y la copia que devolvió Tor se rellena con ceros, en vez de dejar arrays duplicados sueltos.
+        // El contrato de publishService dice que devuelve un array nuevo; aun así, si fuera el mismo
+        // objeto que `held`, borrarlo dejaría la identidad sin clave: nunca se rellena ese array.
         val held = identity.onionPrivateKey
         val key = if (held != null && held.contentEquals(service.privateKey)) {
-            service.privateKey.fill(0)
+            if (service.privateKey !== held) service.privateKey.fill(0)
             held
         } else {
             service.privateKey

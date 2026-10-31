@@ -140,8 +140,14 @@ class FakeTorNetwork {
  * `connect` exige estado [TorState.Ready]; `stop` retira los servicios publicados por esta instancia.
  * Publicar una .onion que ya está publicada lanza `IOException("ya publicado")`, y `unpublishService`
  * solo retira servicios publicados por esta misma instancia.
+ *
+ * Con [forgetsClientAuthOnStop] `= true`, `stop` (y `wipeState`) olvidan las autorizaciones de cliente,
+ * como un Tor real (que solo las guarda en memoria); por defecto se conservan entre reinicios.
  */
-class FakeTor(private val network: FakeTorNetwork) : TorTransport {
+class FakeTor(
+    private val network: FakeTorNetwork,
+    private val forgetsClientAuthOnStop: Boolean = false,
+) : TorTransport {
     private val mutableState = MutableStateFlow<TorState>(TorState.Off)
     override val state: StateFlow<TorState> = mutableState.asStateFlow()
 
@@ -150,6 +156,12 @@ class FakeTor(private val network: FakeTorNetwork) : TorTransport {
     /** Llamadas a [connect] hechas con esta instancia (con éxito o no), para pruebas de reintentos. */
     val connectAttempts = AtomicInteger(0)
 
+    /** Llamadas a [wipeState]. */
+    val wipeStateCalls = AtomicInteger(0)
+
+    /** .onion (sin sufijo) con autorización de cliente registrada ahora mismo. */
+    fun clientAuthOnions(): Set<String> = clientAuth.keys.toSet()
+
     override suspend fun start() {
         mutableState.value = TorState.Starting(0)
         mutableState.value = TorState.Ready
@@ -157,6 +169,14 @@ class FakeTor(private val network: FakeTorNetwork) : TorTransport {
 
     override suspend fun stop() {
         network.unregisterAll(this)
+        if (forgetsClientAuthOnStop) clientAuth.clear()
+        mutableState.value = TorState.Off
+    }
+
+    override suspend fun wipeState() {
+        wipeStateCalls.incrementAndGet()
+        network.unregisterAll(this)
+        clientAuth.clear()
         mutableState.value = TorState.Off
     }
 
