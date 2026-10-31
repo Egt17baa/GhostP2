@@ -13,6 +13,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -97,7 +98,18 @@ sealed interface Notice {
  * recolector entrega cada evento, en orden, primero a `onSessionEvent` (historial) y después a
  * `sessionEvents`.
  *
- * [shutdown] para bucles y handshakes, cierra las sesiones con `Bye` y deja la presencia **vacía**.
+ * **Desemparejar (Task 7, §6.7 bis).** [deliverUnpair] para el bucle normal del contacto (no se
+ * relanza: el enlace queda en modo «borrando») y, hasta entregar `Unpair` o agotar la ventana, usa la
+ * sesión abierta o intenta conectar (y acepta sus llamadas) solo para entregarlo. [retire] lo da de
+ * baja del todo antes de borrarlo del repositorio. Si la sesión trae `PeerUnpaired`, al cerrarse se
+ * para el bucle en el acto (no se vuelve a llamar) y se avisa a `onPeerUnpaired`; no se responde con
+ * `Bye` (el núcleo cierra sin él). [unpairAll] envía `Unpair` a todas las sesiones abiertas (borrar todo).
+ *
+ * Escrituras en el repositorio de contactos: siempre con `contactWrites` (compartido con el motor),
+ * para que marcar `IDENTITY_CHANGED` no resucite un contacto que se está borrando.
+ *
+ * [shutdown] para bucles y handshakes, cierra las sesiones con `Bye` (con `Unpair` las de contactos
+ * que se están borrando) y deja la presencia **vacía**.
  */
 internal class Connections(
     private val tor: TorTransport,
@@ -115,6 +127,13 @@ internal class Connections(
      * rechazados al ver su `Closed`; ver [Conversations]). No debe lanzar.
      */
     private val onSessionEvent: suspend (contactId: String, session: PeerSession, event: SessionEvent) -> Unit,
+    /** Serializa las escrituras en `contacts` con las del motor (borrar, renombrar, emparejar). */
+    private val contactWrites: Mutex,
+    /**
+     * El contacto nos deshizo el emparejamiento (su sesión trajo `PeerUnpaired`); el bucle ya está
+     * parado. Se llama en el recolector de la sesión, una vez cerrada. No debe lanzar.
+     */
+    private val onPeerUnpaired: suspend (contactId: String) -> Unit,
 ) {
     private val engineJob: Job = engineScope.coroutineContext[Job] ?: error("El scope del motor necesita un Job")
 
@@ -157,12 +176,18 @@ internal class Connections(
         }
     }
 
-    /** Estado por contacto; `session`, `outgoing` y `removed` solo se modifican con `mutex` tomado. */
+    /**
+     * Estado por contacto; `session`, `outgoing`, `removed` y `unpairing` solo se modifican con `mutex`
+     * tomado. `unpairing`: se está borrando (o él nos borró): el bucle normal no se relanza.
+     * `peerUnpaired`: su sesión trajo `PeerUnpaired`.
+     */
     private class Link(val id: String, @Volatile var contact: Contact) {
         val mutex = Mutex()
         val session = MutableStateFlow<Active?>(null)
         var outgoing: Outgoing? = null
-        var removed = false
+        @Volatile var removed = false
+        @Volatile var unpairing = false
+        @Volatile var peerUnpaired = false
         var loop: Job? = null
     }
 
@@ -252,12 +277,20 @@ internal class Connections(
         }
         val next = current.filterKeys { it in byId }.toMutableMap()
         for (contact in list) {
-            val link = next.getOrPut(contact.id) { Link(contact.id, contact) }
+            val existing = next[contact.id]
+            // Un enlace dado de baja solo vuelve con un emparejamiento nuevo (otro pairSecret); con el
+            // mismo contacto es una instantánea atrasada y se queda como está.
+            val stale = existing != null && (existing.removed || existing.unpairing) &&
+                !existing.contact.pairSecret.contentEquals(contact.pairSecret)
+            if (stale) removeLink(existing)
+            val link = if (existing == null || stale) Link(contact.id, contact).also { next[contact.id] = it } else existing
             link.mutex.withLock {
                 link.contact = contact
                 // `exitIfInactive` pone `loop = null` con este mismo cerrojo; `!isActive` recupera además
                 // un bucle que terminó por una excepción inesperada.
-                if (contact.status == ContactStatus.ACTIVE && link.loop?.isActive != true && !closed) {
+                if (contact.status == ContactStatus.ACTIVE && link.loop?.isActive != true && !closed &&
+                    !link.removed && !link.unpairing
+                ) {
                     link.loop = loopsScope.launch { runLoop(link) }
                 }
                 refresh(link)
@@ -274,8 +307,110 @@ internal class Connections(
             presence.update { it - link.id }
             link.session.value
         }
-        // Task 7 envía antes Unpair; aquí basta con cerrar (con Bye).
+        // Borrado por el motor: ya se intentó Unpair ([retire]); si no, se cierra con Bye.
         active?.let { a -> sessionsScope.launch { a.peer.close() } }
+    }
+
+    // --- Desemparejar (Task 7) ---
+
+    /**
+     * Para el bucle normal del contacto y trata de entregarle `Unpair` durante como mucho
+     * `windowMillis`: por la sesión abierta si la hay; si no, llamándole (con la espera creciente de
+     * siempre, recortada a la ventana) y aceptando sus llamadas, solo para entregarlo. Devuelve true
+     * solo si `sendUnpair()` devolvió true. Sin enlace, con el contacto en `IDENTITY_CHANGED` (la
+     * autenticación fallaría), si él nos borró a la vez, si se detiene el motor o si el llamante se
+     * cancela (que entonces relanza) deja de intentarlo. El contacto no vuelve a tener bucle normal.
+     */
+    suspend fun deliverUnpair(contactId: String, windowMillis: Long): Boolean {
+        val link = links.value[contactId] ?: return false
+        link.mutex.withLock {
+            link.unpairing = true
+            link.loop?.cancel()
+            link.loop = null
+        }
+        if (link.contact.status != ContactStatus.ACTIVE) return false
+        // En el scope de los bucles: shutdown() lo cancela.
+        val work = loopsScope.async { deliver(link, windowMillis) }
+        return try {
+            work.await()
+        } catch (e: CancellationException) {
+            work.cancel()
+            if (!currentCoroutineContext().isActive) throw e
+            false // motor detenido
+        }
+    }
+
+    private suspend fun deliver(link: Link, windowMillis: Long): Boolean {
+        val deadline = System.nanoTime() + windowMillis * NANOS_PER_MILLI
+        val remaining = { (deadline - System.nanoTime()) / NANOS_PER_MILLI }
+        val backoff = Backoff(config.backoffMinMillis, config.backoffMaxMillis, random)
+        while (true) {
+            if (closed || link.removed || link.peerUnpaired) return false
+            val active = link.session.value
+            if (active != null) {
+                if (active.started && active.peer.sendUnpair()) return true
+                val left = remaining()
+                if (left <= 0) return false
+                if (active.started) {
+                    // Ya se cerraba: esperar a que quede libre el hueco (o a otra sesión).
+                    withTimeoutOrNull(left) { link.session.first { it !== active } }
+                } else {
+                    delay(minOf(left, START_POLL_MILLIS)) // a punto de terminar su start()
+                }
+                continue
+            }
+            val left = remaining()
+            if (left <= 0) return false
+            val outcome = withTimeoutOrNull(left) { attempt(link) } ?: return false
+            when (outcome) {
+                Outcome.Connected -> continue
+                Outcome.IdentityChanged -> return false
+                Outcome.Busy, Outcome.Failed -> {
+                    val wait = if (outcome == Outcome.Failed) backoff.next() else backoff.jitter(config.backoffMinMillis)
+                    val rest = remaining()
+                    if (rest <= 0) return false
+                    // Se despierta antes si él nos llama (sesión entrante).
+                    withTimeoutOrNull(minOf(wait, rest)) { link.session.first { it != null } }
+                }
+            }
+        }
+    }
+
+    /**
+     * Baja definitiva del contacto antes de borrarlo del repositorio: sin bucle, sin presencia y sin
+     * sesiones nuevas. Si aún queda una sesión (p. ej. entró una llamada suya al agotarse la ventana),
+     * se le envía `Unpair` por si acaso (sin esperar). Idempotente; sin enlace no hace nada.
+     */
+    suspend fun retire(contactId: String) {
+        val link = links.value[contactId] ?: return
+        val active = link.mutex.withLock {
+            link.removed = true
+            link.unpairing = true
+            link.loop?.cancel()
+            link.loop = null
+            link.outgoing?.abandon()
+            presence.update { it - link.id }
+            link.session.value
+        }
+        active?.let { a -> sessionsScope.launch { a.peer.sendUnpair() } }
+    }
+
+    /**
+     * Borrar todo: para todos los bucles y envía `Unpair` en paralelo a cada sesión abierta, esperando
+     * como mucho `timeoutMillis` en total (los envíos que no terminen los corta [shutdown]).
+     */
+    suspend fun unpairAll(timeoutMillis: Long) {
+        val sessions = links.value.values.mapNotNull { link ->
+            link.mutex.withLock {
+                link.unpairing = true
+                link.loop?.cancel()
+                link.loop = null
+                link.outgoing?.abandon()
+                link.session.value?.takeIf { it.started }
+            }
+        }
+        val sends = sessions.map { a -> sessionsScope.launch { a.peer.sendUnpair() } }
+        withTimeoutOrNull(timeoutMillis) { sends.joinAll() }
     }
 
     private suspend fun runLoop(link: Link) {
@@ -404,16 +539,19 @@ internal class Connections(
     private suspend fun markIdentityChanged(link: Link): Boolean {
         val used = link.contact
         val marked = withContext(NonCancellable) {
-            val stored = contacts.all().firstOrNull { it.id == link.id } ?: return@withContext false
-            if (stored.status != ContactStatus.ACTIVE ||
-                !stored.peerIdentity.contentEquals(used.peerIdentity) ||
-                !stored.pairSecret.contentEquals(used.pairSecret)
-            ) {
-                return@withContext false
-            }
-            val changed = stored.copy(status = ContactStatus.IDENTITY_CHANGED)
-            // Primero se guarda; la presencia solo muestra IDENTITY_CHANGED una vez persistido.
-            contacts.upsert(changed)
+            // Con `contactWrites`: un borrado en curso o ya hecho no se deshace con este upsert.
+            val changed = contactWrites.withLock {
+                if (link.removed || link.unpairing) return@withLock null
+                val stored = contacts.all().firstOrNull { it.id == link.id } ?: return@withLock null
+                if (stored.status != ContactStatus.ACTIVE ||
+                    !stored.peerIdentity.contentEquals(used.peerIdentity) ||
+                    !stored.pairSecret.contentEquals(used.pairSecret)
+                ) {
+                    return@withLock null
+                }
+                // Primero se guarda; la presencia solo muestra IDENTITY_CHANGED una vez persistido.
+                stored.copy(status = ContactStatus.IDENTITY_CHANGED).also { contacts.upsert(it) }
+            } ?: return@withContext false
             link.mutex.withLock {
                 link.contact = changed
                 refresh(link)
@@ -526,10 +664,15 @@ internal class Connections(
         // Único recolector de larga vida, suscrito ya (UNDISPATCHED) antes de start().
         sessionsScope.launch(start = CoroutineStart.UNDISPATCHED) {
             try {
+                var unpaired = false
                 peer.events.transformWhile { emit(it); it !is SessionEvent.Closed }.collect { event ->
                     onSessionEvent(link.id, peer, event)
                     sessionEvents.emit(link.id to event)
-                    if (event is SessionEvent.Closed) onSessionClosed(link, active, event.reason)
+                    if (event is SessionEvent.PeerUnpaired) unpaired = true
+                    // `PeerUnpaired` llega antes que `Closed`, cuyo motivo puede ser otro si ya nos cerrábamos.
+                    if (event is SessionEvent.Closed) {
+                        onSessionClosed(link, active, unpaired || event.reason == CloseReason.PEER_UNPAIRED)
+                    }
                 }
             } finally {
                 job.cancel()
@@ -546,17 +689,24 @@ internal class Connections(
 
     /**
      * Sesión cerrada: el contacto queda sin sesión (`OFFLINE`) y su bucle sigue con la espera mínima.
-     * Gancho Task 7: `reason == PEER_UNPAIRED` deberá borrar el contacto y avisar; por ahora se trata
-     * como cualquier otro motivo.
+     * Si el contacto nos deshizo el emparejamiento ([peerUnpaired]), el bucle se para ANTES de dejar
+     * libre el hueco (así no llega a volver a llamar), no se relanza y se avisa a `onPeerUnpaired`.
      */
-    @Suppress("UNUSED_PARAMETER")
-    private suspend fun onSessionClosed(link: Link, active: Active, reason: CloseReason) {
+    private suspend fun onSessionClosed(link: Link, active: Active, peerUnpaired: Boolean) {
         link.mutex.withLock {
+            if (peerUnpaired) {
+                link.peerUnpaired = true
+                link.unpairing = true
+                link.loop?.cancel()
+                link.loop = null
+                link.outgoing?.abandon()
+            }
             if (link.session.value === active) {
                 link.session.value = null
                 refresh(link)
             }
         }
+        if (peerUnpaired) onPeerUnpaired(link.id)
     }
 
     /** Cierra una conexión perdedora sin `Bye` y destruye su canal (PROTOCOLO §7, §10.5). */
@@ -580,8 +730,9 @@ internal class Connections(
     private fun iAmLower(contact: Contact): Boolean = compareUnsigned(identity.publicKey, contact.peerIdentity) < 0
 
     /**
-     * Detiene todo: observador, bucles y handshakes; cierra las sesiones con `Bye` (en paralelo, cada
-     * una espera como mucho 2 s) y deja la presencia vacía.
+     * Detiene todo: observador, bucles y handshakes; cierra las sesiones con `Bye` (con `Unpair`
+     * las de contactos que se están borrando; en paralelo, cada una espera como mucho 2 s) y deja la
+     * presencia vacía.
      */
     suspend fun shutdown() {
         closed = true
@@ -590,10 +741,12 @@ internal class Connections(
         val sessions = links.value.values.mapNotNull { link ->
             link.mutex.withLock {
                 link.removed = true
-                link.session.value
+                link.session.value?.let { it to link.unpairing }
             }
         }
-        sessions.map { a -> sessionsScope.launch { a.peer.close() } }.joinAll()
+        sessions.map { (a, unpairing) ->
+            sessionsScope.launch { if (unpairing) a.peer.sendUnpair() else a.peer.close() }
+        }.joinAll()
         sessionsJob.cancelAndJoin()
         links.value = emptyMap()
         presence.value = emptyMap()
@@ -606,6 +759,11 @@ internal class Connections(
 
         /** Espera máxima a los handshakes entrantes antes de envolver mi llamada no preferida. */
         const val INCOMING_WAIT_MILLIS = 30_000L
+
+        /** Sondeo mientras una sesión recién envuelta termina su `start()`. */
+        const val START_POLL_MILLIS = 10L
+
+        const val NANOS_PER_MILLI = 1_000_000L
     }
 }
 

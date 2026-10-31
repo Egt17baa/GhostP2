@@ -216,7 +216,7 @@ class ConnectionsTest {
         }
         h.contacts(0).delete(bInA)
         withTimeout(TIMEOUT) { h.engine(0).presence.first { !it.containsKey(bInA) } }
-        // Se cierra con Bye (Task 7 enviará antes Unpair).
+        // Borrado directo del repositorio: se cierra con Bye (deleteContact envía antes Unpair).
         assertEquals(SessionEvent.Closed(CloseReason.PEER_BYE), withTimeout(TIMEOUT) { bClosed.await() }.second)
         assertNull(h.engine(0).sessionFor(bInA))
         awaitPresence(h.engine(1), aInB, Presence.OFFLINE)

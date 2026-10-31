@@ -386,6 +386,9 @@ class InvitationTest {
         )
         assertTrue(bContacts.all().isEmpty())
         assertNull(b.myOnion.value)
+        // Deshecho = olvidado: escribir al contacto que no llegó a guardarse no guarda nada.
+        b.sendText(contactIdFor(h.identities(0).load()!!.identityPublic), "hola")
+        assertTrue(b.conversations.value.isEmpty())
         // Solo queda la .onion de A (que sí dio por bueno el emparejamiento: caso asimétrico).
         assertInstanceOf(InvitationState.Paired::class.java, awaitEnd(handle))
         assertEquals(setOf(h.engine(0).myOnion.value), h.network.published.value.keys)

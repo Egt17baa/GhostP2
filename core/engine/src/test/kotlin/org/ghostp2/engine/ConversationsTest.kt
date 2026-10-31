@@ -398,24 +398,28 @@ class ConversationsTest {
 
     private val token = Any()
 
-    private fun open(clock: () -> Long = { 0L }, max: Int = 500) = Conversations(clock, max).also { it.open() }
+    /** En las pruebas unitarias los contactos "c" y "d" son conocidos; cualquier otro, no. */
+    private fun open(clock: () -> Long = { 0L }, max: Int = 500) = Conversations(clock, max).also {
+        it.open()
+        it.applySnapshot(listOf("c", "d"))
+    }
 
     private fun outbound(session: Any = token, open: Boolean = true, id: () -> String) =
         Conversations.Outbound(session, { open }, id)
-
-    /** En las pruebas unitarias todos los ids de contacto se dan por conocidos salvo que se diga. */
-    private fun Conversations.addOutgoing(contactId: String, content: ChatContent, outbound: Conversations.Outbound?) =
-        addOutgoing(contactId, content, { true }, outbound)
 
     @Test
     fun unknownContactStoresNothingAndNeverCallsTheSession() {
         val c = open()
         var called = false
         val photo = byteArrayOf(6, 6)
-        val id = c.addOutgoing("c", ChatContent.Photo(photo), { false }, outbound { called = true; "x" })
+        val id = c.addOutgoing("z", ChatContent.Photo(photo), outbound { called = true; "x" })
         assertFalse(called)
         assertTrue(Regex("[0-9a-f]{24}").matches(id))
         assertTrue(photo.all { it == 0.toByte() })
+        // Tampoco se guarda lo que llega de un id desconocido.
+        val incoming = byteArrayOf(7, 7)
+        assertFalse(c.onEvent("z", token, SessionEvent.PhotoReceived("i1", incoming)))
+        assertTrue(incoming.all { it == 0.toByte() })
         assertTrue(c.conversations.value.isEmpty())
     }
 

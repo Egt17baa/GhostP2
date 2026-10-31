@@ -72,6 +72,12 @@ internal class OnionPublisher(
         mutex.withLock { publishedOnion?.let { retire(it) } }
     }
 
+    /** Rellena con ceros la copia de la clave ED25519-V3 (al descartar este publicador). */
+    fun wipeKeys() {
+        knownPrivateKey?.fill(0)
+        knownPrivateKey = null
+    }
+
     /** Retira el servicio; si Tor falla, el error se propaga y el estado sigue diciendo "publicado". */
     private suspend fun retire(onion: String) {
         tor.unpublishService(onion)

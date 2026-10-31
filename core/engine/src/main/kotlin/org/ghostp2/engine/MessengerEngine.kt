@@ -1,6 +1,7 @@
 package org.ghostp2.engine
 
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CompletableJob
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -52,12 +53,20 @@ sealed interface EngineStatus {
     data class Error(val message: String) : EngineStatus
 }
 
+/** Resultado de [MessengerEngine.deleteContact]: si el contacto recibió el aviso `Unpair`. */
+enum class UnpairDelivery { DELIVERED, NOT_DELIVERED }
+
+/** Longitud máxima del nombre de un contacto, en caracteres Unicode (puntos de código), tras recortar espacios. */
+const val MAX_CONTACT_NAME_CHARS = 64
+
 /**
  * Motor de mensajería P2P sobre Tor. En esta fase: arranque/parada, identidad local, escucha local,
  * publicación de la .onion permanente (ver [OnionPublisher]), invitaciones/emparejamiento
  * ([createInvitation], [acceptInvitation]) y presencia con conexión automática a los contactos
  * ([presence], [onNetworkChanged], [notices]; ver [Connections]) y conversaciones en memoria
- * ([conversations], [sendText], [sendPhoto], [clearConversation]; ver [Conversations]).
+ * ([conversations], [sendText], [sendPhoto], [clearConversation]; ver [Conversations]), y gestión de
+contactos: [deleteContact] (con aviso `Unpair`), aviso recibido ([Notice.ContactUnpairedYou]),
+[renameContact], [setVerified] y [wipeAll].
  *
  * Todas las corrutinas del motor cuelgan de un `SupervisorJob` hijo de `scope` (regla R7: el scope
  * inyectado debe ser `SupervisorJob() + Dispatchers.Default`); [stop] las cancela y espera, de modo que
@@ -117,14 +126,23 @@ class MessengerEngine(
 
     @Volatile private var connections: Connections? = null
 
+    /**
+     * Historial y, bajo su mismo cerrojo, los ids de contactos conocidos (instantáneas de
+     * `contacts.contacts` más altas y bajas locales con marcas; ver [Conversations]). Sin contactos
+     * conocidos con el motor parado. Existe ya mientras Tor arranca, a diferencia de los `links` de
+     * [Connections].
+     */
     private val chats = Conversations(clock)
 
     /**
-     * Ids de los contactos guardados, legibles sin suspender (espejo de `contacts.contacts`, más el
-     * contacto recién emparejado al guardarlo). Vacío con el motor parado. Existe ya mientras Tor
-     * arranca, a diferencia de los `links` de [Connections].
+     * Serializa TODAS las escrituras del motor en `contacts` (emparejar, deshacer, borrar, renombrar,
+     * verificar, marcar `IDENTITY_CHANGED`): una lectura-modificación-escritura nunca resucita un
+     * contacto borrado ni pisa un emparejamiento nuevo.
      */
-    private val knownContacts = MutableStateFlow<Set<String>>(emptySet())
+    private val contactWrites = Mutex()
+
+    /** Borrados en curso por id (local o aviso recibido): las llamadas simultáneas comparten el resultado. */
+    private val deletions = ConcurrentHashMap<String, CompletableDeferred<UnpairDelivery>>()
 
     /**
      * Conversaciones por id de contacto, en orden de llegada (como mucho
@@ -235,20 +253,23 @@ class MessengerEngine(
     /** Arranque completo: identidad, Tor, listener y publicación. Lanza [TorStartException] si Tor falla. */
     private suspend fun bootstrap(engineScope: CoroutineScope) {
         // Historial activo desde el principio: un envío mientras Tor arranca queda como NOT_CONNECTED.
-        knownContacts.value = contacts.all().mapTo(HashSet()) { it.id }
-        engineScope.launch(start = CoroutineStart.UNDISPATCHED) {
-            contacts.contacts.collect { list -> knownContacts.value = list.mapTo(HashSet()) { it.id } }
-        }
         chats.open()
+        chats.applySnapshot(contacts.all().map { it.id })
+        engineScope.launch(start = CoroutineStart.UNDISPATCHED) {
+            contacts.contacts.collect { list -> chats.applySnapshot(list.map { it.id }) }
+        }
         val id = identities.load() ?: createIdentity()
         identity = id
         startTor(engineScope)
         val c = Connections(
             tor, contacts, config, random, engineScope, KeyPair25519(id.identityPrivate, id.identityPublic),
             mutablePresence, mutableNotices, mutableSessionEvents,
-        ) { contactId, session, event ->
-            if (chats.onEvent(contactId, session, event)) mutableNotices.emit(Notice.MessageArrived(contactId))
-        }
+            onSessionEvent = { contactId, session, event ->
+                if (chats.onEvent(contactId, session, event)) mutableNotices.emit(Notice.MessageArrived(contactId))
+            },
+            contactWrites = contactWrites,
+            onPeerUnpaired = ::onPeerUnpaired,
+        )
         connections = c
         val l = Listener(engineScope, ::onIncoming)
         listener = l
@@ -268,8 +289,8 @@ class MessengerEngine(
      * Envía un texto (máx. [PeerSession.MAX_TEXT_CHARS] caracteres Unicode) y devuelve su id. No
      * suspende. El elemento queda en [conversations] al volver: `Sending` si hay sesión (después
      * `Delivered` o `Failed`), o ya `Failed(NOT_CONNECTED)` si no la hay; nunca se encola ni se reintenta.
-     * Con el motor parado o si [contactId] no es un contacto guardado, devuelve un id y no guarda nada
-     * (regla R15).
+     * Con el motor parado o si [contactId] no es un contacto guardado (o se está borrando, ver
+     * [deleteContact]), devuelve un id y no guarda nada (regla R15).
      * @throws IllegalArgumentException si el texto es demasiado largo (como `PeerSession`; no se guarda nada).
      */
     fun sendText(contactId: String, text: String): String {
@@ -277,7 +298,7 @@ class MessengerEngine(
             "El texto supera ${PeerSession.MAX_TEXT_CHARS} caracteres"
         }
         val peer = sessionFor(contactId)
-        return chats.addOutgoing(contactId, ChatContent.Text(text), known(contactId), peer?.let { p -> outbound(p) { p.sendText(text) } })
+        return chats.addOutgoing(contactId, ChatContent.Text(text), peer?.let { p -> outbound(p) { p.sendText(text) } })
     }
 
     /**
@@ -292,15 +313,12 @@ class MessengerEngine(
         val copy = jpeg.copyOf()
         val peer = sessionFor(contactId)
         try {
-            return chats.addOutgoing(contactId, ChatContent.Photo(copy), known(contactId), peer?.let { p -> outbound(p) { p.sendPhoto(copy) } })
+            return chats.addOutgoing(contactId, ChatContent.Photo(copy), peer?.let { p -> outbound(p) { p.sendPhoto(copy) } })
         } catch (e: Exception) {
             Primitives.wipe(copy)
             throw e
         }
     }
-
-    /** Comprobación de contacto guardado; `Conversations` la evalúa con su cerrojo tomado. */
-    private fun known(contactId: String): () -> Boolean = { contactId in knownContacts.value }
 
     private fun outbound(peer: PeerSession, send: () -> String) =
         Conversations.Outbound(peer, { peer.isOpen.value }, send)
@@ -308,6 +326,183 @@ class MessengerEngine(
     /** Borra la conversación con el contacto (fotos rellenadas con ceros); las demás no cambian. */
     fun clearConversation(contactId: String) {
         chats.clear(contactId)
+    }
+
+    // --- Contactos: borrar, aviso recibido, renombrar, verificar y borrar todo (Task 7) ---
+
+    /**
+     * Borra el contacto avisándole (spec §6.7 bis):
+     * 1. Lo olvida en el acto ([Conversations.forget]): su conversación se borra y desde aquí ningún
+     *    envío ni recepción para ese id guarda nada. Su bucle de reconexión se para y no vuelve.
+     * 2. Entrega `Unpair` por la sesión abierta o, sin ella, intenta conectar (y acepta sus llamadas)
+     *    solo para entregarlo, durante como mucho `EngineConfig.unpairDeliveryWindowMillis`.
+     * 3. Borrado local, siempre y en este orden: `contacts.delete`, `tor.removeClientAuth(peerOnion)`
+     *    y re-publicación de la .onion sin su clave (retirada si no quedan contactos ni emparejamientos
+     *    en curso, ver [reservePublication]).
+     *
+     * Devuelve [UnpairDelivery.DELIVERED] solo si `PeerSession.sendUnpair()` devolvió true (la trama
+     * `Unpair` se escribió en el flujo; el núcleo no tiene acuse para ella).
+     *
+     * El borrado local ocurre siempre una vez empezado: si el motor se detiene (o el llamante se
+     * cancela) a mitad de la entrega se deja de intentar y se borra igualmente (el llamante cancelado
+     * recibe su cancelación). Con el motor parado no hay entrega posible: `NOT_DELIVERED` y borrado.
+     * Llamadas simultáneas con el mismo id comparten el resultado del único borrado real; un id que no
+     * es un contacto guardado (o ya borrado) devuelve `NOT_DELIVERED` sin hacer nada. Si el propio
+     * repositorio falla al borrar se relanza su excepción (los pasos 3 posteriores no se hacen; en
+     * esta ejecución el contacto sigue olvidado).
+     */
+    suspend fun deleteContact(contactId: String): UnpairDelivery {
+        val mine = CompletableDeferred<UnpairDelivery>()
+        deletions.putIfAbsent(contactId, mine)?.let { return it.await() }
+        try {
+            return runDelete(contactId).also { mine.complete(it) }
+        } catch (e: CancellationException) {
+            mine.complete(UnpairDelivery.NOT_DELIVERED)
+            throw e
+        } catch (e: Exception) {
+            mine.completeExceptionally(e)
+            throw e
+        } finally {
+            deletions.remove(contactId, mine)
+        }
+    }
+
+    private suspend fun runDelete(contactId: String): UnpairDelivery {
+        val contact = contacts.all().firstOrNull { it.id == contactId } ?: return UnpairDelivery.NOT_DELIVERED
+        chats.forget(contactId)
+        var delivered = false
+        try {
+            delivered = connections?.deliverUnpair(contactId, config.unpairDeliveryWindowMillis) == true
+        } finally {
+            withContext(NonCancellable) { removeLocally(contact) }
+        }
+        return if (delivered) UnpairDelivery.DELIVERED else UnpairDelivery.NOT_DELIVERED
+    }
+
+    /**
+     * El contacto nos deshizo el emparejamiento (su sesión ya está cerrada, sin `Bye`, y su bucle
+     * parado): mismo borrado local que [deleteContact] y después [Notice.ContactUnpairedYou] con el
+     * nombre que tenía. Si ya se estaba borrando aquí, ese borrado lo termina (sin aviso). No lanza.
+     */
+    private suspend fun onPeerUnpaired(contactId: String) {
+        val mine = CompletableDeferred<UnpairDelivery>()
+        if (deletions.putIfAbsent(contactId, mine) != null) return
+        try {
+            val contact = contacts.all().firstOrNull { it.id == contactId } ?: return
+            withContext(NonCancellable) { removeLocally(contact) }
+            mutableNotices.emit(Notice.ContactUnpairedYou(contactId, contact.name))
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // Fallo del repositorio: el contacto queda olvidado en esta ejecución; nada más que hacer.
+        } finally {
+            mine.complete(UnpairDelivery.NOT_DELIVERED)
+            deletions.remove(contactId, mine)
+        }
+    }
+
+    /**
+     * Borrado local: olvidar (idempotente), baja en [Connections], `contacts.delete`,
+     * `removeClientAuth` y re-publicación. Con `publication` tomado, la re-publicación no ocurre si el
+     * motor ya retiró su .onion al detenerse (`publisher` nulo). Llamar sin cancelación.
+     */
+    private suspend fun removeLocally(contact: Contact) {
+        chats.forget(contact.id)
+        connections?.retire(contact.id)
+        contactWrites.withLock { contacts.delete(contact.id) }
+        runCatching { tor.removeClientAuth(contact.peerOnion) }
+        publication.withLock { publisher?.let { p -> runCatching { syncLocked(p) } } }
+    }
+
+    /**
+     * Cambia el nombre del contacto (se guarda en el repositorio; también con el motor parado). Se
+     * recortan los espacios de los extremos.
+     * @throws IllegalArgumentException si queda vacío o supera [MAX_CONTACT_NAME_CHARS] caracteres.
+     * @throws NoSuchElementException si [contactId] no es un contacto guardado.
+     */
+    suspend fun renameContact(contactId: String, name: String) {
+        val trimmed = name.trim()
+        require(trimmed.isNotEmpty()) { "El nombre no puede estar vacío" }
+        require(trimmed.codePointCount(0, trimmed.length) <= MAX_CONTACT_NAME_CHARS) {
+            "El nombre supera $MAX_CONTACT_NAME_CHARS caracteres"
+        }
+        updateContact(contactId) { it.copy(name = trimmed) }
+    }
+
+    /**
+     * Marca el contacto como verificado (o no) y lo guarda (también con el motor parado).
+     * @throws NoSuchElementException si [contactId] no es un contacto guardado.
+     */
+    suspend fun setVerified(contactId: String, verified: Boolean) {
+        updateContact(contactId) { it.copy(verified = verified) }
+    }
+
+    private suspend fun updateContact(contactId: String, change: (Contact) -> Contact) {
+        contactWrites.withLock {
+            val current = contacts.all().firstOrNull { it.id == contactId }
+                ?: throw NoSuchElementException("Contacto desconocido")
+            contacts.upsert(change(current))
+        }
+    }
+
+    /**
+     * Borra todo (spec §6.7 bis): envía `Unpair` en paralelo a los contactos con sesión abierta
+     * (mejor esfuerzo, como mucho [WIPE_UNPAIR_MILLIS] en total), detiene el motor como [stop] y, en
+     * la misma sección crítica (ningún [start] se cuela en medio), quita las autorizaciones de cliente
+     * de cada contacto, borra contactos e identidad y rellena con ceros el material de claves que
+     * tenía cargado. El siguiente [start] crea una identidad nueva y, al publicarse, una .onion nueva.
+     * Funciona con el motor parado y aunque Tor falle (sus errores se ignoran); termina siempre en
+     * `Stopped`. Solo lanza si falla el borrado de los repositorios (los fallos al detener el motor
+     * se adjuntan como suprimidos de ese error, o se ignoran si el borrado fue bien).
+     */
+    suspend fun wipeAll() {
+        connections?.unpairAll(WIPE_UNPAIR_MILLIS)
+        stopRequests.incrementAndGet()
+        bootJob?.cancel()
+        lifecycle.withLock {
+            withContext(NonCancellable) {
+                var releaseFailure: Exception? = null
+                try {
+                    if (running) releaseResources()
+                } catch (e: Exception) {
+                    releaseFailure = e
+                } finally {
+                    mutableStatus.value = EngineStatus.Stopped
+                }
+                try {
+                    wipeStorage()
+                } catch (e: Exception) {
+                    releaseFailure?.let { e.addSuppressed(it) }
+                    throw e
+                }
+            }
+        }
+    }
+
+    /** Autorizaciones, contactos e identidad; con ceros solo si el borrado fue bien (si no, siguen en uso). */
+    private suspend fun wipeStorage() {
+        val stored = runCatching { contacts.all() }.getOrDefault(emptyList())
+        val storedIdentity = runCatching { identities.load() }.getOrNull()
+        stored.forEach { runCatching { tor.removeClientAuth(it.peerOnion) } }
+        var failure: Exception? = null
+        contactWrites.withLock {
+            try {
+                contacts.wipe()
+            } catch (e: Exception) {
+                failure = e
+            }
+        }
+        try {
+            identities.wipe()
+        } catch (e: Exception) {
+            failure?.addSuppressed(e) ?: run { failure = e }
+        }
+        failure?.let { throw it }
+        stored.forEach { Primitives.wipe(it.pairSecret, it.clientAuthPrivateForPeerOnion) }
+        storedIdentity?.let { id ->
+            Primitives.wipe(id.identityPrivate)
+            id.onionPrivateKey?.let { Primitives.wipe(it) }
+        }
     }
 
     /** Sesión abierta con el contacto, si la hay (para las tareas 6–7). */
@@ -551,17 +746,17 @@ class MessengerEngine(
     }
 
     /**
-     * Regla R10: devuelve mi .onion permanente para la oferta. Sin contactos guardados, cada
-     * emparejamiento en curso registra su propia clave pendiente (`key`), de modo que la .onion sigue
-     * publicada mientras quede alguno y terminar uno nunca la retira bajo otro. Con contactos ya está
-     * publicada por ellos y no se toca. Nunca se publica sin autorización de cliente.
+     * Regla R10: devuelve mi .onion permanente para la oferta. Cada emparejamiento en curso registra
+     * siempre su propia clave pendiente (`key`), haya o no contactos: es su reserva de la publicación.
+     * Las claves pendientes solo se publican cuando no queda ningún contacto ([syncLocked]), así que
+     * con contactos no cambia nada (ni se vuelve a publicar), pero si se borra el último contacto
+     * mientras un emparejamiento está en curso la .onion sigue publicada bajo él; y terminar uno nunca
+     * la retira bajo otro. Nunca se publica sin autorización de cliente.
      */
     private suspend fun reservePublication(key: ByteArray): String = publication.withLock {
         val p = publisher ?: throw IllegalStateException(InvitationMessages.NOT_ACTIVE)
-        if (contacts.all().isEmpty()) {
-            pendingClientAuthKeys[key.toHex()] = key.copyOf()
-            syncLocked(p)
-        }
+        pendingClientAuthKeys[key.toHex()] = key.copyOf()
+        syncLocked(p)
         p.publishedOnion ?: throw IllegalStateException("No se pudo publicar la .onion permanente")
     }
 
@@ -572,10 +767,15 @@ class MessengerEngine(
         }
     }
 
-    /** Publica según contactos guardados + claves pendientes. Llamar con `publication` tomado. */
+    /**
+     * Publica según los contactos guardados o, si no queda ninguno, según las claves pendientes de los
+     * emparejamientos en curso ([reservePublication]). Llamar con `publication` tomado.
+     */
     private suspend fun syncLocked(p: OnionPublisher) {
         val id = identity ?: throw IllegalStateException(InvitationMessages.NOT_ACTIVE)
-        identity = p.sync(id, contacts.all(), pendingClientAuthKeys.values.toList())
+        val saved = contacts.all()
+        val reserved = if (saved.isEmpty()) pendingClientAuthKeys.values.toList() else emptyList()
+        identity = p.sync(id, saved, reserved)
         mutableMyOnion.value = p.publishedOnion
     }
 
@@ -600,9 +800,12 @@ class MessengerEngine(
             verified = false,
             status = ContactStatus.ACTIVE,
         )
-        contacts.upsert(contact)
-        knownContacts.update { it + id } // sin esperar al flujo: ya se le puede escribir
         try {
+            // Conocido antes de guardarlo: un mensaje suyo que llegue enseguida ya se guarda.
+            contactWrites.withLock {
+                chats.addKnown(id)
+                contacts.upsert(contact)
+            }
             tor.addClientAuth(result.peerOnion, result.clientAuthPrivateForPeerOnion)
             publication.withLock {
                 pendingClientAuthKeys.remove(myClientAuthPublic.toHex())
@@ -619,10 +822,15 @@ class MessengerEngine(
         return id
     }
 
-    /** Deshace un [finishPairing] a medias; cada paso es independiente (lo que falle se ignora). */
+    /**
+     * Deshace un [finishPairing] a medias; cada paso es independiente (lo que falle se ignora). Sin
+     * contacto anterior se olvida ([Conversations.forget]) antes de borrarlo del repositorio.
+     */
     private suspend fun rollbackPairing(contact: Contact, previous: Contact?) {
-        runCatching { if (previous != null) contacts.upsert(previous) else contacts.delete(contact.id) }
-        if (previous == null) knownContacts.update { it - contact.id }
+        if (previous == null) chats.forget(contact.id)
+        contactWrites.withLock {
+            runCatching { if (previous != null) contacts.upsert(previous) else contacts.delete(contact.id) }
+        }
         runCatching { tor.removeClientAuth(contact.peerOnion) }
         if (previous != null) runCatching { tor.addClientAuth(previous.peerOnion, previous.clientAuthPrivateForPeerOnion) }
         publication.withLock {
@@ -649,7 +857,6 @@ class MessengerEngine(
         } finally {
             // Siempre, aunque algo de lo anterior falle: el historial no sobrevive a una parada.
             chats.clearAll()
-            knownContacts.value = emptySet()
         }
     }
 
@@ -676,9 +883,13 @@ class MessengerEngine(
         engineJob?.cancelAndJoin()
         engineJob = null
         activeInvitation.set(null)
-        runCatching { publisher?.unpublish() }
-        publisher = null
-        pendingClientAuthKeys.clear()
+        // Con `publication`: un borrado de contacto que termina ahora no vuelve a publicar después.
+        publication.withLock {
+            runCatching { publisher?.unpublish() }
+            publisher?.wipeKeys()
+            publisher = null
+            pendingClientAuthKeys.clear()
+        }
         runCatching { tor.stop() }
         mutableMyOnion.value = null
         identity = null
@@ -691,6 +902,9 @@ private const val BACKLOG = 50
 
 /** Avisos en búfer por suscriptor de [MessengerEngine.notices]. */
 private const val NOTICE_BUFFER = 256
+
+/** Tiempo total máximo de [MessengerEngine.wipeAll] para enviar `Unpair` a las sesiones abiertas. */
+private const val WIPE_UNPAIR_MILLIS = 2_500L
 
 /** Eventos de sesión en búfer por suscriptor de `sessionEvents`. */
 private const val SESSION_EVENT_BUFFER = 1_024

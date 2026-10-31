@@ -87,7 +87,27 @@ internal const val MAX_ITEMS_PER_CONVERSATION = 500
  *
  * Entre [clearAll] y el siguiente [open] no se guarda nada: los envíos devuelven un id sin llamar a
  * la sesión y las fotos (salientes o entrantes) se borran en el acto. Igual con un contacto que no
- * existe (`known` falso, evaluado con el cerrojo tomado): nunca se crea una conversación fantasma.
+ * es conocido (evaluado con el cerrojo tomado): nunca se crea una conversación fantasma.
+ *
+ * **Contactos conocidos.** El conjunto de ids conocidos vive aquí, bajo el mismo cerrojo que el
+ * historial, y se alimenta de dos fuentes:
+ * - Instantáneas del repositorio ([applySnapshot], desde el flujo `contacts.contacts`), que pueden
+ *   llegar con retraso respecto a los cambios locales.
+ * - Cambios locales del motor: [addKnown] (emparejamiento) y [forget] (borrado, aviso recibido o
+ *   emparejamiento deshecho).
+ *
+ * Para que una instantánea atrasada no deshaga un cambio local se guardan dos marcas:
+ * - `tombstones`: ids olvidados localmente. Ninguna instantánea los vuelve a hacer conocidos; solo
+ *   un [addKnown] posterior (volver a emparejar) quita la marca. Duran lo que dure este objeto: el
+ *   motor es el único que da de alta contactos (siempre con [addKnown]), así que una marca nunca
+ *   oculta un contacto legítimo. Se descartó limpiarlas al ver una instantánea sin el id porque una
+ *   instantánea vieja (anterior al alta) también lo cumple, y la siguiente lo resucitaría.
+ * - `pins`: ids añadidos localmente que el repositorio aún no ha confirmado. Siguen conocidos
+ *   aunque llegue una instantánea vieja sin ellos; la marca se quita con la primera instantánea que
+ *   los contiene (las instantáneas llegan en orden, así que después no puede llegar una sin ellos
+ *   que sea anterior al alta).
+ * Resultado: `known = (instantánea − tombstones) ∪ pins`. [forget] además borra la conversación en
+ * la misma sección crítica: tras volver, ningún envío ni recepción para ese id guarda nada.
  */
 internal class Conversations(
     private val clock: () -> Long,
@@ -112,23 +132,56 @@ internal class Conversations(
     /** Fotos en curso ya quitadas del historial: se borran al terminar su envío. */
     private val wipeWhenDone = HashSet<String>()
 
+    /** Ids de contactos conocidos: `(instantánea − tombstones) ∪ pins` (ver la KDoc de la clase). */
+    private val known = HashSet<String>()
+    private val tombstones = HashSet<String>()
+    private val pins = HashSet<String>()
+
     /** Empieza a guardar (al arrancar el motor). */
     fun open() = synchronized(lock) { accepting = true }
+
+    fun isKnown(contactId: String): Boolean = synchronized(lock) { contactId in known }
+
+    /** Instantánea de los ids guardados en el repositorio (ver la KDoc de la clase). */
+    fun applySnapshot(ids: Collection<String>) = synchronized(lock) {
+        val snapshot = ids.toHashSet()
+        pins.removeAll(snapshot)
+        known.clear()
+        snapshot.filterTo(known) { it !in tombstones }
+        known.addAll(pins)
+    }
+
+    /** Alta local (emparejamiento): conocido ya, aunque el repositorio aún no lo haya confirmado. */
+    fun addKnown(contactId: String) = synchronized(lock) {
+        tombstones.remove(contactId)
+        pins.add(contactId)
+        known.add(contactId)
+    }
+
+    /**
+     * Baja local: deja de ser conocido (ninguna instantánea lo resucita) y su conversación se borra
+     * (fotos con ceros), todo en una sola sección crítica. Idempotente.
+     */
+    fun forget(contactId: String) = synchronized(lock) {
+        known.remove(contactId)
+        pins.remove(contactId)
+        tombstones.add(contactId)
+        clearLocked(contactId)
+    }
 
     /**
      * Añade un saliente y devuelve su id. Con [outbound] abierto, el id es el de `send()` (llamado con
      * el cerrojo tomado) y el estado `Sending`; sin sesión (o cerrada), un id nuevo con
      * `Failed(NOT_CONNECTED)`: nunca se encola. Si `send()` lanza, no se guarda nada y se relanza.
-     * Si no se está guardando o [known] (evaluado con el cerrojo tomado) es falso: id nuevo, nada
-     * guardado, ni se llama a la sesión, y la foto se rellena con ceros.
+     * Si no se está guardando o el contacto no es conocido: id nuevo, nada guardado, ni se llama a la
+     * sesión, y la foto se rellena con ceros.
      */
     fun addOutgoing(
         contactId: String,
         content: ChatContent,
-        known: () -> Boolean,
         outbound: Outbound?,
     ): String = synchronized(lock) {
-        if (!accepting || !known()) {
+        if (!accepting || contactId !in known) {
             wipe(content)
             return newId()
         }
@@ -171,18 +224,23 @@ internal class Conversations(
     }
 
     /** Borra la conversación del contacto (fotos con ceros); el resto no cambia. */
-    fun clear(contactId: String) = synchronized(lock) {
-        val removed = state.value[contactId] ?: return@synchronized
+    fun clear(contactId: String) = synchronized(lock) { clearLocked(contactId) }
+
+    private fun clearLocked(contactId: String) {
+        val removed = state.value[contactId] ?: return
         removed.forEach(::release)
         state.value = state.value - contactId
     }
 
     /**
      * Borra todo y deja de guardar hasta el próximo [open]. Llamar con las sesiones ya cerradas:
-     * borra también las fotos cuyo envío figuraba en curso.
+     * borra también las fotos cuyo envío figuraba en curso. Vacía los conocidos y los `pins`; los
+     * `tombstones` se conservan (una instantánea atrasada tras volver a arrancar tampoco resucita).
      */
     fun clearAll() = synchronized(lock) {
         accepting = false
+        known.clear()
+        pins.clear()
         state.value.values.forEach { list -> list.forEach { wipe(it.content) } }
         inFlightPhotos.values.forEach { Primitives.wipe(it) }
         inFlightPhotos.clear()
@@ -192,7 +250,7 @@ internal class Conversations(
     }
 
     private fun receive(contactId: String, id: String, content: ChatContent): Boolean {
-        if (!accepting) {
+        if (!accepting || contactId !in known) {
             wipe(content)
             return false
         }
