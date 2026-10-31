@@ -2,6 +2,7 @@ package org.ghostp2.engine
 
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.coroutineScope
@@ -10,13 +11,12 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
-import org.ghostp2.core.crypto.Primitives
 import org.ghostp2.core.protocol.FrameStream
-import org.ghostp2.core.protocol.PairingResult
 import java.io.IOException
 import java.net.ServerSocket
 import java.net.Socket
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 /** Estado de una invitación creada por este lado (invitador). */
 sealed interface InvitationState {
@@ -58,31 +58,38 @@ internal object InvitationMessages {
     const val MISMATCH = "La invitación no coincide"
     const val GENERIC = "No se pudo completar el emparejamiento"
     const val CANNOT_CREATE = "No se pudo crear la invitación"
+    const val OWN_INVITATION = "No puedes aceptar tu propia invitación"
 }
 
 /**
  * Bucle del invitador sobre `server` (detrás del servicio temporal): acepta conexiones en
  * `Dispatchers.IO` y atiende cada una en su propia corrutina con `attempt` (el emparejamiento), sin
  * bloquear la aceptación. Cualquier fallo de un intento se descarta (se cierra su socket) y se sigue
- * esperando: los intentos fallidos no consumen la invitación.
+ * esperando: los intentos fallidos no consumen la invitación. Como mucho `maxConcurrentAttempts`
+ * intentos a la vez: las conexiones por encima se cierran nada más aceptarlas (evita agotar
+ * descriptores).
  *
  * Solo un emparejamiento puede completarse: el primero que termina bien toma un guardián atómico y
  * ejecuta `complete` sin poder ser cancelado (para no dejar un contacto a medias); los demás que
- * terminen bien a la vez se descartan y se borran sus secretos (ese otro lado sí cree estar
- * emparejado: mismo caso residual que la trama "ok" perdida, PROTOCOLO §6).
+ * terminen bien a la vez se entregan a `discard` (borrar sus secretos). Ese otro lado sí cree estar
+ * emparejado: mismo caso residual que la trama "ok" perdida (PROTOCOLO §6), pero sin ninguna clave
+ * válida para mi .onion.
  *
  * Devuelve el resultado de `complete`, o `null` si pasan `ttlMillis` sin que nadie gane. Al volver
  * (o al ser cancelado) cierra `server` y espera a que terminen todos los intentos en curso.
  * Si `complete` lanza, la excepción se propaga.
  */
-internal suspend fun <T : Any> serveInvitation(
+internal suspend fun <A : Any, T : Any> serveInvitation(
     server: ServerSocket,
     ttlMillis: Long,
-    attempt: suspend (FrameStream) -> PairingResult,
-    complete: suspend (PairingResult) -> T,
+    maxConcurrentAttempts: Int,
+    attempt: suspend (FrameStream) -> A,
+    discard: (A) -> Unit,
+    complete: suspend (A) -> T,
 ): T? = coroutineScope {
     val claimed = AtomicBoolean(false)
     val winner = CompletableDeferred<T>()
+    val active = AtomicInteger(0)
     val loop = launch(Dispatchers.IO) {
         while (isActive) {
             val socket = try {
@@ -90,7 +97,19 @@ internal suspend fun <T : Any> serveInvitation(
             } catch (_: IOException) {
                 break // ServerSocket cerrado
             }
-            launch(Dispatchers.Default) { handleAttempt(socket, claimed, winner, attempt, complete) }
+            if (active.incrementAndGet() > maxConcurrentAttempts) {
+                active.decrementAndGet()
+                runCatching { socket.close() }
+                continue
+            }
+            // ATOMIC: aunque se cancele antes de empezar, el finally cierra el socket y libera el cupo.
+            launch(Dispatchers.Default, start = CoroutineStart.ATOMIC) {
+                try {
+                    handleAttempt(socket, claimed, winner, attempt, discard, complete)
+                } finally {
+                    active.decrementAndGet()
+                }
+            }
         }
     }
     try {
@@ -102,19 +121,20 @@ internal suspend fun <T : Any> serveInvitation(
     }
 }
 
-private suspend fun <T : Any> handleAttempt(
+private suspend fun <A : Any, T : Any> handleAttempt(
     socket: Socket,
     claimed: AtomicBoolean,
     winner: CompletableDeferred<T>,
-    attempt: suspend (FrameStream) -> PairingResult,
-    complete: suspend (PairingResult) -> T,
+    attempt: suspend (FrameStream) -> A,
+    discard: (A) -> Unit,
+    complete: suspend (A) -> T,
 ) {
     try {
         val stream = withContext(Dispatchers.IO) { FrameStream(socket.getInputStream(), socket.getOutputStream(), socket) }
         val result = attempt(stream)
         stream.close()
         if (!claimed.compareAndSet(false, true)) {
-            Primitives.wipe(result.pairSecret, result.clientAuthPrivateForPeerOnion)
+            discard(result)
             return
         }
         try {

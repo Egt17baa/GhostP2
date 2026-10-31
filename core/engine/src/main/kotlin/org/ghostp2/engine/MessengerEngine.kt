@@ -98,6 +98,9 @@ class MessengerEngine(
     /** Invitación activa (lado invitador); crear otra cancela la anterior. */
     private val activeInvitation = AtomicReference<Job?>(null)
 
+    /** .onion temporal de la invitación activa, para rechazar aceptar la propia. */
+    @Volatile private var activeInvitationOnion: String? = null
+
     /**
      * Claves públicas de autorización de emparejamientos en curso que todavía no son contacto (regla
      * R10), por hex. Se publican junto a las de los contactos; solo se modifica con `publication`.
@@ -205,9 +208,13 @@ class MessengerEngine(
      * servicio oculto temporal **sin** autorización de cliente, con un secreto nuevo de 16 bytes.
      * El estado pasa por `Preparing → Waiting(texto)` y termina en `Paired` (un único emparejamiento
      * con éxito), `Expired` (a los `invitationTtlMillis`), `Cancelled` (`cancel()`, nueva invitación o
-     * parada del motor) o `Failed`. En los tres primeros se retira el servicio temporal y se cierra su
-     * socket. Los intentos fallidos no consumen la invitación. Crear otra cancela la anterior.
+     * parada del motor) o `Failed`. En todos se retira el servicio temporal y se cierra su socket.
+     * Los intentos fallidos no consumen la invitación. Crear otra cancela la anterior.
      * Con el motor no `Online` devuelve un handle ya en `Failed("GhostP2 no está activo")`.
+     *
+     * Cada intento genera su propio par de autorización de cliente (la privada va en la oferta de ese
+     * intento y se borra al terminarlo); solo la pública del **ganador** se registra en mi .onion, así
+     * que quien pierda una carrera con el mismo secreto no obtiene una clave válida.
      */
     fun createInvitation(): InvitationHandle {
         val state = MutableStateFlow<InvitationState>(InvitationState.Preparing)
@@ -227,10 +234,13 @@ class MessengerEngine(
         }
     }
 
+    /** Resultado de un intento del invitador: emparejamiento y la pública que generé para ese otro lado. */
+    private class InviterAttempt(val result: PairingResult, val myClientAuthPublic: ByteArray)
+
     private suspend fun runInvitation(state: MutableStateFlow<InvitationState>) {
         val secret = Primitives.randomBytes(Invitation.SECRET_SIZE)
-        // Par de autorización de cliente para quien empareje: la privada va en mi oferta.
-        val clientAuth = Primitives.generateX25519()
+        // Clave de reserva (R10): mantiene publicada mi .onion sin contactos; su privada no existe para nadie.
+        val placeholder = Primitives.generateX25519().also { Primitives.wipe(it.privateKey) }.publicKey
         var server: ServerSocket? = null
         var temporaryOnion: String? = null
         var paired: InvitationState.Paired? = null
@@ -241,8 +251,8 @@ class MessengerEngine(
             val service = tor.publishService(null, emptyList(), config.virtualPort, socket.localPort)
             temporaryOnion = service.onion
             Primitives.wipe(service.privateKey) // la dirección temporal no se vuelve a publicar
-            val myOnion = reservePublication(clientAuth.publicKey)
-            val offer = PairingOffer(myOnion, clientAuth.privateKey)
+            activeInvitationOnion = service.onion
+            val myOnion = reservePublication(placeholder)
             val pairing = pairingIdentity()
             state.value = InvitationState.Waiting(
                 Invitation(service.onion, secret).encode(),
@@ -251,10 +261,12 @@ class MessengerEngine(
             val result = serveInvitation(
                 socket,
                 config.invitationTtlMillis,
-                attempt = { stream -> Pairing.asInviter(stream, pairing, secret, offer) },
-                complete = { r ->
-                    val id = finishPairing(r, clientAuth.publicKey)
-                    InvitationState.Paired(id, r.safetyNumber).also { paired = it }
+                MAX_CONCURRENT_ATTEMPTS,
+                attempt = { stream -> inviterAttempt(stream, pairing, secret, myOnion) },
+                discard = { Primitives.wipe(it.result.pairSecret, it.result.clientAuthPrivateForPeerOnion) },
+                complete = { a ->
+                    val id = finishPairing(a.result, a.myClientAuthPublic, releaseKey = placeholder)
+                    InvitationState.Paired(id, a.result.safetyNumber).also { paired = it }
                 },
             )
             outcome = result ?: InvitationState.Expired
@@ -270,18 +282,41 @@ class MessengerEngine(
                 // Si el contacto llegó a guardarse (aunque luego nos cancelaran), el resultado es Paired.
                 paired?.let { outcome = it }
                 runCatching { server?.close() }
-                temporaryOnion?.let { runCatching { tor.unpublishService(it) } }
-                if (paired == null) runCatching { releasePublication(clientAuth.publicKey) }
-                Primitives.wipe(secret, clientAuth.privateKey)
+                temporaryOnion?.let { onion ->
+                    if (activeInvitationOnion == onion) activeInvitationOnion = null
+                    runCatching { tor.unpublishService(onion) }
+                }
+                if (paired == null) runCatching { releasePublication(placeholder) }
+                Primitives.wipe(secret)
                 state.update { if (it.isFinal) it else outcome }
             }
         }
     }
 
+    /** Un intento del invitador con un par de autorización nuevo; la privada se borra al terminar. */
+    private suspend fun inviterAttempt(
+        stream: FrameStream,
+        pairing: KeyPair25519,
+        secret: ByteArray,
+        myOnion: String,
+    ): InviterAttempt {
+        val clientAuth = Primitives.generateX25519()
+        try {
+            val result = Pairing.asInviter(stream, pairing, secret, PairingOffer(myOnion, clientAuth.privateKey))
+            if (result.peerIdentity.contentEquals(pairing.publicKey)) {
+                Primitives.wipe(result.pairSecret, result.clientAuthPrivateForPeerOnion)
+                throw IllegalStateException(InvitationMessages.OWN_INVITATION)
+            }
+            return InviterAttempt(result, clientAuth.publicKey)
+        } finally {
+            Primitives.wipe(clientAuth.privateKey)
+        }
+    }
+
     /**
      * Acepta una invitación (lado invitado): conecta a su .onion temporal y empareja como iniciador.
-     * Si aún no tengo .onion permanente publicada, se publica antes de enviar la oferta, ya con la clave
-     * del nuevo contacto (regla R10); si falla, se retira de nuevo. Nunca lanza (salvo cancelación).
+     * Si no tengo contactos, mi .onion permanente se publica antes de enviar la oferta, ya con la clave
+     * del nuevo contacto (regla R10); si falla, esa clave se retira. Nunca lanza (salvo cancelación).
      */
     suspend fun acceptInvitation(text: String): AcceptResult {
         val engineScope = workScope
@@ -293,16 +328,20 @@ class MessengerEngine(
         } catch (e: IllegalArgumentException) {
             return AcceptResult.Failed(e.message ?: "Invitación no válida")
         }
-        // Regla R7: el trabajo corre en el scope del motor; parar el motor lo cancela.
-        val work = engineScope.async { runInvitee(invitation) }
+        if (invitation.onion == activeInvitationOnion) {
+            Primitives.wipe(invitation.secret)
+            return AcceptResult.Failed(InvitationMessages.OWN_INVITATION)
+        }
+        // Regla R7: el trabajo corre en el scope del motor; parar el motor lo cancela. ATOMIC: el
+        // cuerpo (y su finally, que borra el secreto) se ejecuta aunque se cancele antes de empezar.
+        val work = engineScope.async(start = CoroutineStart.ATOMIC) { runInvitee(invitation) }
         return try {
             work.await()
         } catch (e: CancellationException) {
-            if (!currentCoroutineContext().isActive) {
-                work.cancel()
-                throw e
-            }
-            // El motor se detuvo durante el emparejamiento (runInvitee ya borró los secretos).
+            work.cancel()
+            Primitives.wipe(invitation.secret) // por si el trabajo no llegó a su finally
+            if (!currentCoroutineContext().isActive) throw e
+            // El motor se detuvo durante el emparejamiento.
             AcceptResult.Failed(InvitationMessages.NOT_ACTIVE)
         }
     }
@@ -312,16 +351,26 @@ class MessengerEngine(
         var paired = false
         try {
             val myOnion = reservePublication(clientAuth.publicKey)
+            val pairing = pairingIdentity()
             val socket = tor.connect(invitation.onion, config.virtualPort, config.connectTimeoutMillis)
             val result = try {
                 val stream = withContext(Dispatchers.IO) {
                     FrameStream(socket.getInputStream(), socket.getOutputStream(), socket)
                 }
-                Pairing.asInvitee(stream, pairingIdentity(), invitation.secret, PairingOffer(myOnion, clientAuth.privateKey))
+                Pairing.asInvitee(stream, pairing, invitation.secret, PairingOffer(myOnion, clientAuth.privateKey))
             } finally {
                 runCatching { socket.close() }
             }
-            val id = withContext(NonCancellable) { finishPairing(result, clientAuth.publicKey) }
+            if (result.peerIdentity.contentEquals(pairing.publicKey)) {
+                Primitives.wipe(result.pairSecret, result.clientAuthPrivateForPeerOnion)
+                return AcceptResult.Failed(InvitationMessages.OWN_INVITATION)
+            }
+            // Un fallo al guardar (ya deshecho por finishPairing) no es un fallo de conexión.
+            val id = try {
+                withContext(NonCancellable) { finishPairing(result, clientAuth.publicKey, releaseKey = null) }
+            } catch (e: Exception) {
+                return AcceptResult.Failed(InvitationMessages.GENERIC)
+            }
             paired = true
             return AcceptResult.Paired(id, result.safetyNumber)
         } catch (e: CancellationException) {
@@ -354,22 +403,24 @@ class MessengerEngine(
     }
 
     /**
-     * Regla R10: devuelve mi .onion permanente para la oferta. Si no está publicada (cero contactos),
-     * la publica ya con `peerClientAuthPublic` como clave pendiente; nunca sin autorización de cliente.
+     * Regla R10: devuelve mi .onion permanente para la oferta. Sin contactos guardados, cada
+     * emparejamiento en curso registra su propia clave pendiente (`key`), de modo que la .onion sigue
+     * publicada mientras quede alguno y terminar uno nunca la retira bajo otro. Con contactos ya está
+     * publicada por ellos y no se toca. Nunca se publica sin autorización de cliente.
      */
-    private suspend fun reservePublication(peerClientAuthPublic: ByteArray): String = publication.withLock {
+    private suspend fun reservePublication(key: ByteArray): String = publication.withLock {
         val p = publisher ?: throw IllegalStateException(InvitationMessages.NOT_ACTIVE)
-        if (p.publishedOnion == null) {
-            pendingClientAuthKeys[peerClientAuthPublic.toHex()] = peerClientAuthPublic.copyOf()
+        if (contacts.all().isEmpty()) {
+            pendingClientAuthKeys[key.toHex()] = key.copyOf()
             syncLocked(p)
         }
         p.publishedOnion ?: throw IllegalStateException("No se pudo publicar la .onion permanente")
     }
 
-    /** Retira la clave pendiente (emparejamiento fallido) y re-sincroniza; sin contactos ⇒ se retira la .onion. */
-    private suspend fun releasePublication(peerClientAuthPublic: ByteArray) {
+    /** Retira una clave pendiente (emparejamiento terminado sin éxito) y re-sincroniza si estaba. */
+    private suspend fun releasePublication(key: ByteArray) {
         publication.withLock {
-            if (pendingClientAuthKeys.remove(peerClientAuthPublic.toHex()) != null) publisher?.let { syncLocked(it) }
+            if (pendingClientAuthKeys.remove(key.toHex()) != null) publisher?.let { syncLocked(it) }
         }
     }
 
@@ -382,10 +433,12 @@ class MessengerEngine(
 
     /**
      * Guarda el contacto emparejado (reemplaza al de la misma identidad), registra la autorización
-     * para su .onion y re-publica la mía con su clave. Devuelve el id del contacto. Los arrays de
-     * `result` pasan a ser datos guardados: no se borran.
+     * para su .onion y re-publica la mía con su clave (retirando a la vez `releaseKey`, la clave de
+     * reserva del invitador). Devuelve el id del contacto. Es atómico para el usuario: si algo falla
+     * tras guardar, se deshace (contacto anterior, autorización y publicación) y se relanza.
+     * Los arrays de `result` pasan a ser datos guardados: no se borran.
      */
-    private suspend fun finishPairing(result: PairingResult, myClientAuthPublic: ByteArray): String {
+    private suspend fun finishPairing(result: PairingResult, myClientAuthPublic: ByteArray, releaseKey: ByteArray?): String {
         val id = contactIdFor(result.peerIdentity)
         val previous = contacts.all().firstOrNull { it.id == id }
         val contact = Contact(
@@ -400,15 +453,32 @@ class MessengerEngine(
             status = ContactStatus.ACTIVE,
         )
         contacts.upsert(contact)
+        try {
+            tor.addClientAuth(result.peerOnion, result.clientAuthPrivateForPeerOnion)
+            publication.withLock {
+                pendingClientAuthKeys.remove(myClientAuthPublic.toHex())
+                releaseKey?.let { pendingClientAuthKeys.remove(it.toHex()) }
+                publisher?.let { syncLocked(it) }
+            }
+        } catch (e: Exception) {
+            withContext(NonCancellable) { rollbackPairing(contact, previous) }
+            throw e
+        }
         if (previous != null && previous.peerOnion != result.peerOnion) {
             runCatching { tor.removeClientAuth(previous.peerOnion) }
         }
-        tor.addClientAuth(result.peerOnion, result.clientAuthPrivateForPeerOnion)
-        publication.withLock {
-            pendingClientAuthKeys.remove(myClientAuthPublic.toHex())
-            publisher?.let { syncLocked(it) }
-        }
         return id
+    }
+
+    /** Deshace un [finishPairing] a medias; cada paso es independiente (lo que falle se ignora). */
+    private suspend fun rollbackPairing(contact: Contact, previous: Contact?) {
+        runCatching { if (previous != null) contacts.upsert(previous) else contacts.delete(contact.id) }
+        runCatching { tor.removeClientAuth(contact.peerOnion) }
+        if (previous != null) runCatching { tor.addClientAuth(previous.peerOnion, previous.clientAuthPrivateForPeerOnion) }
+        publication.withLock {
+            pendingClientAuthKeys.remove(contact.myClientAuthPublic.toHex())
+            publisher?.let { p -> runCatching { syncLocked(p) } }
+        }
     }
 
     /**
@@ -443,6 +513,9 @@ class MessengerEngine(
 }
 
 private const val BACKLOG = 50
+
+/** Máximo de intentos de emparejamiento simultáneos por invitación (los demás se cierran al aceptarlos). */
+private const val MAX_CONCURRENT_ATTEMPTS = 32
 
 private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }
 
