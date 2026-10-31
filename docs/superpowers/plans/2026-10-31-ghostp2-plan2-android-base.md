@@ -317,3 +317,6 @@ Reglas acordadas mientras se ejecutaba el plan (el detalle está en `docs/PROTOC
 - KDoc de `forceReset`: el borrado de la clave de Keystore es de mejor esfuerzo.
 - `GhostService.onDestroy` no pone `foreground = false`; falta probar que se relanza otra `IllegalStateException` en el reinicio STICKY.
 - La prueba de parar el motor a mitad de enviar una foto puede pasar sin llegar a ejercitar el caso.
+- `Connections.wrap`: si `onSessionEvent` lanzara, el manejador silencioso se lo traga y el contacto queda "en línea" sin sesión; llamar a `onSessionClosed` desde el `finally` si no se ejecutó.
+- Con `ignoreUnknownKeys` una versión antigua lee campos nuevos pero los pierde al reescribir: subir el byte de formato al añadir campos de ajustes.
+- El presupuesto de fotos las descarta (pone a cero) sin avisar: la interfaz debe decodificar una vez a su propio bitmap, tolerar bytes a cero y limitar las fotos salientes simultáneas (cola pequeña).
