@@ -106,6 +106,38 @@ class EncryptedStoreTest {
     }
 
     @Test
+    fun ioReadFailureIsUnavailableNotCorrupted() = runBlocking {
+        // Un directorio en la ruta del archivo: existe pero readBytes() lanza IOException.
+        assertTrue(file().mkdir())
+        val s = store()
+        try {
+            s.read()
+            fail()
+        } catch (e: StoreUnavailableException) {
+            assertEquals("Almacenamiento no disponible", e.message)
+        }
+        assertTrue(file().isDirectory)
+        assertTrue(file().delete())
+        assertEquals("el fallo no queda en caché: reintentar funciona", Note(), s.read())
+    }
+
+    @Test
+    fun transientKeyFailureIsUnavailableAndRetryWorks() = runBlocking {
+        store().update { it.copy(text = "guardado") }
+        val backend = FakeKeyBackend(stored = true, confirmed = true, key = aead)
+        backend.openFailure = java.security.KeyStoreException("Keystore ocupado")
+        val s = store(a = RecoverableAead({ file().exists() }, backend))
+        try {
+            s.read()
+            fail()
+        } catch (_: StoreUnavailableException) {
+        }
+        assertTrue(file().exists())
+        backend.openFailure = null
+        assertEquals(Note("guardado"), s.read())
+    }
+
+    @Test
     fun emptyOrTruncatedFileThrowsStoreCorrupted() = runBlocking {
         file().writeBytes(ByteArray(0))
         assertCorrupted { store().read() }

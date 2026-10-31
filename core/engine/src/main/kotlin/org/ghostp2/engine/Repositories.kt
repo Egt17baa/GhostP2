@@ -2,7 +2,10 @@ package org.ghostp2.engine
 
 import kotlinx.coroutines.flow.Flow
 
-/** Almacenamiento de la identidad local. */
+/**
+ * Almacenamiento de la identidad local. Identidad y contactos pueden compartir un único archivo: si el
+ * almacenamiento es ilegible, `wipe()` de cualquiera de los dos repositorios borra también el otro.
+ */
 interface IdentityRepository {
     suspend fun load(): Identity?
 
@@ -11,7 +14,10 @@ interface IdentityRepository {
     suspend fun wipe()
 }
 
-/** Almacenamiento de contactos; `upsert` reemplaza por `id`. */
+/**
+ * Almacenamiento de contactos; `upsert` reemplaza por `id`. Si el almacenamiento compartido con la
+ * identidad es ilegible, `wipe()` borra también la identidad.
+ */
 interface ContactRepository {
     val contacts: Flow<List<Contact>>
 

@@ -20,8 +20,9 @@ import java.io.File
  * - IdentityRepository.wipe() quita la identidad y conserva los contactos.
  * - ContactRepository.wipe() quita los contactos y conserva la identidad.
  * - Sin identidad ni contactos el archivo se borra (no queda nada en disco).
- * - Si el archivo está dañado, cualquiera de los dos wipe() lo borra entero: su contenido ya es
- *   irrecuperable y el usuario ha pedido empezar de cero. Es la única vía que descarta un archivo dañado.
+ * - Si el archivo está dañado (StoreCorruptedException), cualquiera de los dos wipe() lo borra entero: su
+ *   contenido ya es irrecuperable y el usuario ha pedido empezar de cero. Es la única vía que descarta un
+ *   archivo dañado. Ante StoreUnavailableException (fallo pasajero) wipe() falla y no borra nada.
  */
 
 /** Nombre del archivo cifrado con identidad y contactos. */
@@ -36,18 +37,14 @@ fun ghostStore(file: File, aead: Aead): EncryptedStore<StoredData> =
 
 /**
  * Repositorios listos para producción: `noBackupFilesDir/ghostp2.bin` cifrado con [KeystoreAead]. La clave
- * se crea en el primer acceso (no en esta llamada) y sus fallos llegan como [StoreCorruptedException].
+ * se abre en el primer acceso (no en esta llamada); sus fallos llegan como [StoreCorruptedException]
+ * (clave perdida con datos: "Empezar de cero") o [StoreUnavailableException] ("Reintentar").
  * Llamar una sola vez por proceso y compartir el resultado.
  */
 fun createRepositories(context: Context): Pair<IdentityRepository, ContactRepository> {
     val app = context.applicationContext
     val file = File(app.noBackupFilesDir, STORE_FILE_NAME)
-    val aead = RecoverableAead(
-        dataExists = { file.exists() },
-        resetKey = { KeystoreAead.reset(app) },
-        create = { KeystoreAead.create(app) },
-    )
-    return createRepositories(app, aead)
+    return createRepositories(app, KeystoreAead.create(app, dataExists = { file.exists() }))
 }
 
 internal fun createRepositories(context: Context, aead: Aead): Pair<IdentityRepository, ContactRepository> {

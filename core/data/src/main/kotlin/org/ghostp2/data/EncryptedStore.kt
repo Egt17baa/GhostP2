@@ -1,5 +1,7 @@
 package org.ghostp2.data
 
+import android.system.Os
+import android.system.OsConstants
 import com.google.crypto.tink.Aead
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
@@ -29,6 +31,14 @@ import java.security.GeneralSecurityException
  */
 class StoreCorruptedException(cause: Throwable) : Exception("Almacenamiento ilegible", cause)
 
+/**
+ * Fallo pasajero al leer o escribir (error de E/S, Keystore ocupado o no disponible): los datos pueden
+ * seguir intactos, así que se ofrece "Reintentar", nunca "Empezar de cero". Es un tipo hermano, no una
+ * subclase, de [StoreCorruptedException]: quien trata la corrupción borrando (los `wipe()` sobre un
+ * almacén dañado) no debe borrar por un fallo que se puede reintentar.
+ */
+class StoreUnavailableException(cause: Throwable) : Exception("Almacenamiento no disponible", cause)
+
 /** Causa saneada de un CBOR ilegible: la excepción original podría citar parte del texto en claro. */
 private class UnreadableContentException : Exception("Contenido descifrado no decodificable")
 
@@ -44,8 +54,10 @@ private class UnknownFormatException : Exception("Versión de formato desconocid
  * - Sin archivo ⇒ `default`. Un valor para el que `isEmpty` es cierto no se escribe: se borra el archivo.
  * - Toda lectura-modificación-escritura pasa por un único [Mutex]; [data] publica tras cada commit, en
  *   orden, nunca una instantánea anterior después de otra más reciente.
- * - Archivo ilegible o no auténtico ⇒ [StoreCorruptedException] (también en [update], que entonces no
- *   escribe nada). Solo [reset] borra un archivo dañado.
+ * - Archivo no auténtico o indecodificable ⇒ [StoreCorruptedException] (también en [update], que entonces
+ *   no escribe nada). Solo [reset] borra un archivo dañado.
+ * - Error de E/S al leer o escribir ⇒ [StoreUnavailableException]. Las excepciones que lance el propio
+ *   `aead` y no sean [GeneralSecurityException] (p. ej. las de [RecoverableAead]) salen tal cual.
  * - El CBOR en claro que crea esta clase se pone a cero tras cifrar y tras decodificar.
  *
  * Una sola instancia por archivo y proceso: guarda en memoria el último valor confirmado.
@@ -101,8 +113,7 @@ class EncryptedStore<T>(
     suspend fun reset() {
         mutex.withLock {
             withContext(Dispatchers.IO) {
-                Files.deleteIfExists(tmp.toPath())
-                Files.deleteIfExists(file.toPath())
+                deleteFiles()
                 orphanChecked = true
                 latest.value = Loaded(default)
             }
@@ -113,7 +124,7 @@ class EncryptedStore<T>(
         latest.value?.let { return it.value }
         return withContext(Dispatchers.IO) {
             if (!orphanChecked) {
-                Files.deleteIfExists(tmp.toPath())
+                unavailableOnIo { Files.deleteIfExists(tmp.toPath()) }
                 orphanChecked = true
             }
             readFromDisk().also { latest.value = Loaded(it) }
@@ -126,7 +137,7 @@ class EncryptedStore<T>(
         val bytes = try {
             file.readBytes()
         } catch (e: IOException) {
-            throw StoreCorruptedException(e)
+            throw StoreUnavailableException(e)
         }
         if (bytes.isEmpty() || bytes[0] != FORMAT_VERSION) throw StoreCorruptedException(UnknownFormatException())
         val plain = try {
@@ -146,13 +157,14 @@ class EncryptedStore<T>(
     @OptIn(ExperimentalSerializationApi::class)
     private fun persist(value: T) {
         if (isEmpty(value)) {
-            Files.deleteIfExists(tmp.toPath())
-            Files.deleteIfExists(file.toPath())
+            deleteFiles()
             return
         }
         val plain = Cbor.encodeToByteArray(serializer, value)
         val sealed = try {
             aead.encrypt(plain, associatedData)
+        } catch (e: GeneralSecurityException) {
+            throw StoreUnavailableException(e)
         } finally {
             plain.fill(0)
         }
@@ -165,7 +177,34 @@ class EncryptedStore<T>(
             Files.move(tmp.toPath(), file.toPath(), StandardCopyOption.ATOMIC_MOVE)
         } catch (e: IOException) {
             tmp.delete()
-            throw e
+            throw StoreUnavailableException(e)
+        }
+        syncDirectory()
+    }
+
+    private fun deleteFiles() = unavailableOnIo {
+        Files.deleteIfExists(tmp.toPath())
+        Files.deleteIfExists(file.toPath())
+    }
+
+    private inline fun <R> unavailableOnIo(block: () -> R): R = try {
+        block()
+    } catch (e: IOException) {
+        throw StoreUnavailableException(e)
+    }
+
+    /** `fsync` del directorio para que el `rename` sobreviva a un corte de luz; si falla, se ignora. */
+    private fun syncDirectory() {
+        val dir = file.absoluteFile.parentFile ?: return
+        try {
+            val fd = Os.open(dir.path, OsConstants.O_RDONLY, 0)
+            try {
+                Os.fsync(fd)
+            } finally {
+                Os.close(fd)
+            }
+        } catch (_: Exception) {
+            // ErrnoException, o "Stub!" en la JVM de pruebas: la atomicidad no depende de esto.
         }
     }
 

@@ -69,6 +69,14 @@ class DataStoreRepositoriesTest {
         }
     }
 
+    private suspend fun assertUnavailable(block: suspend () -> Unit) {
+        try {
+            block()
+            fail("se esperaba StoreUnavailableException")
+        } catch (_: StoreUnavailableException) {
+        }
+    }
+
     private fun corruptFile() {
         val raw = file().readBytes()
         raw[raw.size / 2] = (raw[raw.size / 2].toInt() xor 0x40).toByte()
@@ -181,6 +189,41 @@ class DataStoreRepositoriesTest {
         assertFalse(file().exists())
         assertEquals(emptyList<Contact>(), contacts2.all())
         assertEquals(emptyList<Contact>(), contacts2.contacts.first())
+    }
+
+    @Test
+    fun unavailableStoreIsNotWipedAndRetryWorks() = runBlocking {
+        val (ids, contacts) = repos()
+        ids.save(identity())
+        contacts.upsert(contact(1))
+        val backend = FakeKeyBackend(stored = true, confirmed = true, key = aead)
+        backend.openFailure = java.security.KeyStoreException("Keystore ocupado")
+        val (ids2, contacts2) = repos(RecoverableAead({ file().exists() }, backend))
+        assertUnavailable { ids2.load() }
+        assertUnavailable { contacts2.wipe() }
+        assertUnavailable { ids2.wipe() }
+        assertTrue("un fallo pasajero nunca borra", file().exists())
+        backend.openFailure = null
+        assertEquals(identity(), ids2.load())
+        assertEquals(listOf(contact(1)), contacts2.all())
+    }
+
+    @Test
+    fun lostKeysetWithDataReportsCorruptedThenResetGeneratesNewKey() = runBlocking {
+        val (ids, contacts) = repos()
+        ids.save(identity())
+        contacts.upsert(contact(1))
+        val backend = FakeKeyBackend(stored = false)
+        val (ids2, contacts2) = repos(RecoverableAead({ file().exists() }, backend))
+        assertCorrupted { ids2.load() }
+        assertCorrupted { contacts2.upsert(contact(2)) }
+        assertEquals("con datos nunca se genera otra clave", 0, backend.generates)
+        contacts2.wipe()
+        ids2.wipe()
+        assertFalse(file().exists())
+        ids2.save(identity())
+        assertEquals(1, backend.generates)
+        assertEquals(identity(), ids2.load())
     }
 
     @Test
