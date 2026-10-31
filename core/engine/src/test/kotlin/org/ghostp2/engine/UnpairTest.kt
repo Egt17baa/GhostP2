@@ -396,6 +396,224 @@ class UnpairTest {
         }
     }
 
+    // --- Ronda de correcciones 1 ---
+
+    @Test
+    fun deleteInWindowDoesNotWipeAFreshRepairing() = runBlocking<Unit> {
+        val (h, bInA, aInB) = pairedOnline()
+        // B se apaga y olvida a A (p. ej. lo borró sin poder avisar): A no puede entregar Unpair.
+        h.engine(1).stop()
+        h.contacts(1).wipe()
+        withTimeout(TIMEOUT) { h.engine(0).presence.first { it[bInA] == Presence.OFFLINE } }
+        val oldSecret = h.contacts(0).all().single().pairSecret.copyOf()
+        val delete = async { h.engine(0).deleteContact(bInA) }
+        delay(200)
+        assertFalse(delete.isCompleted)
+        // Dentro de la ventana, A y B se vuelven a emparejar: mismo id (deriva de la identidad).
+        h.engine(1).start()
+        pairEngines(h.engine(0), h.engine(1))
+        assertEquals(listOf(aInB), h.contacts(1).all().map { it.id })
+        // El borrado antiguo termina limpio (el enlace al que avisaba ya no existe) sin tocar el nuevo.
+        assertEquals(UnpairDelivery.NOT_DELIVERED, withTimeout(TIMEOUT) { delete.await() })
+        val stored = h.contacts(0).all().single()
+        assertEquals(bInA, stored.id)
+        assertFalse(stored.pairSecret.contentEquals(oldSecret))
+        assertFalse(stored.pairSecret.all { it == 0.toByte() })
+        awaitSameSession(h, bInA, aInB)
+        val id = h.engine(0).sendText(bInA, "otra vez")
+        withTimeout(TIMEOUT) {
+            h.engine(0).conversations.first { m -> m[bInA]?.any { it.id == id && it.status == DeliveryStatus.Delivered } == true }
+        }
+        // B no recibió ningún Unpair: sigue teniendo a A.
+        delay(300)
+        assertEquals(listOf(aInB), h.contacts(1).all().map { it.id })
+        assertNotNull(h.engine(0).myOnion.value)
+    }
+
+    @Test
+    fun wipeAllZeroesLiveKeyMaterialEvenWithCopyingRepositories() = runBlocking<Unit> {
+        val h = EngineHarness(1, config).also { harness = it }
+        val ids = CopyingIdentityRepository()
+        val contacts = CopyingContactRepository()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        try {
+            val a = MessengerEngine(FakeTor(h.network), ids, contacts, scope, config)
+            h.startAll()
+            a.start()
+            pairEngines(a, h.engine(0))
+            val bInA = contacts.all().single().id
+            withTimeout(TIMEOUT) { a.presence.first { it[bInA] == Presence.ONLINE } }
+            val live = contacts.lastNonEmpty
+            a.wipeAll()
+            assertTrue(ids.handedOut.isNotEmpty())
+            ids.handedOut.forEach { id ->
+                assertTrue(id.identityPrivate.all { it == 0.toByte() }) { "identidad viva sin borrar" }
+                id.onionPrivateKey?.let { k -> assertTrue(k.all { it == 0.toByte() }) { "clave .onion viva sin borrar" } }
+            }
+            live.forEach { c ->
+                assertTrue(c.pairSecret.all { it == 0.toByte() }) { "pairSecret vivo sin borrar" }
+                assertTrue(c.clientAuthPrivateForPeerOnion.all { it == 0.toByte() }) { "clave de autorización viva sin borrar" }
+            }
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun deleteZeroesTheDeletedContactSecretsHeldByTheEngine() = runBlocking<Unit> {
+        val h = EngineHarness(1, config).also { harness = it }
+        val contacts = CopyingContactRepository()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        try {
+            val a = MessengerEngine(FakeTor(h.network), CopyingIdentityRepository(), contacts, scope, config)
+            h.startAll()
+            a.start()
+            pairEngines(a, h.engine(0))
+            val bInA = contacts.all().single().id
+            withTimeout(TIMEOUT) { a.presence.first { it[bInA] == Presence.ONLINE } }
+            val live = contacts.lastNonEmpty.single()
+            assertEquals(UnpairDelivery.DELIVERED, a.deleteContact(bInA))
+            assertTrue(live.pairSecret.all { it == 0.toByte() })
+            assertTrue(live.clientAuthPrivateForPeerOnion.all { it == 0.toByte() })
+            assertEquals(EngineStatus.Online, a.status.value)
+            a.stop()
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun publicationFailureAfterDeleteIsRetried() = runBlocking<Unit> {
+        val h = EngineHarness(2, config).also { harness = it }
+        val tor = FlakyPublishTor(FakeTor(h.network))
+        val contacts = InMemoryContactRepository()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        try {
+            val a = MessengerEngine(tor, InMemoryIdentityRepository(), contacts, scope, config)
+            h.startAll()
+            a.start()
+            pairEngines(a, h.engine(0))
+            pairEngines(a, h.engine(1))
+            val bIdentity = h.identities(0).load()!!.identityPublic
+            val bInA = contactIdFor(bIdentity)
+            val c = contacts.all().single { it.id != bInA }
+            withTimeout(TIMEOUT) { a.presence.first { it[bInA] == Presence.ONLINE && it[c.id] == Presence.ONLINE } }
+            val onion = a.myOnion.value!!
+            val failed = observers.async(start = CoroutineStart.UNDISPATCHED) {
+                a.notices.filterIsInstance<Notice.PublicationFailed>().first()
+            }
+            // Al borrar a B, Tor falla 4 veces seguidas al re-publicar (la del borrado y 3 reintentos).
+            tor.failNext(4)
+            a.deleteContact(bInA)
+            assertEquals(Notice.PublicationFailed, withTimeout(TIMEOUT) { failed.await() })
+            // Al final la .onion vuelve a estar publicada solo con la clave de C, y C conecta.
+            withTimeout(TIMEOUT) {
+                h.network.published.first { m ->
+                    m[onion]?.clientAuthPublicKeys?.map { it.toList() } == listOf(c.myClientAuthPublic.toList())
+                }
+            }
+            assertEquals(0, tor.pendingFailures())
+            assertEquals(onion, a.myOnion.value)
+            withTimeout(TIMEOUT) { a.presence.first { it[c.id] == Presence.ONLINE } }
+            a.stop()
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    /** Empareja dos motores cualesquiera (ya arrancados). */
+    private suspend fun pairEngines(inviter: MessengerEngine, invitee: MessengerEngine) {
+        val handle = inviter.createInvitation()
+        val waiting = withTimeout(TIMEOUT) { handle.state.first { it is InvitationState.Waiting } } as InvitationState.Waiting
+        assertTrue(invitee.acceptInvitation(waiting.text) is AcceptResult.Paired)
+        withTimeout(TIMEOUT) { handle.state.first { it is InvitationState.Paired } }
+    }
+
+    /** Tor cuyas próximas `n` publicaciones/retiradas de servicio fallan. */
+    private class FlakyPublishTor(private val delegate: FakeTor) : TorTransport by delegate {
+        private val failures = java.util.concurrent.atomic.AtomicInteger(0)
+
+        fun failNext(n: Int) = failures.set(n)
+
+        fun pendingFailures(): Int = failures.get().coerceAtLeast(0)
+
+        private fun maybeFail() {
+            if (failures.getAndUpdate { if (it > 0) it - 1 else 0 } > 0) throw IOException("Tor falló al publicar")
+        }
+
+        override suspend fun publishService(
+            privateKey: ByteArray?,
+            clientAuthPublicKeys: List<ByteArray>,
+            virtualPort: Int,
+            localPort: Int,
+        ): PublishedService {
+            // El servicio temporal de invitación (sin autorización) no cuenta.
+            if (clientAuthPublicKeys.isNotEmpty()) maybeFail()
+            return delegate.publishService(privateKey, clientAuthPublicKeys, virtualPort, localPort)
+        }
+
+        override suspend fun unpublishService(onion: String) {
+            maybeFail()
+            delegate.unpublishService(onion)
+        }
+    }
+
+    /** Repositorio de identidad que, como uno real, guarda y devuelve copias; recuerda lo que entregó o recibió. */
+    private class CopyingIdentityRepository : IdentityRepository {
+        @Volatile private var stored: Identity? = null
+        val handedOut: MutableList<Identity> = java.util.Collections.synchronizedList(mutableListOf())
+
+        override suspend fun load(): Identity? = stored?.deep()?.also { handedOut += it }
+
+        override suspend fun save(identity: Identity) {
+            handedOut += identity
+            stored = identity.deep()
+        }
+
+        override suspend fun wipe() {
+            stored = null
+        }
+
+        private fun Identity.deep() = Identity(identityPrivate.copyOf(), identityPublic.copyOf(), onionPrivateKey?.copyOf(), onion)
+    }
+
+    /** Repositorio de contactos que entrega copias (en `all()` y en el flujo) en vez de sus propios arrays. */
+    private class CopyingContactRepository : ContactRepository {
+        private val lock = Any()
+        private var stored: List<Contact> = emptyList()
+        private val emitted = MutableStateFlow<List<Contact>>(emptyList())
+        override val contacts: StateFlow<List<Contact>> = emitted
+
+        /** Última lista no vacía emitida por el flujo (la que tienen los enlaces del motor). */
+        @Volatile var lastNonEmpty: List<Contact> = emptyList()
+            private set
+
+        override suspend fun all(): List<Contact> = synchronized(lock) { stored.map { it.deep() } }
+
+        override suspend fun upsert(contact: Contact) = change { list ->
+            val copy = contact.deep()
+            if (list.any { it.id == copy.id }) list.map { if (it.id == copy.id) copy else it } else list + copy
+        }
+
+        override suspend fun delete(id: String) = change { list -> list.filterNot { it.id == id } }
+
+        override suspend fun wipe() = change { emptyList() }
+
+        private fun change(f: (List<Contact>) -> List<Contact>) = synchronized(lock) {
+            stored = f(stored)
+            val out = stored.map { it.deep() }
+            if (out.isNotEmpty()) lastNonEmpty = out
+            emitted.value = out
+        }
+
+        private fun Contact.deep() = copy(
+            peerIdentity = peerIdentity.copyOf(),
+            clientAuthPrivateForPeerOnion = clientAuthPrivateForPeerOnion.copyOf(),
+            myClientAuthPublic = myClientAuthPublic.copyOf(),
+            pairSecret = pairSecret.copyOf(),
+        )
+    }
+
     /** Tor cuyo `stop` y `removeClientAuth` fallan siempre. */
     private class BrokenTor(private val delegate: FakeTor) : TorTransport by delegate {
         private val mutableState = MutableStateFlow<TorState>(TorState.Off)

@@ -65,8 +65,9 @@ const val MAX_CONTACT_NAME_CHARS = 64
  * ([createInvitation], [acceptInvitation]) y presencia con conexión automática a los contactos
  * ([presence], [onNetworkChanged], [notices]; ver [Connections]) y conversaciones en memoria
  * ([conversations], [sendText], [sendPhoto], [clearConversation]; ver [Conversations]), y gestión de
-contactos: [deleteContact] (con aviso `Unpair`), aviso recibido ([Notice.ContactUnpairedYou]),
-[renameContact], [setVerified] y [wipeAll].
+ * contactos: [deleteContact] (con aviso `Unpair`), aviso recibido ([Notice.ContactUnpairedYou]),
+ * [renameContact], [setVerified] y [wipeAll]. Si Tor falla al actualizar la publicación tras un
+ * borrado o un emparejamiento deshecho, se reintenta ([Notice.PublicationFailed]).
  *
  * Todas las corrutinas del motor cuelgan de un `SupervisorJob` hijo de `scope` (regla R7: el scope
  * inyectado debe ser `SupervisorJob() + Dispatchers.Default`); [stop] las cancela y espera, de modo que
@@ -187,6 +188,16 @@ class MessengerEngine(
     /** Serializa `publisher.sync` con la actualización de [identity] y de [myOnion]. */
     private val publication = Mutex()
 
+    /**
+     * Publicación pendiente de re-sincronizar (falló un `sync` tras un borrado o un emparejamiento
+     * deshecho). [republishJob] la reintenta en el scope del motor; ver [scheduleRepublish].
+     */
+    private val publicationDirty = java.util.concurrent.atomic.AtomicBoolean(false)
+    private val republishJob = AtomicReference<Job?>(null)
+
+    /** Se incrementa en [onNetworkChanged]: despierta la espera de [republishLoop]. */
+    private val republishWake = MutableStateFlow(0L)
+
     /** Puerto local del listener mientras el motor está en marcha (para pruebas). */
     internal val localPort: Int? get() = listener?.port
 
@@ -283,6 +294,7 @@ class MessengerEngine(
     /** Corta las esperas de reintento de todos los contactos, vuelve a la espera mínima y reintenta ya. */
     fun onNetworkChanged() {
         connections?.onNetworkChanged()
+        republishWake.update { it + 1 }
     }
 
     /**
@@ -348,8 +360,10 @@ class MessengerEngine(
      * recibe su cancelación). Con el motor parado no hay entrega posible: `NOT_DELIVERED` y borrado.
      * Llamadas simultáneas con el mismo id comparten el resultado del único borrado real; un id que no
      * es un contacto guardado (o ya borrado) devuelve `NOT_DELIVERED` sin hacer nada. Si el propio
-     * repositorio falla al borrar se relanza su excepción (los pasos 3 posteriores no se hacen; en
-     * esta ejecución el contacto sigue olvidado).
+     * repositorio falla al borrar, se quitan igualmente la autorización y la publicación y después se
+     * relanza su excepción (en esta ejecución el contacto sigue olvidado). Si mientras se intentaba
+     * entregar se volvió a emparejar con el mismo contacto (mismo id), el emparejamiento nuevo se
+     * conserva intacto y el borrado antiguo devuelve `NOT_DELIVERED` (ver [removeLocally]).
      */
     suspend fun deleteContact(contactId: String): UnpairDelivery {
         val mine = CompletableDeferred<UnpairDelivery>()
@@ -368,8 +382,11 @@ class MessengerEngine(
     }
 
     private suspend fun runDelete(contactId: String): UnpairDelivery {
-        val contact = contacts.all().firstOrNull { it.id == contactId } ?: return UnpairDelivery.NOT_DELIVERED
-        chats.forget(contactId)
+        // Lectura y olvido en un paso respecto a las escrituras: un emparejamiento nuevo del mismo id
+        // (que va con `contactWrites`) o es el que se borra, o llega después y su addKnown lo revive.
+        val contact = contactWrites.withLock {
+            contacts.all().firstOrNull { it.id == contactId }?.also { chats.forget(contactId) }
+        } ?: return UnpairDelivery.NOT_DELIVERED
         var delivered = false
         try {
             delivered = connections?.deliverUnpair(contactId, config.unpairDeliveryWindowMillis) == true
@@ -382,7 +399,9 @@ class MessengerEngine(
     /**
      * El contacto nos deshizo el emparejamiento (su sesión ya está cerrada, sin `Bye`, y su bucle
      * parado): mismo borrado local que [deleteContact] y después [Notice.ContactUnpairedYou] con el
-     * nombre que tenía. Si ya se estaba borrando aquí, ese borrado lo termina (sin aviso). No lanza.
+     * nombre que tenía. Si ya se estaba borrando aquí, ese borrado lo termina (sin aviso). No lanza:
+     * si el borrado local falla (p. ej. el repositorio no puede borrar), el contacto queda olvidado y sin
+     * bucle en esta ejecución, pero sigue guardado y vuelve al reiniciar el motor (sin avisar otra vez).
      */
     private suspend fun onPeerUnpaired(contactId: String) {
         val mine = CompletableDeferred<UnpairDelivery>()
@@ -402,16 +421,113 @@ class MessengerEngine(
     }
 
     /**
-     * Borrado local: olvidar (idempotente), baja en [Connections], `contacts.delete`,
-     * `removeClientAuth` y re-publicación. Con `publication` tomado, la re-publicación no ocurre si el
-     * motor ya retiró su .onion al detenerse (`publisher` nulo). Llamar sin cancelación.
+     * Borrado local de `contact` (el leído al empezar): olvidar (idempotente), baja en [Connections] y
+     * `contacts.delete`, los tres con `contactWrites` tomado; después `removeClientAuth` y
+     * re-publicación ([syncOrRetry]: si Tor falla se reintenta). Con `publication` tomado, la
+     * re-publicación no ocurre si el motor ya retiró su .onion al detenerse. Llamar sin cancelación.
+     *
+     * **Re-emparejado entretanto.** El id deriva de la identidad, así que volver a emparejar con el
+     * mismo contacto reutiliza el id. Si el contacto guardado ya no es `contact` (otro `pairSecret` u
+     * otra .onion), el nuevo se respeta: no se olvida, ni se da de baja, ni se borra; solo se quita la
+     * autorización de la .onion ANTIGUA si es distinta de la nueva, y se re-publica.
+     *
+     * Si `contacts.delete` falla se hacen igualmente `removeClientAuth` y la re-publicación y después
+     * se relanza el fallo. Solo tras un borrado correcto se rellenan con ceros los secretos de `contact`
+     * y los del enlace (copias en memoria del motor).
      */
     private suspend fun removeLocally(contact: Contact) {
-        chats.forget(contact.id)
-        connections?.retire(contact.id)
-        contactWrites.withLock { contacts.delete(contact.id) }
-        runCatching { tor.removeClientAuth(contact.peerOnion) }
-        publication.withLock { publisher?.let { p -> runCatching { syncLocked(p) } } }
+        var deleteFailure: Exception? = null
+        var replacement: Contact? = null
+        var retired: Contact? = null
+        contactWrites.withLock {
+            val stored = runCatching { contacts.all() }.getOrNull()?.firstOrNull { it.id == contact.id }
+            if (stored != null && !(stored.pairSecret.contentEquals(contact.pairSecret) && stored.peerOnion == contact.peerOnion)) {
+                replacement = stored
+                return@withLock
+            }
+            chats.forget(contact.id)
+            retired = connections?.retire(contact.id)
+            try {
+                contacts.delete(contact.id)
+            } catch (e: Exception) {
+                deleteFailure = e
+            }
+        }
+        if (replacement?.peerOnion != contact.peerOnion) runCatching { tor.removeClientAuth(contact.peerOnion) }
+        syncOrRetry()
+        deleteFailure?.let { throw it }
+        if (replacement == null) {
+            wipeSecrets(contact)
+            retired?.let { wipeSecrets(it) }
+        }
+    }
+
+    private fun wipeSecrets(contact: Contact) {
+        Primitives.wipe(contact.pairSecret, contact.clientAuthPrivateForPeerOnion)
+    }
+
+    /**
+     * Re-sincroniza la publicación; si falla, la marca pendiente y la reintenta en segundo plano
+     * ([scheduleRepublish]). Sin `publisher` (motor parado) no hace nada: el próximo arranque publica.
+     */
+    private suspend fun syncOrRetry() {
+        val ok = publication.withLock {
+            val p = publisher ?: return@withLock true
+            runCatching { syncLocked(p) }.isSuccess
+        }
+        if (!ok) scheduleRepublish()
+    }
+
+    /**
+     * Marca la publicación pendiente y se asegura de que haya un único reintento en marcha en el scope
+     * del motor (regla R7: [stop] lo cancela y espera con el resto). Sin motor en marcha no hace nada.
+     */
+    private fun scheduleRepublish() {
+        publicationDirty.set(true)
+        val engineScope = workScope ?: return
+        while (true) {
+            val current = republishJob.get()
+            if (current?.isActive == true) return
+            val job = engineScope.launch(start = CoroutineStart.LAZY) { republishLoop() }
+            if (republishJob.compareAndSet(current, job)) {
+                job.start()
+                return
+            }
+            job.cancel()
+        }
+    }
+
+    /**
+     * Reintenta `sync` con la espera creciente de los contactos ([Backoff], `backoffMinMillis` →
+     * `backoffMaxMillis`, o antes si cambia la red) hasta que salga bien y no quede nada pendiente.
+     * Tras [REPUBLISH_FAILURES_BEFORE_NOTICE] fallos seguidos emite [Notice.PublicationFailed] (una vez
+     * por racha). Al terminar vuelve a mirar la marca: un fallo nuevo justo al salir no se pierde.
+     */
+    private suspend fun republishLoop() {
+        val backoff = Backoff(config.backoffMinMillis, config.backoffMaxMillis, random)
+        var failures = 0
+        try {
+            while (publicationDirty.get()) {
+                val seen = republishWake.value
+                val woke = withTimeoutOrNull(backoff.next()) { republishWake.first { it != seen } } != null
+                if (woke) backoff.reset()
+                publicationDirty.set(false)
+                val ok = publication.withLock {
+                    val p = publisher ?: return@withLock true
+                    runCatching { syncLocked(p) }.isSuccess
+                }
+                if (ok) {
+                    failures = 0
+                } else {
+                    publicationDirty.set(true)
+                    if (++failures == REPUBLISH_FAILURES_BEFORE_NOTICE) mutableNotices.emit(Notice.PublicationFailed)
+                }
+            }
+        } finally {
+            val self = currentCoroutineContext()[Job]
+            republishJob.compareAndSet(self, null)
+        }
+        if (publicationDirty.get()) scheduleRepublish()
     }
 
     /**
@@ -449,8 +565,8 @@ class MessengerEngine(
      * Borra todo (spec §6.7 bis): envía `Unpair` en paralelo a los contactos con sesión abierta
      * (mejor esfuerzo, como mucho [WIPE_UNPAIR_MILLIS] en total), detiene el motor como [stop] y, en
      * la misma sección crítica (ningún [start] se cuela en medio), quita las autorizaciones de cliente
-     * de cada contacto, borra contactos e identidad y rellena con ceros el material de claves que
-     * tenía cargado. El siguiente [start] crea una identidad nueva y, al publicarse, una .onion nueva.
+     * de cada contacto, borra contactos e identidad y rellena con ceros el material de claves: el que
+     * usaba la ejecución (identidad, enlaces de [Connections]) y las copias leídas para borrar. El siguiente [start] crea una identidad nueva y, al publicarse, una .onion nueva.
      * Funciona con el motor parado y aunque Tor falle (sus errores se ignoran); termina siempre en
      * `Stopped`. Solo lanza si falla el borrado de los repositorios (los fallos al detener el motor
      * se adjuntan como suprimidos de ese error, o se ignoran si el borrado fue bien).
@@ -461,6 +577,14 @@ class MessengerEngine(
         bootJob?.cancel()
         lifecycle.withLock {
             withContext(NonCancellable) {
+                // Material vivo de la ejecución (puede no ser el mismo array que devuelve el repositorio).
+                val live = buildList {
+                    identity?.let { id ->
+                        add(id.identityPrivate)
+                        id.onionPrivateKey?.let(::add)
+                    }
+                    connections?.let { addAll(it.liveSecrets()) }
+                }
                 var releaseFailure: Exception? = null
                 try {
                     if (running) releaseResources()
@@ -475,6 +599,7 @@ class MessengerEngine(
                     releaseFailure?.let { e.addSuppressed(it) }
                     throw e
                 }
+                live.forEach { Primitives.wipe(it) }
             }
         }
     }
@@ -762,9 +887,8 @@ class MessengerEngine(
 
     /** Retira una clave pendiente (emparejamiento terminado sin éxito) y re-sincroniza si estaba. */
     private suspend fun releasePublication(key: ByteArray) {
-        publication.withLock {
-            if (pendingClientAuthKeys.remove(key.toHex()) != null) publisher?.let { syncLocked(it) }
-        }
+        val removed = publication.withLock { pendingClientAuthKeys.remove(key.toHex()) != null }
+        if (removed) syncOrRetry()
     }
 
     /**
@@ -775,8 +899,12 @@ class MessengerEngine(
         val id = identity ?: throw IllegalStateException(InvitationMessages.NOT_ACTIVE)
         val saved = contacts.all()
         val reserved = if (saved.isEmpty()) pendingClientAuthKeys.values.toList() else emptyList()
-        identity = p.sync(id, saved, reserved)
-        mutableMyOnion.value = p.publishedOnion
+        try {
+            identity = p.sync(id, saved, reserved)
+        } finally {
+            // También si Tor falla a medias (p. ej. retiró pero no volvió a publicar).
+            mutableMyOnion.value = p.publishedOnion
+        }
     }
 
     /**
@@ -833,10 +961,8 @@ class MessengerEngine(
         }
         runCatching { tor.removeClientAuth(contact.peerOnion) }
         if (previous != null) runCatching { tor.addClientAuth(previous.peerOnion, previous.clientAuthPrivateForPeerOnion) }
-        publication.withLock {
-            pendingClientAuthKeys.remove(contact.myClientAuthPublic.toHex())
-            publisher?.let { p -> runCatching { syncLocked(p) } }
-        }
+        publication.withLock { pendingClientAuthKeys.remove(contact.myClientAuthPublic.toHex()) }
+        syncOrRetry()
     }
 
     /** Conexión entrante en el listener: handshake de sesión en otra corrutina ([Connections.accept]). */
@@ -890,6 +1016,9 @@ class MessengerEngine(
             publisher = null
             pendingClientAuthKeys.clear()
         }
+        // El reintento colgaba de engineJob (ya cancelado y esperado); el próximo arranque publica de cero.
+        republishJob.set(null)
+        publicationDirty.set(false)
         runCatching { tor.stop() }
         mutableMyOnion.value = null
         identity = null
@@ -902,6 +1031,9 @@ private const val BACKLOG = 50
 
 /** Avisos en búfer por suscriptor de [MessengerEngine.notices]. */
 private const val NOTICE_BUFFER = 256
+
+/** Fallos seguidos al re-publicar antes de emitir [Notice.PublicationFailed]. */
+private const val REPUBLISH_FAILURES_BEFORE_NOTICE = 3
 
 /** Tiempo total máximo de [MessengerEngine.wipeAll] para enviar `Unpair` a las sesiones abiertas. */
 private const val WIPE_UNPAIR_MILLIS = 2_500L

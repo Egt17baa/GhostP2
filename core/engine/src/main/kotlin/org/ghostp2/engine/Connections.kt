@@ -29,6 +29,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.ghostp2.core.crypto.KeyPair25519
+import org.ghostp2.core.crypto.Primitives
 import org.ghostp2.core.crypto.RatchetChannel
 import org.ghostp2.core.protocol.CloseReason
 import org.ghostp2.core.protocol.ContactKeys
@@ -53,6 +54,13 @@ sealed interface Notice {
 
     /** La autenticación con el contacto falló al llamarle: hay que volver a emparejar. */
     data class IdentityChanged(val contactId: String) : Notice
+
+    /**
+     * Diagnóstico: Tor falló varias veces seguidas al actualizar la publicación de la .onion
+     * permanente (p. ej. tras borrar un contacto, para retirar su autorización). El motor sigue
+     * reintentando con espera creciente (y al cambiar la red); se emite una vez por racha de fallos.
+     */
+    data object PublicationFailed : Notice
 }
 
 /**
@@ -189,6 +197,14 @@ internal class Connections(
         @Volatile var unpairing = false
         @Volatile var peerUnpaired = false
         var loop: Job? = null
+
+        /**
+         * SHA-256 del `pairSecret` al darlo de baja ([retire]): el motor rellena después con ceros los
+         * secretos de `contact`, así que la comparación con instantáneas posteriores usa esta huella.
+         */
+        @Volatile var retiredSecretDigest: ByteArray? = null
+
+        fun secretDigest(): ByteArray = retiredSecretDigest ?: Primitives.sha256(contact.pairSecret)
     }
 
     private sealed interface Outcome {
@@ -254,9 +270,12 @@ internal class Connections(
         // Cualquier fallo del handshake (UNKNOWN_CALLER, CONNECTION, TIMEOUT…) cierra el flujo y sale.
         val (keys, channel) = SessionHandshake.respond(stream, identity, candidates)
         val contact = byKeys.getValue(keys)
-        // El observador puede ir un instante por detrás de un emparejamiento recién guardado.
-        val link = links.value[contact.id] ?: withTimeoutOrNull(LINK_WAIT_MILLIS) {
-            links.first { it.containsKey(contact.id) }[contact.id]
+        // El observador puede ir un instante por detrás de un emparejamiento recién guardado. El enlace
+        // debe ser el de ESTAS claves: un enlace antiguo del mismo id (borrándose, con otro pairSecret)
+        // nunca recibe la sesión de un emparejamiento nuevo (le enviaría el Unpair del borrado).
+        val matches = { l: Link? -> l != null && !l.removed && l.contact.pairSecret.contentEquals(contact.pairSecret) }
+        val link = links.value[contact.id]?.takeIf(matches) ?: withTimeoutOrNull(LINK_WAIT_MILLIS) {
+            links.first { matches(it[contact.id]) }[contact.id]
         }
         if (link == null) {
             discard(stream, channel)
@@ -269,7 +288,9 @@ internal class Connections(
 
     // --- Contactos y bucles ---
 
-    private suspend fun reconcile(list: List<Contact>) {
+    private suspend fun reconcile(all: List<Contact>) {
+        // Un contacto con el pairSecret a ceros es una copia ya borrada por el motor (nunca uno válido).
+        val list = all.filterNot { c -> c.pairSecret.all { it == 0.toByte() } }
         val byId = list.associateBy { it.id }
         val current = links.value
         for ((id, link) in current) {
@@ -281,11 +302,12 @@ internal class Connections(
             // Un enlace dado de baja solo vuelve con un emparejamiento nuevo (otro pairSecret); con el
             // mismo contacto es una instantánea atrasada y se queda como está.
             val stale = existing != null && (existing.removed || existing.unpairing) &&
-                !existing.contact.pairSecret.contentEquals(contact.pairSecret)
+                !existing.secretDigest().contentEquals(Primitives.sha256(contact.pairSecret))
             if (stale) removeLink(existing)
             val link = if (existing == null || stale) Link(contact.id, contact).also { next[contact.id] = it } else existing
             link.mutex.withLock {
-                link.contact = contact
+                // Un enlace dado de baja conserva su contacto (cuyos secretos el motor ya pudo borrar).
+                if (!link.removed) link.contact = contact
                 // `exitIfInactive` pone `loop = null` con este mismo cerrojo; `!isActive` recupera además
                 // un bucle que terminó por una excepción inesperada.
                 if (contact.status == ContactStatus.ACTIVE && link.loop?.isActive != true && !closed &&
@@ -379,11 +401,14 @@ internal class Connections(
     /**
      * Baja definitiva del contacto antes de borrarlo del repositorio: sin bucle, sin presencia y sin
      * sesiones nuevas. Si aún queda una sesión (p. ej. entró una llamada suya al agotarse la ventana),
-     * se le envía `Unpair` por si acaso (sin esperar). Idempotente; sin enlace no hace nada.
+     * se le envía `Unpair` por si acaso (sin esperar). Devuelve el contacto que tenía el enlace (para
+     * que el motor rellene con ceros sus secretos una vez borrado del repositorio), o `null` sin
+     * enlace. Idempotente.
      */
-    suspend fun retire(contactId: String) {
-        val link = links.value[contactId] ?: return
+    suspend fun retire(contactId: String): Contact? {
+        val link = links.value[contactId] ?: return null
         val active = link.mutex.withLock {
+            if (link.retiredSecretDigest == null) link.retiredSecretDigest = Primitives.sha256(link.contact.pairSecret)
             link.removed = true
             link.unpairing = true
             link.loop?.cancel()
@@ -393,7 +418,17 @@ internal class Connections(
             link.session.value
         }
         active?.let { a -> sessionsScope.launch { a.peer.sendUnpair() } }
+        return link.contact
     }
+
+    /**
+     * Material de claves vivo de esta ejecución (privada de identidad y secretos de los contactos de
+     * cada enlace), para que borrar todo lo rellene con ceros aunque el repositorio entregue copias.
+     */
+    fun liveSecrets(): List<ByteArray> =
+        listOf(identity.privateKey) + links.value.values.flatMap { l ->
+            listOf(l.contact.pairSecret, l.contact.clientAuthPrivateForPeerOnion)
+        }
 
     /**
      * Borrar todo: para todos los bucles y envía `Unpair` en paralelo a cada sesión abierta, esperando

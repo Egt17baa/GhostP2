@@ -61,8 +61,18 @@ internal class OnionPublisher(
         )
         publishedOnion = service.onion
         publishedKeys = keySet
+        knownPrivateKey?.fill(0)
         knownPrivateKey = service.privateKey.copyOf()
-        val updated = identity.copy(onionPrivateKey = service.privateKey, onion = service.onion)
+        // Misma clave que ya tiene la identidad: se conserva ese array (el que se borra al borrar todo)
+        // y la copia que devolvió Tor se rellena con ceros, en vez de dejar arrays duplicados sueltos.
+        val held = identity.onionPrivateKey
+        val key = if (held != null && held.contentEquals(service.privateKey)) {
+            service.privateKey.fill(0)
+            held
+        } else {
+            service.privateKey
+        }
+        val updated = identity.copy(onionPrivateKey = key, onion = service.onion)
         if (updated != identity) identities.save(updated)
         updated
     }
