@@ -32,6 +32,7 @@ object Notifications {
     private const val MESSAGE_ID = 10
     private const val UNPAIRED_ID = 11
     private const val IDENTITY_CHANGED_ID = 12
+    private const val STOPPED_ID = 2
 
     /** Notificación lista para publicar con `notify(tag, id, notification)`. */
     class Posted(val tag: String, val id: Int, val notification: Notification)
@@ -61,8 +62,11 @@ object Notifications {
         )
     }
 
-    /** Notificación fija del servicio: "GhostP2 activo · cifrado" con la acción "Desconectar". */
-    fun status(context: Context): Notification {
+    /**
+     * Notificación fija del servicio: "GhostP2 activo · cifrado" con la acción "Desconectar"; con
+     * `error` (motor en `Error`), "GhostP2 sin conexión · error", con la misma acción.
+     */
+    fun status(context: Context, error: Boolean = false): Notification {
         createChannels(context)
         val stop = PendingIntent.getService(
             context,
@@ -72,7 +76,10 @@ object Notifications {
         )
         return NotificationCompat.Builder(context, CHANNEL_STATUS)
             .setSmallIcon(R.drawable.ic_stat_ghost)
-            .setContentTitle(context.getString(R.string.notification_status_title))
+            .setContentTitle(
+                context.getString(if (error) R.string.notification_status_error_title else R.string.notification_status_title),
+            )
+            .apply { if (error) setContentText(context.getString(R.string.notification_status_error_text)) }
             .setContentIntent(openApp(context))
             .setOngoing(true)
             .setOnlyAlertOnce(true)
@@ -82,6 +89,26 @@ object Notifications {
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
             .addAction(0, context.getString(R.string.notification_action_disconnect), stop)
             .build()
+    }
+
+    /** Sustituye la notificación fija (servicio ya en primer plano) según el estado del motor. */
+    fun updateStatus(context: Context, error: Boolean) {
+        notifyIfAllowed(context, null, STATUS_ID, status(context, error))
+    }
+
+    /**
+     * Tras un reinicio automático del servicio que no pudo arrancar (p. ej. almacenamiento no disponible):
+     * "GhostP2 se ha detenido · abre la app".
+     */
+    fun postStopped(context: Context) {
+        val n = NotificationCompat.Builder(context, CHANNEL_STATUS)
+            .setSmallIcon(R.drawable.ic_stat_ghost)
+            .setContentTitle(context.getString(R.string.notification_stopped_title))
+            .setContentText(context.getString(R.string.notification_stopped_text))
+            .setContentIntent(openApp(context))
+            .setAutoCancel(true)
+            .build()
+        notifyIfAllowed(context, null, STOPPED_ID, n)
     }
 
     /** "Nuevo mensaje de <nombre>", sin texto del mensaje; versión pública "Nuevo mensaje". */
@@ -116,7 +143,8 @@ object Notifications {
 
     /**
      * Notificación para un aviso del motor, o `null` si el aviso es solo de diagnóstico
-     * (`PublicationFailed`, `ClientAuthFailed`: los muestra la pantalla de diagnóstico, no molestan).
+     * (`PublicationFailed`, `ClientAuthFailed`: no se notifican; el último se ve en la pantalla de
+     * diagnóstico, ver [AppContainer.lastDiagnostic]).
      * `contactName` es el nombre guardado del contacto (o `null` si ya no se conoce).
      */
     fun forNotice(context: Context, notice: Notice, contactName: String?): Posted? {
@@ -134,13 +162,17 @@ object Notifications {
 
     /** Publica [posted] si el usuario permite notificaciones (en API 33+ hace falta `POST_NOTIFICATIONS`). */
     fun post(context: Context, posted: Posted) {
+        notifyIfAllowed(context, posted.tag, posted.id, posted.notification)
+    }
+
+    private fun notifyIfAllowed(context: Context, tag: String?, id: Int, notification: Notification) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
             PackageManager.PERMISSION_GRANTED
         ) {
             return
         }
-        NotificationManagerCompat.from(context).notify(posted.tag, posted.id, posted.notification)
+        NotificationManagerCompat.from(context).notify(tag, id, notification)
     }
 
     private fun contactNotification(

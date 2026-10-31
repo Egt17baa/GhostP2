@@ -37,9 +37,11 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import org.ghostp2.engine.AcceptResult
 import org.ghostp2.engine.ChatContent
@@ -50,6 +52,7 @@ import org.ghostp2.engine.Direction
 import org.ghostp2.engine.EngineStatus
 import org.ghostp2.engine.InvitationHandle
 import org.ghostp2.engine.InvitationState
+import org.ghostp2.engine.Notice
 import org.ghostp2.engine.Presence
 
 /*
@@ -80,6 +83,7 @@ fun DiagnosticScreen(container: AppContainer, actions: DiagnosticActions, batter
         when (val s = storage) {
             StorageState.Corrupted -> CorruptedPanel(container)
             is StorageState.Unavailable -> UnavailablePanel(container, s)
+            StorageState.Failed -> FailedPanel(container)
             StorageState.Unknown -> Unit
             StorageState.Ok -> EnginePanel(container, actions, batteryIgnoring)
         }
@@ -141,6 +145,22 @@ private fun UnavailablePanel(container: AppContainer, state: StorageState.Unavai
 }
 
 @Composable
+private fun FailedPanel(container: AppContainer) {
+    val ui = rememberCoroutineScope()
+    Text(stringResource(R.string.diag_unexpected), style = MaterialTheme.typography.titleMedium)
+    Button(onClick = { ui.launch { container.checkStorage() } }) { Text(stringResource(R.string.diag_retry)) }
+}
+
+/** Contactos guardados, o error de lectura (se muestra, no se esconde como lista vacía). */
+private sealed interface ContactsView {
+    data object Loading : ContactsView
+
+    data class Loaded(val list: List<Contact>) : ContactsView
+
+    data object Failed : ContactsView
+}
+
+@Composable
 private fun ConfirmDialog(title: String, text: String, onConfirm: () -> Unit, onDismiss: () -> Unit) {
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -157,14 +177,33 @@ private fun EnginePanel(container: AppContainer, actions: DiagnosticActions, bat
     val status by engine.status.collectAsState()
     val myOnion by engine.myOnion.collectAsState()
     val presence by engine.presence.collectAsState()
-    val contacts by remember { container.contacts.contacts.catch { emit(emptyList()) } }.collectAsState(emptyList())
+    val startFailed by container.startFailed.collectAsState()
+    val lastDiagnostic by container.lastDiagnostic.collectAsState()
+    var contactsAttempt by remember { mutableIntStateOf(0) }
+    val contactsView by remember(contactsAttempt) {
+        container.contacts.contacts
+            .map<List<Contact>, ContactsView> { ContactsView.Loaded(it) }
+            .catch { emit(ContactsView.Failed) }
+    }.collectAsState(ContactsView.Loading)
+    val contacts = (contactsView as? ContactsView.Loaded)?.list.orEmpty()
     var openChat by remember { mutableStateOf<String?>(null) }
 
     Text(statusText(status))
+    if (startFailed) Text(stringResource(R.string.diag_unexpected))
     when (status) {
-        EngineStatus.Stopped -> Button(onClick = actions.activate) { Text(stringResource(R.string.diag_activate)) }
-        is EngineStatus.Error -> Button(onClick = actions.activate) { Text(stringResource(R.string.diag_retry)) }
+        EngineStatus.Stopped -> Button(onClick = actions.activate) {
+            Text(stringResource(if (startFailed) R.string.diag_retry else R.string.diag_activate))
+        }
+        is EngineStatus.Error -> Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = actions.activate) { Text(stringResource(R.string.diag_retry)) }
+            OutlinedButton(onClick = actions.disconnect) { Text(stringResource(R.string.diag_disconnect)) }
+        }
         else -> OutlinedButton(onClick = actions.disconnect) { Text(stringResource(R.string.diag_disconnect)) }
+    }
+    when (val notice = lastDiagnostic) {
+        Notice.PublicationFailed -> Text(stringResource(R.string.diag_last_notice_publication))
+        is Notice.ClientAuthFailed -> Text(pluralStringResource(R.plurals.diag_last_notice_client_auth, notice.contactIds.size, notice.contactIds.size))
+        else -> Unit
     }
     Text(myOnion?.let { stringResource(R.string.diag_my_onion, abbreviate(it)) } ?: stringResource(R.string.diag_my_onion_none))
     if (batteryIgnoring) {
@@ -177,6 +216,10 @@ private fun EnginePanel(container: AppContainer, actions: DiagnosticActions, bat
     HorizontalDivider()
     val online = contacts.count { presence[it.id] == Presence.ONLINE }
     Text(stringResource(R.string.diag_contacts, contacts.size, online), style = MaterialTheme.typography.titleMedium)
+    if (contactsView == ContactsView.Failed) {
+        Text(stringResource(R.string.diag_contacts_error))
+        OutlinedButton(onClick = { contactsAttempt++ }) { Text(stringResource(R.string.diag_retry)) }
+    }
     contacts.forEach { contact ->
         Text(
             "${contact.name} · ${presenceText(presence[contact.id])}",
@@ -306,6 +349,7 @@ private fun MiniChat(container: AppContainer, contact: Contact, engineOnline: Bo
     val conversations by container.engine.conversations.collectAsState()
     val items: List<ChatItem> = conversations[contact.id].orEmpty()
     var draft by remember(contact.id) { mutableStateOf("") }
+    var sendFailed by remember(contact.id) { mutableStateOf(false) }
 
     HorizontalDivider()
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -323,10 +367,16 @@ private fun MiniChat(container: AppContainer, contact: Contact, engineOnline: Bo
     Button(
         enabled = engineOnline && draft.isNotBlank(),
         onClick = {
+            // Texto demasiado largo u otro fallo: aviso breve, el borrador se conserva.
             runCatching { container.engine.sendText(contact.id, draft) }
-                .onSuccess { draft = "" }
+                .onSuccess {
+                    draft = ""
+                    sendFailed = false
+                }
+                .onFailure { sendFailed = true }
         },
     ) { Text(stringResource(R.string.diag_send)) }
+    if (sendFailed) Text(stringResource(R.string.diag_send_failed))
 }
 
 @Composable

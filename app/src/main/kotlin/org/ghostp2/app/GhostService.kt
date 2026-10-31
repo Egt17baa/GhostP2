@@ -14,8 +14,11 @@ import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.ghostp2.engine.EngineStatus
 import org.ghostp2.engine.Notice
 
 /**
@@ -25,12 +28,18 @@ import org.ghostp2.engine.Notice
  *   del [AppContainer] (que antes comprueba el almacenamiento; si falla, el servicio se detiene solo y la
  *   pantalla muestra el error). Registra un `NetworkCallback` de la red por defecto que llama a
  *   `engine.onNetworkChanged()`.
- * - [ACTION_STOP] (acción "Desconectar"): detiene el motor y el servicio.
- * - Mientras existe, reenvía `engine.notices` a notificaciones sin contenido.
+ * - Intent `null`: el sistema recrea el servicio tras matar el proceso (`START_STICKY`, regla R19);
+ *   se comporta igual que [ACTION_START]. Si entonces falla el almacenamiento, se detiene y deja una
+ *   notificación que pide abrir la app.
+ * - [ACTION_STOP] (acción "Desconectar") o cualquier otra acción: detiene el motor y el servicio, que
+ *   ya no vuelve solo (`stopSelf`: el sistema solo recrea servicios iniciados).
+ * - Mientras existe, reenvía `engine.notices` a notificaciones sin contenido, y con el motor en `Error`
+ *   la notificación fija pasa a "sin conexión" (con "Desconectar").
  *
  * No crea Tor ni repositorios: todo es del [AppContainer] (uno por proceso). Si Tor falla con el motor en
  * marcha (regla R18) el motor queda en `Error` y el servicio sigue: la pantalla ofrece "Reintentar", que
- * vuelve a enviar [ACTION_START]. `START_NOT_STICKY`: no se reanuda solo tras matar el proceso (spec §6.9).
+ * vuelve a enviar [ACTION_START]. No se arranca solo al encender el móvil (spec §6.9: no hay receptor de
+ * `BOOT_COMPLETED`); `START_STICKY` solo cubre que el sistema mate el proceso con GhostP2 activo.
  */
 class GhostService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -38,6 +47,9 @@ class GhostService : Service() {
 
     /** Cambia con cada START/STOP (solo en el hilo principal): un arranque antiguo no detiene uno nuevo. */
     private var generation = 0
+
+    /** En primer plano por un START (solo en el hilo principal). */
+    private var foreground = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -47,12 +59,22 @@ class GhostService : Service() {
         // UNDISPATCHED: suscrito ya al volver, antes de arrancar el motor (los avisos no se reproducen).
         scope.launch(start = CoroutineStart.UNDISPATCHED) {
             container.engine.notices.collect { notice ->
-                val name = when (notice) {
-                    is Notice.MessageArrived -> nameOf(notice.contactId)
-                    is Notice.IdentityChanged -> nameOf(notice.contactId)
-                    else -> null
+                // Un fallo al notificar nunca cierra la app ni corta los avisos siguientes.
+                runCatching {
+                    val name = when (notice) {
+                        is Notice.MessageArrived -> nameOf(notice.contactId)
+                        is Notice.IdentityChanged -> nameOf(notice.contactId)
+                        else -> null
+                    }
+                    Notifications.forNotice(this@GhostService, notice, name)?.let { Notifications.post(this@GhostService, it) }
                 }
-                Notifications.forNotice(this@GhostService, notice, name)?.let { Notifications.post(this@GhostService, it) }
+            }
+        }
+        scope.launch {
+            container.engine.status.map { it is EngineStatus.Error }.distinctUntilChanged().collect { error ->
+                withContext(Dispatchers.Main) {
+                    if (foreground) runCatching { Notifications.updateStatus(this@GhostService, error) }
+                }
             }
         }
     }
@@ -61,37 +83,45 @@ class GhostService : Service() {
         runCatching { container.contacts.all().firstOrNull { it.id == contactId }?.name }.getOrNull()
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        when (intent?.action) {
-            ACTION_START -> onStart()
+        when {
+            intent == null -> onStart(restarted = true)
+            intent.action == ACTION_START -> onStart(restarted = false)
             else -> onStop() // ACTION_STOP (o un intent desconocido): nunca quedarse en marcha sin pedirlo.
         }
-        return START_NOT_STICKY
+        return START_STICKY
     }
 
-    private fun onStart() {
+    private fun onStart(restarted: Boolean) {
         ServiceCompat.startForeground(
             this,
             Notifications.STATUS_ID,
-            Notifications.status(this),
+            Notifications.status(this, error = container.engine.status.value is EngineStatus.Error),
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
             } else {
                 0
             },
         )
+        foreground = true
         registerNetworkCallback()
         val mine = ++generation
         val started = container.start()
         scope.launch {
             if (!started.await()) {
                 // Almacenamiento ilegible o no disponible: sin servicio (la pantalla muestra el error).
-                withContext(Dispatchers.Main) { if (generation == mine) onStop() }
+                withContext(Dispatchers.Main) {
+                    if (generation == mine) {
+                        onStop()
+                        if (restarted) runCatching { Notifications.postStopped(this@GhostService) }
+                    }
+                }
             }
         }
     }
 
     private fun onStop() {
         generation++
+        foreground = false
         container.stop()
         unregisterNetworkCallback()
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)

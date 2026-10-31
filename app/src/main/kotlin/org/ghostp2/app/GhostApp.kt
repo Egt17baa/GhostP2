@@ -3,7 +3,9 @@ package org.ghostp2.app
 import android.app.Application
 import android.content.Context
 import android.content.Intent
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
@@ -24,6 +26,7 @@ import org.ghostp2.data.createRepositories
 import org.ghostp2.engine.ContactRepository
 import org.ghostp2.engine.IdentityRepository
 import org.ghostp2.engine.MessengerEngine
+import org.ghostp2.engine.Notice
 import org.ghostp2.engine.TorTransport
 import org.ghostp2.tor.KmpTorTransport
 
@@ -81,6 +84,12 @@ sealed interface StorageState {
 
     data object Ok : StorageState
 
+    /**
+     * Error inesperado al comprobar el almacenamiento (ni corrupción ni fallo pasajero conocido): solo
+     * "Reintentar"; nunca se borra nada por esto.
+     */
+    data object Failed : StorageState
+
     /** Datos ilegibles e irrecuperables: solo cabe "Empezar de cero" ([AppContainer.wipeCorrupted]). */
     data object Corrupted : StorageState
 
@@ -129,6 +138,33 @@ class AppContainer internal constructor(
     private val mutableStorage = MutableStateFlow<StorageState>(StorageState.Unknown)
     val storage: StateFlow<StorageState> = mutableStorage.asStateFlow()
 
+    private val mutableStartFailed = MutableStateFlow(false)
+
+    /**
+     * El último arranque falló por un error inesperado (el motor quedó detenido): la pantalla muestra un
+     * error genérico con "Reintentar". Se borra al volver a pedir [start].
+     */
+    val startFailed: StateFlow<Boolean> = mutableStartFailed.asStateFlow()
+
+    private val mutableLastDiagnostic = MutableStateFlow<Notice?>(null)
+
+    /**
+     * Último aviso de diagnóstico del motor ([Notice.PublicationFailed] o [Notice.ClientAuthFailed]),
+     * para la pantalla de diagnóstico; no contiene secretos (como mucho ids de contactos).
+     */
+    val lastDiagnostic: StateFlow<Notice?> = mutableLastDiagnostic.asStateFlow()
+
+    init {
+        // Suscrito desde ya (UNDISPATCHED): los avisos no se reproducen.
+        scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            engine.notices.collect { notice ->
+                if (notice is Notice.PublicationFailed || notice is Notice.ClientAuthFailed) {
+                    mutableLastDiagnostic.value = notice
+                }
+            }
+        }
+    }
+
     /** Un arranque pedido con [start]: su corrutina y su resultado. */
     private class StartRun(val job: Job, val result: Deferred<Boolean>)
 
@@ -152,6 +188,11 @@ class AppContainer internal constructor(
         } catch (_: StoreUnavailableException) {
             val previous = mutableStorage.value as? StorageState.Unavailable
             StorageState.Unavailable((previous?.failures ?: 0) + 1)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            // Inesperado: falla cerrado (ni texto en claro ni borrados); la causa no se registra.
+            StorageState.Failed
         }
         mutableStorage.value = result
         return result
@@ -166,11 +207,20 @@ class AppContainer internal constructor(
         startRun?.takeIf { it.job.isActive }?.let { return it.result }
         val previousStop = stopJob
         val result = CompletableDeferred<Boolean>()
+        mutableStartFailed.value = false
         val job = scope.launch {
             previousStop?.join()
-            if (checkStorage() == StorageState.Ok) {
-                engine.start()
-                result.complete(true)
+            try {
+                if (checkStorage() == StorageState.Ok) {
+                    engine.start()
+                    result.complete(true)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // Inesperado (engine.start() no debería lanzar): se deja el motor detenido.
+                mutableStartFailed.value = true
+                runCatching { engine.stop() }
             }
         }
         // Cancelado o con el almacenamiento fallando: false.
@@ -187,7 +237,13 @@ class AppContainer internal constructor(
         scope.launch {
             run?.job?.cancelAndJoin()
             previousStop?.join()
-            engine.stop()
+            try {
+                engine.stop()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // engine.stop() termina en Stopped aunque falle al liberar; sin cerrar la app.
+            }
         }.also { stopJob = it }
     }
 

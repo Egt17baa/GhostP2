@@ -8,6 +8,10 @@
     <string name="channel_messages_name">Mensajes y avisos</string>
     <string name="channel_messages_description">Mensajes nuevos y avisos de tus contactos (sin contenido)</string>
     <string name="notification_status_title">GhostP2 activo · cifrado</string>
+    <string name="notification_status_error_title">GhostP2 sin conexión · error</string>
+    <string name="notification_status_error_text">Abre la app para reintentar</string>
+    <string name="notification_stopped_title">GhostP2 se ha detenido</string>
+    <string name="notification_stopped_text">Abre la app para volver a activarlo</string>
     <string name="notification_action_disconnect">Desconectar</string>
     <string name="notification_message_title">Nuevo mensaje de %1$s</string>
     <string name="notification_message_public">Nuevo mensaje</string>
@@ -59,6 +63,16 @@
     <string name="diag_delivered">entregado</string>
     <string name="diag_failed">no enviado</string>
     <string name="diag_send_only_online">Solo se puede enviar con GhostP2 en línea</string>
+
+    <string name="diag_send_failed">No se pudo enviar</string>
+    <string name="diag_contacts_error">No se pudieron leer tus contactos</string>
+    <string name="diag_unexpected">Ha ocurrido un error inesperado. Tus datos no se han tocado.</string>
+    <string name="diag_last_notice_publication">Último aviso: no se pudo actualizar la publicación de tu .onion (se sigue reintentando)</string>
+    <plurals name="diag_last_notice_client_auth">
+        <item quantity="one">Último aviso: no se pudo registrar en Tor la autorización de %1$d contacto; no podrás llamarle hasta reiniciar</item>
+        <item quantity="many">Último aviso: no se pudo registrar en Tor la autorización de %1$d contactos; no podrás llamarles hasta reiniciar</item>
+        <item quantity="other">Último aviso: no se pudo registrar en Tor la autorización de %1$d contactos; no podrás llamarles hasta reiniciar</item>
+    </plurals>
 
     <!-- Errores del almacenamiento cifrado -->
     <string name="store_corrupted">No se pudieron leer tus datos cifrados</string>

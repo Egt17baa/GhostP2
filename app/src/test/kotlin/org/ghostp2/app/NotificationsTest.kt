@@ -42,10 +42,20 @@ class NotificationsTest {
         assertEquals(1, n.actions.size)
         assertEquals("Desconectar", n.actions[0].title.toString())
         val pending = shadowOf(n.actions[0].actionIntent)
-        assertTrue(pending.isServiceIntent)
+        assertTrue(pending.isService)
         val intent = pending.savedIntent
         assertEquals(GhostService.ACTION_STOP, intent.action)
         assertEquals(GhostService::class.java.name, intent.component?.className)
+    }
+
+    @Test
+    fun errorStatusNotificationKeepsStopAction() {
+        val n = Notifications.status(context, error = true)
+
+        assertEquals("GhostP2 sin conexión · error", n.extras.getCharSequence(Notification.EXTRA_TITLE).toString())
+        assertFalse(n.visibleTexts().any { it.contains("activo") })
+        assertTrue(n.flags and Notification.FLAG_ONGOING_EVENT != 0)
+        assertEquals(GhostService.ACTION_STOP, shadowOf(n.actions.single().actionIntent).savedIntent.action)
     }
 
     @Test
