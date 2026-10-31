@@ -67,12 +67,18 @@ class FakeTorNetwork {
         pendingFailures.set(n)
     }
 
+    /** Registra el servicio; si la .onion ya está publicada (por cualquier instancia) lanza `IOException`. */
     internal fun register(service: FakeService) {
-        services.update { it + (service.onion to service) }
+        while (true) {
+            val current = services.value
+            if (current.containsKey(service.onion)) throw IOException("ya publicado")
+            if (services.compareAndSet(current, current + (service.onion to service))) return
+        }
     }
 
-    internal fun unregister(onion: String) {
-        services.update { it - onion }
+    /** Retira la .onion solo si la publicó `owner`; si no, no hace nada (como Tor con otro proceso). */
+    internal fun unregister(onion: String, owner: FakeTor) {
+        services.update { map -> if (map[onion]?.owner === owner) map - onion else map }
     }
 
     internal fun unregisterAll(owner: FakeTor) {
@@ -106,6 +112,8 @@ class FakeTorNetwork {
  * privada x25519 cuya pública esté en la lista. Las .onion son direcciones v3 válidas derivadas de una
  * clave ed25519; la `privateKey` publicada son 64 bytes = semilla ed25519(32) || pública(32).
  * `connect` exige estado [TorState.Ready]; `stop` retira los servicios publicados por esta instancia.
+ * Publicar una .onion que ya está publicada lanza `IOException("ya publicado")`, y `unpublishService`
+ * solo retira servicios publicados por esta misma instancia.
  */
 class FakeTor(private val network: FakeTorNetwork) : TorTransport {
     private val mutableState = MutableStateFlow<TorState>(TorState.Off)
@@ -144,7 +152,7 @@ class FakeTor(private val network: FakeTorNetwork) : TorTransport {
     }
 
     override suspend fun unpublishService(onion: String) {
-        network.unregister(OnionAddress.normalize(onion))
+        network.unregister(OnionAddress.normalize(onion), this)
     }
 
     override suspend fun addClientAuth(onion: String, privateKey: ByteArray) {

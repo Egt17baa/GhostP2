@@ -167,6 +167,48 @@ class FakeTorTest {
     }
 
     @Test
+    fun publishingAnAlreadyPublishedOnionFails() = runBlocking {
+        val (net, a, b) = pair()
+        val server = echoServer()
+        val svc = a.publishService(null, emptyList(), port, server.localPort)
+        // Ni el mismo dueño ni otro FakeTor pueden publicar dos veces la misma dirección.
+        val e1 = assertThrows<IOException> { a.publishService(svc.privateKey, emptyList(), port, server.localPort) }
+        assertEquals("ya publicado", e1.message)
+        assertThrows<IOException> { b.publishService(svc.privateKey, emptyList(), port, server.localPort) }
+        assertEquals(1, net.published.value.size)
+        // Una vez retirada, se puede volver a publicar.
+        a.unpublishService(svc.onion)
+        assertEquals(svc.onion, b.publishService(svc.privateKey, emptyList(), port, server.localPort).onion)
+        Unit
+    }
+
+    @Test
+    fun unpublishOnlyRemovesOwnServices() = runBlocking {
+        val (net, a, b) = pair()
+        val server = echoServer()
+        val svc = a.publishService(null, emptyList(), port, server.localPort)
+        b.unpublishService(svc.onion)
+        assertTrue(net.published.value.containsKey(svc.onion))
+        b.connect(svc.onion, port, 5_000).use { assertEquals(42, it.ping()) }
+        a.unpublishService(svc.onion)
+        assertFalse(net.published.value.containsKey(svc.onion))
+        Unit
+    }
+
+    @Test
+    fun stopRemovesOnlyThatInstancesServices() = runBlocking {
+        val (net, a, b) = pair()
+        val server = echoServer()
+        val a1 = a.publishService(null, emptyList(), port, server.localPort)
+        val a2 = a.publishService(null, listOf(Primitives.generateX25519().publicKey), port, server.localPort)
+        val b1 = b.publishService(null, emptyList(), port, server.localPort)
+        assertEquals(setOf(a1.onion, a2.onion, b1.onion), net.published.value.keys)
+        a.stop()
+        assertEquals(setOf(b1.onion), net.published.value.keys)
+        Unit
+    }
+
+    @Test
     fun modelsUseContentEqualityAndHideSecrets() {
         val id = ByteArray(32) { it.toByte() }
         val c1 = Contact(
