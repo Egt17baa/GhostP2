@@ -4,6 +4,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableJob
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
@@ -181,8 +182,11 @@ class MessengerEngine(
         stopRequests.incrementAndGet()
         bootJob?.cancel()
         lifecycle.withLock {
-            if (running) releaseResources()
-            mutableStatus.value = EngineStatus.Stopped
+            try {
+                if (running) releaseResources()
+            } finally {
+                mutableStatus.value = EngineStatus.Stopped
+            }
         }
     }
 
@@ -365,6 +369,7 @@ class MessengerEngine(
      * Si no tengo contactos, mi .onion permanente se publica antes de enviar la oferta, ya con la clave
      * del nuevo contacto (regla R10); si falla, esa clave se retira. Nunca lanza (salvo cancelación).
      */
+    @OptIn(DelicateCoroutinesApi::class) // ATOMIC: el finally de runInvitee debe borrar siempre el secreto
     suspend fun acceptInvitation(text: String): AcceptResult {
         val engineScope = workScope
         if (status.value != EngineStatus.Online || engineScope == null) {
@@ -534,7 +539,11 @@ class MessengerEngine(
         if (c == null) runCatching { socket.close() } else c.accept(socket)
     }
 
-    /** Cierra sesiones, invitaciones y listener, retira servicios, para Tor y borra el estado en memoria. */
+    /**
+     * Cierra sesiones, invitaciones y listener, retira servicios, para Tor y borra el estado en memoria.
+     * Si el cierre de las conexiones falla, se termina igualmente de liberar todo y después se relanza
+     * ese fallo (con el motor ya parado y la presencia vacía).
+     */
     private suspend fun releaseResources() {
         workScope = null
         // Primero esperar al arranque (ya cancelado o terminado) para que no cree nada después.
@@ -543,8 +552,17 @@ class MessengerEngine(
         listener?.closeAndJoin()
         listener = null
         // Bucles y handshakes parados; sesiones cerradas con Bye; presencia vacía.
-        connections?.let { c -> runCatching { c.shutdown() } }
-        connections = null
+        var shutdownFailure: Exception? = null
+        try {
+            connections?.shutdown()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            shutdownFailure = e
+        } finally {
+            connections = null
+            mutablePresence.value = emptyMap()
+        }
         // Antes de retirar la .onion: las invitaciones y emparejamientos en curso pueden re-sincronizarla.
         engineJob?.cancelAndJoin()
         engineJob = null
@@ -557,6 +575,7 @@ class MessengerEngine(
         mutableMyOnion.value = null
         identity = null
         running = false
+        shutdownFailure?.let { throw it }
     }
 }
 

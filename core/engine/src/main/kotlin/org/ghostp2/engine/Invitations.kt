@@ -3,6 +3,7 @@ package org.ghostp2.engine
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.coroutineScope
@@ -79,6 +80,7 @@ internal object InvitationMessages {
  * (o al ser cancelado) cierra `server` y espera a que terminen todos los intentos en curso.
  * Si `complete` lanza, la excepción se propaga.
  */
+@OptIn(DelicateCoroutinesApi::class) // ATOMIC: el finally de cada intento cierra su socket y libera el cupo
 internal suspend fun <A : Any, T : Any> serveInvitation(
     server: ServerSocket,
     ttlMillis: Long,

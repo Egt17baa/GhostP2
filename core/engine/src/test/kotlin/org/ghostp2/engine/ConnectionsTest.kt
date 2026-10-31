@@ -141,9 +141,13 @@ class ConnectionsTest {
             awaitPresence(h.engine(0), bInA, Presence.OFFLINE)
             awaitPresence(h.engine(1), aInB, Presence.OFFLINE)
             h.network.setOnline(true)
+            val before = listOf(h.tor(0).connectAttempts.get(), h.tor(1).connectAttempts.get())
             // Reinicio simultáneo de los dos bucles: ambos intentan conectar a la vez.
             listOf(0, 1).map { i -> async(Dispatchers.Default) { h.engine(i).onNetworkChanged() } }.awaitAll()
             awaitSameSession(h, bInA, aInB)
+            for (i in 0..1) {
+                assertTrue(h.tor(i).connectAttempts.get() > before[i], "ronda $round: el motor $i no llamó")
+            }
             exchangeText(h, bInA, aInB, "ronda $round")
             assertEquals(0, byes.get(), "ningún Closed(PEER_BYE) (cierres vistos: $closes)")
         }
@@ -174,6 +178,49 @@ class ConnectionsTest {
         delay(900)
         assertEquals(attempts, h.tor(0).connectAttempts.get())
         assertEquals(Presence.IDENTITY_CHANGED, h.engine(0).presence.value[bInA])
+    }
+
+    @Test
+    fun repairingAfterIdentityChangedRestartsTheLoop() = runBlocking<Unit> {
+        val (h, bInA, aInB) = pairedHarness()
+        awaitSameSession(h, bInA, aInB)
+        val onionA = h.engine(0).myOnion.value!!
+        val bStored = h.contacts(1).all().single()
+        // Igual que identityChangedStopsRetrying: A marca a B como IDENTITY_CHANGED.
+        h.tor(1).removeClientAuth(onionA)
+        h.contacts(1).upsert(bStored.copy(pairSecret = Primitives.randomBytes(32)))
+        h.network.setOnline(false)
+        awaitPresence(h.engine(0), bInA, Presence.OFFLINE)
+        h.network.setOnline(true)
+        h.engine(0).onNetworkChanged()
+        awaitPresence(h.engine(0), bInA, Presence.IDENTITY_CHANGED)
+        // «Volver a emparejar»: credenciales coherentes otra vez y contacto ACTIVE ⇒ bucle nuevo.
+        h.contacts(1).upsert(bStored)
+        h.tor(1).addClientAuth(onionA, bStored.clientAuthPrivateForPeerOnion)
+        h.contacts(0).upsert(h.contacts(0).all().single().copy(status = ContactStatus.ACTIVE))
+        awaitSameSession(h, bInA, aInB)
+        exchangeText(h, bInA, aInB, "otra vez")
+    }
+
+    @Test
+    fun deletingContactStopsItsLoopAndClosesItsSession() = runBlocking<Unit> {
+        val (h, bInA, aInB) = pairedHarness()
+        awaitSameSession(h, bInA, aInB)
+        val bClosed = observers.async(start = CoroutineStart.UNDISPATCHED) {
+            h.engine(1).sessionEvents.first { (id, e) -> id == aInB && e is SessionEvent.Closed }
+        }
+        h.contacts(0).delete(bInA)
+        withTimeout(TIMEOUT) { h.engine(0).presence.first { !it.containsKey(bInA) } }
+        // Se cierra con Bye (Task 7 enviará antes Unpair).
+        assertEquals(SessionEvent.Closed(CloseReason.PEER_BYE), withTimeout(TIMEOUT) { bClosed.await() }.second)
+        assertNull(h.engine(0).sessionFor(bInA))
+        awaitPresence(h.engine(1), aInB, Presence.OFFLINE)
+        // Sin bucle: A no vuelve a llamar a B (ni por espera ni al cambiar la red).
+        val attempts = h.tor(0).connectAttempts.get()
+        h.engine(0).onNetworkChanged()
+        delay(900)
+        assertEquals(attempts, h.tor(0).connectAttempts.get())
+        assertNull(h.engine(0).presence.value[bInA])
     }
 
     @Test

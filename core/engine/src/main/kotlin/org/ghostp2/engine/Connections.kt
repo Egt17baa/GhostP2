@@ -4,6 +4,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -131,7 +132,10 @@ internal class Connections(
     private var observer: Job? = null
 
     /** Sesión envuelta: `preferred` = iniciada por el lado de identidad menor. */
-    private class Active(val peer: PeerSession, val job: Job, val initiatedByMe: Boolean, val preferred: Boolean)
+    private class Active(val peer: PeerSession, val job: Job, val initiatedByMe: Boolean, val preferred: Boolean) {
+        /** `start()` ya volvió: solo entonces se expone la sesión fuera de esta clase. */
+        @Volatile var started = false
+    }
 
     /** Llamada saliente en curso. `handshake` = ya se envió (o se va a enviar) msg1. */
     private class Outgoing {
@@ -170,11 +174,16 @@ internal class Connections(
         networkEpoch.update { it + 1 }
     }
 
-    fun sessionFor(contactId: String): PeerSession? = links.value[contactId]?.session?.value?.peer
+    /** Sesión del contacto, solo si ya se arrancó (`start()` terminado). */
+    fun sessionFor(contactId: String): PeerSession? = startedSession(contactId)?.peer
 
-    fun sessionInitiatedByMe(contactId: String): Boolean? = links.value[contactId]?.session?.value?.initiatedByMe
+    fun sessionInitiatedByMe(contactId: String): Boolean? = startedSession(contactId)?.initiatedByMe
+
+    private fun startedSession(contactId: String): Active? =
+        links.value[contactId]?.session?.value?.takeIf { it.started }
 
     /** Conexión entrante del listener (síncrono: lanza el handshake y vuelve enseguida). */
+    @OptIn(DelicateCoroutinesApi::class) // ATOMIC: el finally que cierra el socket debe ejecutarse siempre
     fun accept(socket: Socket) {
         if (closed) {
             runCatching { socket.close() }
@@ -238,7 +247,7 @@ internal class Connections(
             val link = next.getOrPut(contact.id) { Link(contact.id, contact) }
             link.mutex.withLock {
                 link.contact = contact
-                if (contact.status == ContactStatus.ACTIVE && link.loop?.isActive != true && !closed) {
+                if (contact.status == ContactStatus.ACTIVE && link.loop == null && !closed) {
                     link.loop = loopsScope.launch { runLoop(link) }
                 }
                 refresh(link)
@@ -260,44 +269,49 @@ internal class Connections(
     }
 
     private suspend fun runLoop(link: Link) {
-        var backoff = config.backoffMinMillis
+        val backoff = Backoff(config.backoffMinMillis, config.backoffMaxMillis, random)
         var wait = 0L
         var epoch = networkEpoch.value
         while (currentCoroutineContext().isActive) {
             if (link.session.value != null) {
                 link.session.first { it == null }
                 // Sesión cerrada (cualquier motivo). Gancho Task 7: PEER_UNPAIRED tendrá su propio camino.
-                backoff = config.backoffMinMillis
-                wait = jitter(backoff)
+                backoff.reset()
+                wait = backoff.jitter(config.backoffMinMillis)
             }
             if (wait > 0) {
                 val woke = withTimeoutOrNull(wait) { networkEpoch.first { it != epoch } } != null
-                if (woke) backoff = config.backoffMinMillis
+                if (woke) backoff.reset()
             }
             epoch = networkEpoch.value
-            if (link.contact.status != ContactStatus.ACTIVE) return
+            if (exitIfInactive(link)) return
             when (attempt(link)) {
                 Outcome.Connected -> {
-                    backoff = config.backoffMinMillis
+                    backoff.reset()
                     wait = 0
                 }
-                Outcome.Busy -> wait = if (link.session.value != null) 0 else jitter(backoff)
+                Outcome.Busy -> wait = if (link.session.value != null) 0 else backoff.jitter(backoff.current)
                 Outcome.IdentityChanged -> {
-                    if (markIdentityChanged(link)) return
-                    // Se volvió a emparejar mientras tanto: seguir con los datos nuevos.
-                    wait = jitter(backoff)
+                    markIdentityChanged(link)
+                    // Si se marcó, sale (salvo que se haya vuelto a emparejar justo ahora); si no, sigue.
+                    if (exitIfInactive(link)) return
+                    wait = backoff.jitter(backoff.current)
                 }
-                Outcome.Failed -> {
-                    wait = jitter(backoff)
-                    backoff = (backoff * 2).coerceAtMost(config.backoffMaxMillis)
-                }
+                Outcome.Failed -> wait = backoff.next()
             }
         }
     }
 
-    /** Espera ±20 %. */
-    private fun jitter(millis: Long): Long =
-        (millis * (1.0 + JITTER * (2 * random.nextDouble() - 1))).toLong().coerceAtLeast(1)
+    /**
+     * Decide con `link.mutex` tomado si el bucle termina (contacto no `ACTIVE`) y, en ese caso, deja
+     * `link.loop = null` en el mismo paso: así [reconcile] (que mira `loop` con el mismo cerrojo) nunca
+     * ve un bucle «vivo» que ya ha decidido salir, y relanza otro si el contacto vuelve a `ACTIVE`.
+     */
+    private suspend fun exitIfInactive(link: Link): Boolean = link.mutex.withLock {
+        if (link.contact.status == ContactStatus.ACTIVE) return@withLock false
+        if (link.loop === currentCoroutineContext()[Job]) link.loop = null
+        true
+    }
 
     /** Un intento de llamada al contacto. */
     @OptIn(ExperimentalCoroutinesApi::class) // Deferred.getCompleted
@@ -345,6 +359,9 @@ internal class Connections(
             }
             val stream = try {
                 withContext(Dispatchers.IO) { FrameStream(socket.getInputStream(), socket.getOutputStream(), socket) }
+            } catch (e: CancellationException) {
+                runCatching { socket.close() }
+                throw e
             } catch (e: Exception) {
                 runCatching { socket.close() }
                 return Outcome.Failed
@@ -445,6 +462,7 @@ internal class Connections(
                     is Decision.Wrap -> {
                         // start() espera al recolector (ya suscrito) y lanza el lector; siempre se completa.
                         withContext(NonCancellable) { created!!.peer.start() }
+                        created!!.started = true
                         return true
                     }
                     Decision.Discard -> {
@@ -555,7 +573,6 @@ internal class Connections(
     }
 
     private companion object {
-        const val JITTER = 0.2
 
         /** Espera máxima a que el observador cree el contacto recién emparejado. */
         const val LINK_WAIT_MILLIS = 2_000L
@@ -572,4 +589,28 @@ internal fun compareUnsigned(a: ByteArray, b: ByteArray): Int {
         if (c != 0) return c
     }
     return a.size - b.size
+}
+
+/**
+ * Espera creciente de reintentos: [next] devuelve la espera actual con ±20 % de variación y la dobla
+ * (hasta `maxMillis`); [reset] vuelve a `minMillis`.
+ */
+internal class Backoff(private val minMillis: Long, private val maxMillis: Long, private val random: java.util.Random) {
+    /** Espera nominal (sin variación) del próximo [next]. */
+    var current: Long = minMillis
+        private set
+
+    fun reset() {
+        current = minMillis
+    }
+
+    fun next(): Long = jitter(current).also { current = (current * 2).coerceAtMost(maxMillis) }
+
+    /** `millis` con ±20 % de variación aleatoria (al menos 1 ms). */
+    fun jitter(millis: Long): Long =
+        (millis * (1.0 + JITTER * (2 * random.nextDouble() - 1))).toLong().coerceAtLeast(1)
+
+    private companion object {
+        const val JITTER = 0.2
+    }
 }
