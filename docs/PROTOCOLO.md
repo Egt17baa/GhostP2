@@ -1,8 +1,10 @@
 # Protocolo de GhostP2 (v1)
 
 Este documento describe el protocolo tal como está implementado en los módulos `:core:crypto`
-(`org.ghostp2.core.crypto`) y `:core:protocol` (`org.ghostp2.core.protocol`). Si algo de aquí
-contradice el código, manda el código: cada etiqueta, tamaño y plazo se ha copiado de él.
+(`org.ghostp2.core.crypto`) y `:core:protocol` (`org.ghostp2.core.protocol`) (§1–13), y las
+reglas del nivel de aplicación que imponen `:core:engine` (`org.ghostp2.engine`), `:core:data`,
+`:core:tor` y `:app` (§14–15). Si algo de aquí contradice el código, manda el código: cada
+etiqueta, tamaño y plazo se ha copiado de él.
 
 Diseño general: [`docs/superpowers/specs/2026-10-31-ghostp2-android-design.md`](superpowers/specs/2026-10-31-ghostp2-android-design.md).
 
@@ -390,12 +392,13 @@ Ejecutar: `./gradlew test`.
 | Red / operadora / wifi | Ver que usas Tor | Ver con quién hablas ni qué |
 | Nodos de Tor | Ver tráfico cifrado | Leerlo; saber IP y destino a la vez |
 | Quien conozca tu .onion | Nada (autorización de cliente) | Conectar, sondear presencia |
-| Quien robe una invitación antes de usarla | Emparejarse en tu lugar | — (mitigado: 10 min y un uso, impuestos por la app en el plan 2, no por el núcleo; número de seguridad) |
+| Quien robe una invitación antes de usarla | Emparejarse en tu lugar | — (mitigado: 10 min y un uso, impuestos por el motor, no por el núcleo, §14.2; número de seguridad) |
 | Robo del móvil bloqueado | — | Leer mensajes (no existen en disco); contactos cifrados con Keystore |
 | Contacto malicioso | Ver lo que le envías | Ver tu IP |
 
 Riesgos aceptados: el dispositivo comprometido (malware/root) queda fuera de alcance; el uso de
-Tor puede ser visible o estar bloqueado en algunas redes (puentes fuera de la v1).
+Tor puede ser visible o estar bloqueado en algunas redes (puentes fuera de la v1). Las
+limitaciones del nivel de aplicación están en §15.
 
 Propiedades que aporta el núcleo: autenticación mutua por identidad + `pairSecret` en cada
 sesión; secreto hacia adelante por sesión (efímeras nuevas) y por mensaje (ratchet con borrado
@@ -414,7 +417,7 @@ de claves); rechazo de repetición, reordenación y manipulación (cierre de la 
   cualquiera que conozca la .onion temporal (aunque no el secreto) puede enviar msg1 y descifrar
   en msg2 la clave pública de identidad del invitador (vinculación entre invitaciones y
   contactos). No revela mensajes ni permite emparejarse.
-- **Invitación de un solo uso y caducidad**: las impone la app (plan 2), no el núcleo; `Pairing`
+- **Invitación de un solo uso y caducidad**: las impone el motor (§14.2), no el núcleo; `Pairing`
   no sabe nada de la invitación. Un intento fallido (secreto erróneo, conexión cortada, sondeo
   de msg2) **no debe** consumir la invitación; solo un emparejamiento terminado bien en el
   invitador.
@@ -432,7 +435,241 @@ de claves); rechazo de repetición, reordenación y manipulación (cierre de la 
 - **Número de seguridad**: 6 grupos de `u32 mod 100000` (≈ 99,7 bits, con un sesgo de módulo
   despreciable).
 - **Límite de contador**: 2^32−1 tramas por sentido y sesión; agotado, la sesión se cierra.
-- **Aún no implementado en el núcleo** (planes 2 y 3): Tor y servicios ocultos, reglas de
-  conexiones simultáneas (conservar la iniciada por la `identityKey` menor, elegida antes de
-  crear la `PeerSession`, §10.5), reintentos de presencia, almacenamiento cifrado con Keystore,
-  invitación de 10 minutos y un solo uso.
+- **Fuera del núcleo**: Tor y servicios ocultos, desempate de conexiones simultáneas,
+  reintentos de presencia, almacenamiento cifrado con Keystore e invitación de 10 minutos y un
+  solo uso no están en `:core:crypto` ni en `:core:protocol`: los implementa el nivel de
+  aplicación (§14).
+
+## 14. Reglas del nivel de aplicación (`:core:engine`, `:core:data`, `:core:tor`, `:app`)
+
+El motor (`MessengerEngine`) usa el núcleo sobre Tor real (`KmpTorTransport`, kmp-tor). Los
+valores por defecto están en `EngineConfig`.
+
+| Parámetro | Valor |
+|---|---|
+| Puerto virtual de los servicios ocultos | 7420 → `127.0.0.1:<puerto local aleatorio>` |
+| Validez de la invitación | 10 min (600 000 ms) |
+| Intentos de emparejamiento simultáneos por invitación | 32 (los demás se cierran al aceptarlos) |
+| Reintentos por contacto | 15 s → 5 min, ×2 por fallo, ±20 % de variación aleatoria |
+| Conexión SOCKS a una .onion | 60 s |
+| Ventana para entregar `Unpair` al borrar | 2 min (120 000 ms) |
+| `Unpair` a todos al "Borrar todo" | 2,5 s en total, en paralelo |
+| Arranque de Tor hasta `Ready` | 180 s |
+| Registro de autorizaciones de cliente al arrancar | 30 s en total, en paralelo |
+| Historial en memoria | 500 elementos por contacto (se descartan los más antiguos) |
+
+### 14.1 Publicación de la .onion permanente
+
+- Se publica **solo si hay al menos una clave de autorización de cliente**, y **siempre con
+  autorización de cliente v3**: nunca se llama a `ADD_ONION` con la lista vacía para la .onion
+  permanente. Las claves son la `myClientAuthPublic` de **cada** contacto guardado (también los
+  que están en `IDENTITY_CHANGED`, hasta que se borren) y, solo si no hay ningún contacto, las
+  claves pendientes de los emparejamientos en curso (regla R10, abajo).
+- La primera publicación genera la dirección; su clave ED25519 y la .onion se guardan con la
+  identidad, así que la dirección es estable. Si cambia el conjunto de claves se retira
+  (`DEL_ONION`) y se vuelve a publicar con la misma clave: corte de unos segundos para los demás
+  contactos. Si no queda ninguna clave, se retira, pero la dirección queda reservada.
+- Los servicios son efímeros (`ADD_ONION` sin guardar en disco); al detener Tor desaparecen y se
+  publican de nuevo en cada arranque.
+- **Regla R10.** Con cero contactos, cada emparejamiento en curso reserva la publicación con su
+  propia clave pendiente: el invitado, con la pública del par que genera para el contacto nuevo;
+  el invitador, mientras espera, con una clave de reserva cuya privada se borra al crearla (nadie
+  puede usarla). Al emparejar, la clave del contacto sustituye a la de reserva; si el
+  emparejamiento no termina, la clave pendiente se retira y, sin contactos, la .onion deja de
+  publicarse.
+- **Autorizaciones para las .onion de los contactos.** Tor las guarda solo en memoria
+  (`ONION_CLIENT_AUTH_ADD` sin `Permanent`, sin `ClientOnionAuthDir`). En cada arranque, con Tor
+  `Ready` y antes de los bucles de conexión, se registran de nuevo las de todos los contactos
+  `ACTIVE`. Los que fallen se avisan (diagnóstico "no se pudo registrar en Tor la autorización…")
+  y no se les puede llamar hasta el siguiente arranque; ellos sí pueden llamarnos.
+- Si una re-publicación falla (p. ej. tras borrar un contacto), se reintenta en segundo plano con
+  la misma espera creciente que los contactos, y antes si cambia la red. Tras 3 fallos seguidos
+  se muestra un aviso de diagnóstico.
+
+### 14.2 Ciclo de vida de la invitación
+
+- Solo con el motor `Online`. Crear una invitación abre un `ServerSocket` en
+  `127.0.0.1:<puerto aleatorio>` y publica un servicio oculto **temporal, con dirección nueva y
+  sin autorización de cliente**, con un secreto nuevo de 16 bytes. Estados:
+  `Preparing → Waiting(texto, caducidad)` y, al final, `Paired`, `Expired` (10 min),
+  `Cancelled` (botón, invitación nueva o motor parado) o `Failed`. En todos se retira el
+  servicio temporal, se cierra su socket y se borra el secreto.
+- **Una invitación activa por móvil**: crear otra cancela la anterior.
+- **Un solo emparejamiento con éxito**: el primer intento que termina bien toma un guardián
+  atómico y guarda el contacto; los que terminen bien a la vez se descartan (se borran sus
+  secretos). Ese otro lado cree estar emparejado, pero no tiene ninguna clave válida para mi
+  .onion (caso residual de §6).
+- **Los intentos fallidos no consumen la invitación** (secreto erróneo, conexión cortada, sondeo
+  de msg2, plazo agotado): se cierra su conexión y se sigue esperando hasta la caducidad.
+- Cada intento genera su propio par de autorización de cliente: la privada va en la oferta de ese
+  intento y se borra al terminarlo; solo la pública del ganador se publica en mi .onion.
+- Aceptar la propia invitación se rechaza ("No puedes aceptar tu propia invitación"), tanto
+  antes de conectar (misma .onion temporal) como si la identidad recibida es la propia.
+- El contacto se guarda como `ACTIVE`, sin verificar y con el nombre "Contacto nuevo". Su id es
+  el hex de los 16 primeros bytes de `SHA-256(identidad)`: volver a emparejar con la misma
+  identidad sustituye al contacto (mismo id); si su .onion cambió, se retira la autorización de
+  la antigua. Si algo falla tras guardarlo (Tor, publicación), se deshace todo.
+- Errores del invitado: conexión o plazo ⇒ "No se pudo conectar con la invitación (¿caducada o
+  ya usada?)"; `AUTH` ⇒ "La invitación no coincide"; otros ⇒ "No se pudo completar el
+  emparejamiento". Con un secreto erróneo el invitado ve `CONNECTION` (§6), así que recibe el
+  primer mensaje.
+
+### 14.3 Presencia, reintentos y desempate
+
+- Cada contacto `ACTIVE` tiene un bucle que, mientras no haya sesión, conecta a su .onion (SOCKS,
+  60 s) y hace el handshake de sesión (§7, 30 s). Tras un fallo espera 15 s, y la espera se
+  dobla con cada fallo hasta 5 min, con ±20 % de variación aleatoria. Cuando una sesión se cierra
+  (por cualquier motivo) el contacto pasa a `OFFLINE` y el bucle vuelve a llamar tras la espera
+  mínima (con variación).
+- Un cambio de la red por defecto de Android (`onAvailable`/`onLost` del `NetworkCallback` del
+  servicio) corta las esperas, vuelve a la mínima y reintenta enseguida.
+- Presencia: `OFFLINE`, `CONNECTING`, `ONLINE` o `IDENTITY_CHANGED`. Con el motor parado no hay
+  presencia (mapa vacío). `ONLINE` puede verse un instante antes de que la sesión acepte envíos.
+- Conexiones entrantes: handshake de respondedor (§7) con los contactos `ACTIVE` como candidatos.
+  Cualquier fallo (llamante desconocido, conexión, plazo…) cierra en silencio, sin cambiar el
+  estado de nadie.
+- **Desempate** (§10.5): por contacto puede haber dos conexiones autenticadas a la vez, la
+  iniciada por cada lado. Se conserva siempre la **iniciada por el lado cuya `identityKey`
+  pública es menor** (orden de bytes sin signo). La decisión se toma antes de crear la
+  `PeerSession`; la perdedora se cierra **sin `Bye`** (`stream.close()` y `channel.destroy()`).
+  Si la llamada propia del lado menor está en pleno handshake, la entrante espera su resultado.
+  Limitación: si solo el lado mayor pierde la red y el menor aún cree viva su sesión, el menor
+  rechaza las llamadas del mayor hasta que esa sesión caduca (60 s sin tráfico) y llama él.
+
+### 14.4 Identidad cambiada (reglas R8 y R14)
+
+- `HandshakeFailedException.reason == AUTH` **al iniciar** hacia un contacto (su `pairSecret`
+  ya no coincide: el otro volvió a emparejar con la misma identidad solo por su lado, §13) ⇒ el
+  contacto se guarda como `IDENTITY_CHANGED`, se avisa ("La identidad de <nombre> ha cambiado ·
+  Vuelve a emparejar para seguir hablando") y su bucle termina: no se le vuelve a llamar ni se le
+  acepta como candidato entrante. Su clave sigue en mi publicación hasta que se le borre. Volver
+  a emparejar con él lo deja otra vez `ACTIVE`.
+- **R8**: `Closed(SECURITY)` (violación del protocolo dentro de una sesión) por sí solo **no**
+  bloquea al contacto: el bucle vuelve a llamar como tras cualquier cierre. `UNKNOWN_CALLER` en
+  el respondedor tampoco marca nada.
+- **R14**: quien reinstala la app genera identidad **y** .onion nuevas. Para los demás, el
+  contacto antiguo simplemente queda `OFFLINE` (su .onion ya no existe); no hay ninguna señal en
+  el protocolo. Hay que volver a emparejar, lo que crea un contacto nuevo (otro id).
+
+### 14.5 Historial en memoria y envío
+
+- Las conversaciones viven en la memoria del motor, por contacto (hasta 500 elementos), no
+  ligadas a la sesión: **sobreviven a los cortes de conexión**. Se borran al pulsar "Borrar"
+  (`clearConversation`), al borrar el contacto (al empezar el borrado), al detener el motor
+  ("Desconectar"), cuando el motor pasa a `Error` (también se libera todo) y, por supuesto, si
+  muere el proceso. Nunca se escriben en disco. Las fotos se rellenan con ceros al salir del
+  historial.
+- Solo hay conversaciones de contactos guardados: los mensajes de ids desconocidos no se guardan.
+- Enviar sin sesión abierta ⇒ el elemento queda en el historial como `Failed(NOT_CONNECTED)` al
+  momento ("no enviado"). No hay cola ni reintentos (§10.3).
+- **R15**: `sendText`/`sendPhoto` con el motor parado, o hacia un id que no es un contacto
+  guardado (o que se está borrando), devuelven un id y **no guardan nada**: un motor parado no
+  tiene mensajes ni conversaciones fantasma. La interfaz solo debe enviar con el motor en línea y
+  a un contacto conocido.
+
+### 14.6 Borrar un contacto (aviso `Unpair`)
+
+1. El contacto se olvida en el acto: su conversación se borra y ningún envío ni recepción para
+   ese id se guarda ya. Su bucle de reconexión se detiene y no vuelve.
+2. Si hay sesión abierta se le envía `Unpair` por ella. Si no, se intenta conectar (y se aceptan
+   sus llamadas) **durante como mucho 2 min**, con la espera creciente de siempre, solo para
+   entregarlo. Con el contacto en `IDENTITY_CHANGED` no se intenta (la autenticación fallaría).
+3. Después, **siempre**, aunque no se haya entregado o el motor se detenga a mitad: se borra del
+   repositorio, se quita la autorización de su .onion y se vuelve a publicar la mía sin su clave
+   (se retira si no quedan contactos ni emparejamientos en curso). El resultado es `DELIVERED`
+   solo si la trama `Unpair` se escribió en el flujo (el núcleo no tiene acuse para ella).
+
+Si mientras tanto se volvió a emparejar con el mismo contacto, el emparejamiento nuevo se
+conserva. Al **recibir** `Unpair` se hace el mismo borrado local y se avisa "<nombre> te ha
+eliminado de sus contactos" (con el nombre que tenía). "Borrar todo" envía `Unpair` en paralelo
+a las sesiones abiertas (2,5 s en total, mejor esfuerzo), detiene el motor y borra identidad,
+contactos, autorizaciones y el estado de Tor en disco. La pantalla de diagnóstico del plan 2 no
+ofrece todavía borrar contactos ni "Borrar todo" (plan 3).
+
+### 14.7 Ciclo de vida del motor y Tor (reglas R13 y R18)
+
+- Arranque: almacenamiento comprobado (§14.9) → identidad (se crea si no hay) → Tor hasta `Ready`
+  (como mucho 180 s; si no, `Error("Tor no terminó de arrancar")`) → autorizaciones de cliente →
+  escucha local → publicación → bucles de los contactos. Estado visible: `Stopped`,
+  `StartingTor(%)`, `Online` o `Error(mensaje)`. Un fallo de arranque libera todo y deja
+  `Error`; nunca lanza.
+- **R13**: al volver de `TorTransport.start()` el estado de Tor ya es `Starting`, `Ready` o
+  `Error`, nunca `Off`.
+- **R18**: con el motor `Online` se vigila el estado de Tor. Si pasa a `Error` (p. ej. su proceso
+  muere) o a `Off` sin pedirlo, el motor libera la ejecución como al detenerse (sesiones
+  cerradas, presencia vacía, historial borrado) y queda en `Error`. **No se reinicia solo**: la
+  app muestra "Reintentar" (y "Desconectar"), y la notificación fija pasa a "GhostP2 sin
+  conexión · error".
+
+### 14.8 Servicio en primer plano (regla R19)
+
+- "Activar" inicia un servicio en primer plano de tipo `specialUse` con la notificación fija
+  "GhostP2 activo · cifrado" y la acción "Desconectar". En Android 13+ se pide antes el permiso
+  de notificaciones; el servicio arranca se conceda o no.
+- **R19**: el servicio devuelve `START_STICKY`. Si el sistema mata el proceso con GhostP2
+  activo, lo recrea con un intent nulo, que se trata como "Activar" (primer plano y motor). En
+  Android 12+ el sistema puede no permitir volver al primer plano desde segundo plano (sobre
+  todo sin la exención de batería): entonces se detiene y deja la notificación "GhostP2 se ha
+  detenido · Abre la app para volver a activarlo". Lo mismo si al reiniciarse el almacenamiento
+  falla.
+- "Desconectar" (en la pantalla o en la notificación) detiene motor y servicio **para siempre**:
+  el sistema no vuelve a crearlo. No hay receptor de `BOOT_COMPLETED`: nada arranca GhostP2 al
+  encender el móvil.
+- Exención de la optimización de batería: la pantalla la muestra y ofrece "Permitir en segundo
+  plano" (diálogo del sistema). No se pide sola.
+- Notificaciones de contacto (canal "Mensajes y avisos", visibilidad privada): "Nuevo mensaje de
+  <nombre>" **sin contenido**; su versión pública (pantalla de bloqueo con el contenido sensible
+  oculto) es "Nuevo mensaje", sin nombre. Los avisos de diagnóstico no se notifican.
+
+### 14.9 Almacenamiento (reglas R16 y R17)
+
+- En disco solo `noBackupFilesDir/ghostp2.bin` (identidad, clave de la .onion permanente y
+  contactos con sus claves, `pairSecret` y nombres, en un objeto CBOR) cifrado con un keyset Tink
+  AES-256-GCM, a su vez cifrado por la clave maestra de Android Keystore `ghostp2_master` (en
+  StrongBox si existe y supera una prueba). Escritura atómica (archivo temporal y renombrado).
+  **R17**: almacén propio (`EncryptedStore`), sin DataStore.
+- **R16**: si Android Keystore no se puede usar, el almacenamiento **falla cerrado**: nunca se
+  acepta el keyset en claro con el que Tink se conformaría, y el motor no arranca. Un fallo
+  pasajero ofrece "Reintentar" (y, tras 3 seguidos, "Empezar de cero" con doble confirmación);
+  datos ilegibles ofrecen solo "Empezar de cero". Nunca se borra nada sin que el usuario lo pida.
+- Estado de Tor en `noBackupFilesDir/tor` (consenso, guardas, cookie de control); sin claves de
+  servicios ni de autorización.
+- Sin copias de seguridad: `allowBackup="false"` y reglas de extracción que excluyen todo.
+
+## 15. Limitaciones del nivel de aplicación
+
+Complementan las del núcleo (§13). GhostP2 no promete más de lo que hay aquí.
+
+- **Claves en `String` dentro de kmp-tor**: las claves de los servicios ocultos y de
+  autorización de cliente viajan a Tor como texto por el puerto de control; kmp-tor las convierte
+  en `String`, que no se pueden rellenar con ceros. Además el proceso de Tor (aparte) las tiene
+  en su memoria mientras está en marcha.
+- **Material de claves en memoria**: identidad, `pairSecret` y claves de autorización están en
+  memoria mientras el motor funciona; el motor borra sus copias al dejar de usarlas, pero no las
+  de la JVM, BouncyCastle o Tink (§13).
+- **Mensajes solo en memoria**: se descartan si el destinatario no está conectado (no hay cola) y
+  el historial se pierde al desconectar, si Tor falla, si el sistema mata la app o al reiniciar
+  el móvil. "Entregado" significa recibido por su app, no leído.
+- **Android Keystore obligatorio** (R16): en dispositivos con Keystore roto la app no funciona.
+  La protección en reposo es la de Keystore: con el móvil desbloqueado (o con root), quien
+  ejecute código como la app puede descifrar `ghostp2.bin`. La clave maestra no exige
+  autenticación del usuario y no hay bloqueo propio de la app todavía (plan 3).
+- **Estado de Tor en disco**: guardas y caché de consenso revelan, a quien lea el
+  almacenamiento de la app, que se ha usado Tor (no con quién).
+- **Metadatos visibles**: la red local y la operadora ven que usas Tor (sin puentes, puede estar
+  bloqueado); tus contactos ven cuándo estás en línea; un adversario que observe gran parte de la
+  red puede correlacionar horarios y volumen (latido cada 20 s, ráfagas de fotos). Los nodos de
+  Tor no ven el contenido.
+- **Otras apps del mismo móvil**: el puerto SOCKS de Tor, la escucha local del servicio oculto y
+  la de la invitación están en `127.0.0.1`, al alcance de cualquier app con permiso de red.
+  Sin el secreto ni las claves no pueden completar ningún handshake, pero una app maliciosa
+  que conozca la .onion de uno de tus contactos podría usar el SOCKS de GhostP2 (que ya tiene
+  registrada la autorización para ella) para comprobar si ese contacto está en línea.
+- **Dispositivo comprometido**: malware con root, un depurador o una captura de la memoria
+  quedan fuera de alcance. Las notificaciones muestran el nombre del contacto con el móvil
+  desbloqueado.
+- **Sin arranque tras reiniciar el móvil** y, sin la exención de batería, Android puede cortar la
+  conexión con Tor o no recrear el servicio (R19). No hay ayuda específica para el ahorro de
+  energía de cada fabricante.
+- **Reinstalación** (R14): no se avisa; el contacto antiguo queda desconectado y hay que volver a
+  emparejar.
