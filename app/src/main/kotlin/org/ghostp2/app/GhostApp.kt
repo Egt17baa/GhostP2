@@ -85,10 +85,10 @@ sealed interface StorageState {
     data object Ok : StorageState
 
     /**
-     * Error inesperado al comprobar el almacenamiento (ni corrupción ni fallo pasajero conocido): solo
-     * "Reintentar"; nunca se borra nada por esto.
+     * Error inesperado al comprobar el almacenamiento (ni corrupción ni fallo pasajero conocido):
+     * "Reintentar"; nunca se borra nada por esto. Como [Unavailable], cuenta en la racha de fallos.
      */
-    data object Failed : StorageState
+    data class Failed(override val failures: Int) : StorageState, FailureStreak
 
     /** Datos ilegibles e irrecuperables: solo cabe "Empezar de cero" ([AppContainer.wipeCorrupted]). */
     data object Corrupted : StorageState
@@ -97,7 +97,15 @@ sealed interface StorageState {
      * Fallo pasajero ("Reintentar"), `failures` veces seguidas. A partir de [FAILURES_BEFORE_RESET] se
      * ofrece además "Empezar de cero" con doble confirmación ([AppContainer.forceReset]).
      */
-    data class Unavailable(val failures: Int) : StorageState {
+    data class Unavailable(override val failures: Int) : StorageState, FailureStreak
+
+    /**
+     * Estados con "Reintentar": `failures` = comprobaciones seguidas sin éxito ([Unavailable] o [Failed],
+     * mezclados). A partir de [FAILURES_BEFORE_RESET] se ofrece además "Empezar de cero" con doble
+     * confirmación ([AppContainer.forceReset]).
+     */
+    sealed interface FailureStreak {
+        val failures: Int
         val canForceReset: Boolean get() = failures >= FAILURES_BEFORE_RESET
     }
 
@@ -186,17 +194,18 @@ class AppContainer internal constructor(
         } catch (_: StoreCorruptedException) {
             StorageState.Corrupted
         } catch (_: StoreUnavailableException) {
-            val previous = mutableStorage.value as? StorageState.Unavailable
-            StorageState.Unavailable((previous?.failures ?: 0) + 1)
+            StorageState.Unavailable(nextStreak())
         } catch (e: CancellationException) {
             throw e
         } catch (_: Exception) {
             // Inesperado: falla cerrado (ni texto en claro ni borrados); la causa no se registra.
-            StorageState.Failed
+            StorageState.Failed(nextStreak())
         }
         mutableStorage.value = result
         return result
     }
+
+    private fun nextStreak(): Int = ((mutableStorage.value as? StorageState.FailureStreak)?.failures ?: 0) + 1
 
     /**
      * Comprueba el almacenamiento y, si está bien, arranca el motor. El resultado es `false` si el
@@ -212,6 +221,8 @@ class AppContainer internal constructor(
             previousStop?.join()
             try {
                 if (checkStorage() == StorageState.Ok) {
+                    // Ejecución nueva: el aviso de diagnóstico anterior ya no vale (los de este arranque sí).
+                    mutableLastDiagnostic.value = null
                     engine.start()
                     result.complete(true)
                 }

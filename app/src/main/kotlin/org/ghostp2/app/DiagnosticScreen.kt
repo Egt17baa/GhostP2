@@ -82,8 +82,10 @@ fun DiagnosticScreen(container: AppContainer, actions: DiagnosticActions, batter
         Text(stringResource(R.string.diag_title), style = MaterialTheme.typography.titleLarge)
         when (val s = storage) {
             StorageState.Corrupted -> CorruptedPanel(container)
-            is StorageState.Unavailable -> UnavailablePanel(container, s)
-            StorageState.Failed -> FailedPanel(container)
+            is StorageState.Unavailable -> RetryPanel(
+                container, s, stringResource(R.string.store_unavailable), stringResource(R.string.store_unavailable_detail),
+            )
+            is StorageState.Failed -> RetryPanel(container, s, stringResource(R.string.diag_unexpected), null)
             StorageState.Unknown -> Unit
             StorageState.Ok -> EnginePanel(container, actions, batteryIgnoring)
         }
@@ -113,12 +115,12 @@ private fun CorruptedPanel(container: AppContainer) {
 }
 
 @Composable
-private fun UnavailablePanel(container: AppContainer, state: StorageState.Unavailable) {
+private fun RetryPanel(container: AppContainer, state: StorageState.FailureStreak, title: String, detail: String?) {
     val ui = rememberCoroutineScope()
     var failed by remember { mutableStateOf(false) }
     var step by remember { mutableIntStateOf(0) } // 0: nada, 1: primera confirmación, 2: segunda
-    Text(stringResource(R.string.store_unavailable), style = MaterialTheme.typography.titleMedium)
-    Text(stringResource(R.string.store_unavailable_detail))
+    Text(title, style = MaterialTheme.typography.titleMedium)
+    detail?.let { Text(it) }
     Button(onClick = { ui.launch { container.checkStorage() } }) { Text(stringResource(R.string.diag_retry)) }
     if (state.canForceReset) {
         Text(stringResource(R.string.store_unavailable_persistent))
@@ -142,13 +144,6 @@ private fun UnavailablePanel(container: AppContainer, state: StorageState.Unavai
             onDismiss = { step = 0 },
         )
     }
-}
-
-@Composable
-private fun FailedPanel(container: AppContainer) {
-    val ui = rememberCoroutineScope()
-    Text(stringResource(R.string.diag_unexpected), style = MaterialTheme.typography.titleMedium)
-    Button(onClick = { ui.launch { container.checkStorage() } }) { Text(stringResource(R.string.diag_retry)) }
 }
 
 /** Contactos guardados, o error de lectura (se muestra, no se esconde como lista vacía). */

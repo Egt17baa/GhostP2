@@ -3,9 +3,11 @@ package org.ghostp2.app
 import android.Manifest
 import android.app.Notification
 import android.app.NotificationManager
+import android.app.ForegroundServiceStartNotAllowedException
 import android.app.Service
 import android.content.Intent
 import android.net.ConnectivityManager
+import android.os.Looper
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
@@ -175,6 +177,45 @@ class GhostServiceTest {
     }
 
     @Test
+    fun stickyRestartNotAllowedInForegroundStopsWithoutStartingEngine() {
+        val service = Robolectric.buildService(GhostService::class.java).create().get()
+        service.enterForeground = { throw ForegroundServiceStartNotAllowedException("segundo plano") }
+
+        service.onStartCommand(null, Service.START_FLAG_RETRY, 1) // no lanza: sin bucle de cierres
+
+        val shadow = shadowOf(service)
+        assertTrue(shadow.isStoppedBySelf)
+        assertTrue(networkCallbacks().isEmpty())
+        Thread.sleep(300)
+        shadowOf(Looper.getMainLooper()).idle()
+        assertEquals(EngineStatus.Stopped, engine.status.value)
+        assertEquals(TorState.Off, app.tor.state.value)
+        assertEquals(StorageState.Unknown, app.container.storage.value) // ni siquiera se comprobó
+    }
+
+    @Test
+    fun resetIsOfferedAfterMixedConsecutiveFailures() {
+        val container = app.container
+        app.storage.failure = StoreUnavailableException(IOException("x"))
+        runBlocking { container.checkStorage() }
+        app.storage.failure = IllegalStateException("inesperado")
+        runBlocking { container.checkStorage() }
+        val failed = container.storage.value as StorageState.Failed
+        assertEquals(2, failed.failures)
+        assertFalse(failed.canForceReset)
+        app.storage.failure = StoreUnavailableException(IOException("x"))
+        runBlocking { container.checkStorage() }
+        assertTrue((container.storage.value as StorageState.Unavailable).canForceReset)
+
+        app.storage.failure = null
+        runBlocking { container.checkStorage() }
+        assertEquals(StorageState.Ok, container.storage.value)
+        app.storage.failure = IllegalStateException("inesperado")
+        runBlocking { container.checkStorage() }
+        assertEquals(StorageState.Failed(1), container.storage.value) // la racha empieza de nuevo
+    }
+
+    @Test
     fun unknownIntentStopsService() {
         val controller = Robolectric.buildService(GhostService::class.java, Intent("org.ghostp2.app.action.OTRA")).create()
         controller.startCommand(0, 1)
@@ -187,18 +228,19 @@ class GhostServiceTest {
 
     @Test
     fun engineErrorTurnsStatusNotificationIntoOfflineWithDisconnect() {
-        shadowOf(app).grantPermissions(Manifest.permission.POST_NOTIFICATIONS)
-        startService()
+        // Sin POST_NOTIFICATIONS: la notificación fija se actualiza con startForeground igualmente.
+        val shadow = shadowOf(startService().get())
         eventually { engine.status.value == EngineStatus.Online }
 
         runBlocking { app.tor.stop() } // Tor se cae sin pedirlo: el motor pasa a Error (R18)
 
         eventually { engine.status.value is EngineStatus.Error }
         eventually {
-            notificationManager().getNotification(Notifications.STATUS_ID)
-                ?.extras?.getCharSequence(Notification.EXTRA_TITLE)?.toString() == "GhostP2 sin conexión · error"
+            shadow.lastForegroundNotification.extras.getCharSequence(Notification.EXTRA_TITLE)
+                ?.toString() == "GhostP2 sin conexión · error"
         }
-        val n = notificationManager().getNotification(Notifications.STATUS_ID)
+        assertFalse(shadow.isForegroundStopped)
+        val n = shadow.lastForegroundNotification
         assertTrue(n.flags and Notification.FLAG_ONGOING_EVENT != 0)
         assertEquals("Desconectar", n.actions.single().title.toString())
     }

@@ -91,11 +91,6 @@ object Notifications {
             .build()
     }
 
-    /** Sustituye la notificación fija (servicio ya en primer plano) según el estado del motor. */
-    fun updateStatus(context: Context, error: Boolean) {
-        notifyIfAllowed(context, null, STATUS_ID, status(context, error))
-    }
-
     /**
      * Tras un reinicio automático del servicio que no pudo arrancar (p. ej. almacenamiento no disponible):
      * "GhostP2 se ha detenido · abre la app".

@@ -1,5 +1,7 @@
 package org.ghostp2.app
 
+import android.app.ForegroundServiceStartNotAllowedException
+import android.app.Notification
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -8,7 +10,9 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.os.Build
 import android.os.IBinder
+import androidx.annotation.VisibleForTesting
 import androidx.core.app.ServiceCompat
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
@@ -60,27 +64,62 @@ class GhostService : Service() {
         scope.launch(start = CoroutineStart.UNDISPATCHED) {
             container.engine.notices.collect { notice ->
                 // Un fallo al notificar nunca cierra la app ni corta los avisos siguientes.
-                runCatching {
+                try {
                     val name = when (notice) {
                         is Notice.MessageArrived -> nameOf(notice.contactId)
                         is Notice.IdentityChanged -> nameOf(notice.contactId)
                         else -> null
                     }
                     Notifications.forNotice(this@GhostService, notice, name)?.let { Notifications.post(this@GhostService, it) }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    // Sin notificación para este aviso.
                 }
             }
         }
         scope.launch {
             container.engine.status.map { it is EngineStatus.Error }.distinctUntilChanged().collect { error ->
                 withContext(Dispatchers.Main) {
-                    if (foreground) runCatching { Notifications.updateStatus(this@GhostService, error) }
+                    // startForeground otra vez (no notify): se actualiza aunque falte POST_NOTIFICATIONS.
+                    if (foreground) {
+                        try {
+                            enterForeground(Notifications.status(this@GhostService, error))
+                        } catch (_: Exception) {
+                            // Ya está en primer plano; la notificación anterior sigue.
+                        }
+                    }
                 }
             }
         }
     }
 
     private suspend fun nameOf(contactId: String): String? =
-        runCatching { container.contacts.all().firstOrNull { it.id == contactId }?.name }.getOrNull()
+        try {
+            container.contacts.all().firstOrNull { it.id == contactId }?.name
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            null
+        }
+
+    /**
+     * Pone el servicio en primer plano con [notification] (o la sustituye si ya lo está). Punto de
+     * inyección para las pruebas.
+     */
+    @VisibleForTesting
+    internal var enterForeground: (Notification) -> Unit = { notification ->
+        ServiceCompat.startForeground(
+            this,
+            Notifications.STATUS_ID,
+            notification,
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+            } else {
+                0
+            },
+        )
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when {
@@ -92,16 +131,23 @@ class GhostService : Service() {
     }
 
     private fun onStart(restarted: Boolean) {
-        ServiceCompat.startForeground(
-            this,
-            Notifications.STATUS_ID,
-            Notifications.status(this, error = container.engine.status.value is EngineStatus.Error),
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
-            } else {
-                0
-            },
-        )
+        val notification = Notifications.status(this, error = container.engine.status.value is EngineStatus.Error)
+        if (restarted) {
+            try {
+                enterForeground(notification)
+            } catch (e: IllegalStateException) {
+                // API 31+: un reinicio STICKY en segundo plano puede no tener permiso para pasar a primer
+                // plano. Sin motor ni NetworkCallback: se detiene y pide abrir la app (sin bucle de cierres).
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S || e !is ForegroundServiceStartNotAllowedException) throw e
+                generation++
+                runCatching { Notifications.postStopped(this) }
+                stopSelf()
+                return
+            }
+        } else {
+            // Iniciado por el usuario desde la actividad (puede pasar a primer plano): un fallo aquí se ve.
+            enterForeground(notification)
+        }
         foreground = true
         registerNetworkCallback()
         val mine = ++generation
