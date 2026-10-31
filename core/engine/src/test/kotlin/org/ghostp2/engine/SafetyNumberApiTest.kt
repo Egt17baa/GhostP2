@@ -56,6 +56,27 @@ class SafetyNumberApiTest {
     }
 
     @Test
+    fun readIdentityCopiesAreZeroed() = runBlocking<Unit> {
+        val (bInA, _, expected) = paired()
+        val h = harness!!
+        // En marcha y parado: la copia que lee safetyNumber queda con las claves privadas a cero.
+        for (stopFirst in listOf(false, true)) {
+            if (stopFirst) h.engine(0).stop()
+            val before = h.identities(0).loadedCopies.size
+            assertEquals(expected, h.engine(0).safetyNumber(bInA))
+            val read = h.identities(0).loadedCopies.drop(before)
+            assertEquals(1, read.size)
+            assertTrue(read.single().identityPrivate.all { it == 0.toByte() })
+            assertTrue(read.single().onionPrivateKey!!.all { it == 0.toByte() })
+        }
+        // Lo guardado no se tocó: el motor vuelve a arrancar con la misma identidad y el mismo número.
+        h.engine(0).start()
+        assertEquals(EngineStatus.Online, h.engine(0).status.value)
+        assertTrue(h.identities(0).load()!!.identityPrivate.any { it != 0.toByte() })
+        assertEquals(expected, h.engine(0).safetyNumber(bInA))
+    }
+
+    @Test
     fun unknownContactThrows() = runBlocking<Unit> {
         paired()
         val h = harness!!

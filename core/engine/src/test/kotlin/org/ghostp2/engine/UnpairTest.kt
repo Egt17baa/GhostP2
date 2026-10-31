@@ -202,8 +202,17 @@ class UnpairTest {
         assertNull(h.identities(0).load())
         assertTrue(h.contacts(0).all().isEmpty())
         assertNull(h.network.published.value[oldOnion])
-        // Material de claves en memoria rellenado con ceros.
-        assertTrue(oldIdentity.identityPrivate.all { it == 0.toByte() })
+        // Material de claves en memoria rellenado con ceros: la identidad que usaba la ejecución (los
+        // objetos que el motor guardó) y la copia que leyó para borrar (la última entregada por load).
+        val engineIdentities = h.identities(0).saveArguments
+        assertTrue(engineIdentities.isNotEmpty())
+        assertTrue(engineIdentities.all { id -> id.identityPrivate.all { it == 0.toByte() } })
+        assertTrue(engineIdentities.last().onionPrivateKey!!.all { it == 0.toByte() })
+        val readToWipe = h.identities(0).loadedCopies.last()
+        assertTrue(readToWipe.identityPrivate.all { it == 0.toByte() })
+        assertTrue(readToWipe.onionPrivateKey!!.all { it == 0.toByte() })
+        // Las copias que leyó la prueba no son del motor: no se tocan.
+        assertTrue(oldIdentity.identityPrivate.any { it != 0.toByte() })
         assertTrue(oldContact.pairSecret.all { it == 0.toByte() })
         assertTrue(oldContact.clientAuthPrivateForPeerOnion.all { it == 0.toByte() })
         // B recibió el aviso (había sesión abierta).

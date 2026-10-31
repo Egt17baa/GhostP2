@@ -4,21 +4,39 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
+import java.util.concurrent.CopyOnWriteArrayList
 
-/** Repositorio de identidad en memoria para pruebas. */
+/**
+ * Repositorio de identidad en memoria para pruebas. Como el real (que descifra y decodifica en cada
+ * lectura), [save] guarda una copia y cada [load] devuelve una copia nueva: rellenar con ceros lo que se
+ * ha leído no toca lo guardado ni lo que usa el motor. Para comprobar esas puestas a cero,
+ * [loadedCopies] da las copias entregadas por [load] y [saveArguments] los objetos recibidos en [save]
+ * (los del propio motor), en orden.
+ */
 class InMemoryIdentityRepository(initial: Identity? = null) : IdentityRepository {
     @Volatile
-    private var identity: Identity? = initial
+    private var identity: Identity? = initial?.deepCopy()
 
-    override suspend fun load(): Identity? = identity
+    private val loaded = CopyOnWriteArrayList<Identity>()
+    private val saved = CopyOnWriteArrayList<Identity>()
+
+    val loadedCopies: List<Identity> get() = loaded.toList()
+
+    val saveArguments: List<Identity> get() = saved.toList()
+
+    override suspend fun load(): Identity? = identity?.deepCopy()?.also { loaded += it }
 
     override suspend fun save(identity: Identity) {
-        this.identity = identity
+        saved += identity
+        this.identity = identity.deepCopy()
     }
 
     override suspend fun wipe() {
         identity = null
     }
+
+    private fun Identity.deepCopy(): Identity =
+        Identity(identityPrivate.copyOf(), identityPublic.copyOf(), onionPrivateKey?.copyOf(), onion)
 }
 
 /**

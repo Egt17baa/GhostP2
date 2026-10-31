@@ -105,6 +105,35 @@ class PendingDeletionTest {
         assertEquals(listOf(bInA), h.contacts(0).all().map { it.id })
     }
 
+    @Test
+    fun pairingRemovesStaleJournalEntry() = runBlocking<Unit> {
+        val h = EngineHarness(2, config).also { harness = it }
+        h.startAll()
+        // Entrada antigua para B (p. ej. de un borrado anterior) antes de emparejar con él.
+        val bInA = contactIdFor(h.identities(1).load()!!.identityPublic)
+        h.journal(0).add(bInA)
+        val handle = h.engine(0).createInvitation()
+        val waiting = withTimeout(TIMEOUT) { handle.state.first { it is InvitationState.Waiting } } as InvitationState.Waiting
+        assertTrue(h.engine(1).acceptInvitation(waiting.text) is AcceptResult.Paired)
+        withTimeout(TIMEOUT) { handle.state.first { it is InvitationState.Paired } }
+        assertTrue(h.journal(0).pending().isEmpty())
+        // Al reiniciar, el emparejamiento nuevo sigue ahí: nada lo borra.
+        h.engine(0).stop()
+        h.engine(0).start()
+        delay(300)
+        assertEquals(listOf(bInA), h.contacts(0).all().map { it.id })
+        assertTrue(h.engine(0).deleting.value.isEmpty())
+    }
+
+    @Test
+    fun wipeAllClearsJournal() = runBlocking<Unit> {
+        val (h, ids) = paired()
+        h.journal(0).add(ids.first)
+        h.journal(0).add("cd".repeat(16))
+        h.engine(0).wipeAll()
+        assertTrue(h.journal(0).pending().isEmpty())
+    }
+
     private companion object {
         const val TIMEOUT = 10_000L
         const val POLL_MILLIS = 5L

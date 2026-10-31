@@ -373,6 +373,85 @@ class EngineStartTest {
         }
     }
 
+    /** Identidad ya guardada, todavía sin .onion (como tras un primer arranque sin contactos). */
+    private fun storedIdentity(): Identity {
+        val pair = Primitives.generateX25519()
+        return Identity(pair.privateKey, pair.publicKey, onionPrivateKey = null, onion = null)
+    }
+
+    @Test
+    fun saveFailureDuringStartupSyncIsStorageError() = runBlocking {
+        // Con contactos, el sync del arranque publica la .onion y guarda la identidad: ese guardado falla.
+        val tor = ControlledTor(FakeTorNetwork()).apply { autoReady = true }
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        try {
+            val identities = FlakyIdentities(storedIdentity()).apply { failSave = true }
+            val contacts = InMemoryContactRepository(listOf(contact("Ana")))
+            val engine = MessengerEngine(tor, identities, contacts, scope)
+            engine.start()
+            assertEquals(EngineStatus.Error(STORAGE_ERROR_MESSAGE, EngineErrorKind.STORAGE), engine.status.value)
+            assertEquals(1, tor.startCalls) { "el fallo es posterior a arrancar Tor" }
+            assertTrue(identities.saveAttempts > 0)
+            assertTrue(tor.stopped)
+            assertNull(engine.localPort)
+            assertNull(engine.myOnion.value)
+            assertEquals(0, scope.coroutineContext[Job]!!.children.count())
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun readFailureAtStartIsStorageError() = runBlocking {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        try {
+            // Identidad ilegible.
+            val tor1 = ControlledTor(FakeTorNetwork()).apply { autoReady = true }
+            val unreadable = FlakyIdentities(storedIdentity()).apply { failLoad = true }
+            val e1 = MessengerEngine(tor1, unreadable, InMemoryContactRepository(), scope)
+            e1.start()
+            assertEquals(EngineStatus.Error(STORAGE_ERROR_MESSAGE, EngineErrorKind.STORAGE), e1.status.value)
+            assertEquals(0, tor1.startCalls)
+            // Contactos ilegibles.
+            val tor2 = ControlledTor(FakeTorNetwork()).apply { autoReady = true }
+            val badContacts = object : ContactRepository by InMemoryContactRepository() {
+                override suspend fun all(): List<Contact> = throw IOException("lectura imposible")
+            }
+            val e2 = MessengerEngine(tor2, InMemoryIdentityRepository(), badContacts, scope)
+            e2.start()
+            assertEquals(EngineStatus.Error(STORAGE_ERROR_MESSAGE, EngineErrorKind.STORAGE), e2.status.value)
+            assertEquals(0, tor2.startCalls)
+            assertEquals(0, scope.coroutineContext[Job]!!.children.count())
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun saveFailureWhilePairingAfterStartIsNotTranslated() = runBlocking<Unit> {
+        // Pasado el arranque, el delegado de OnionPublisher deja pasar el fallo tal cual: el invitado
+        // ve la IOException del guardado (CANNOT_CONNECT) y no un fallo genérico de almacenamiento.
+        val network = FakeTorNetwork()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val peer = EngineHarness(1, network = network).also { harness = it }
+        try {
+            val identities = FlakyIdentities(storedIdentity())
+            val engine = MessengerEngine(FakeTor(network), identities, InMemoryContactRepository(), scope)
+            engine.start()
+            assertEquals(EngineStatus.Online, engine.status.value)
+            peer.startAll()
+            identities.failSave = true
+            val handle = peer.engine(0).createInvitation()
+            val waiting = withTimeout(10_000) { handle.state.first { it is InvitationState.Waiting } } as InvitationState.Waiting
+            assertEquals(AcceptResult.Failed(InvitationMessages.CANNOT_CONNECT), engine.acceptInvitation(waiting.text))
+            assertTrue(identities.saveAttempts > 0) { "el emparejamiento no llegó a guardar la identidad" }
+            assertEquals(EngineStatus.Online, engine.status.value)
+            engine.stop()
+        } finally {
+            scope.cancel()
+        }
+    }
+
     @Test
     fun torFailureIsTorError() = runBlocking {
         val tor = ControlledTor(FakeTorNetwork()).apply { failOnStart = IOException("binario ausente") }
@@ -388,6 +467,27 @@ class EngineStartTest {
             scope.cancel()
         }
     }
+}
+
+/** Identidad en memoria cuyas lecturas o guardados se pueden hacer fallar. */
+private class FlakyIdentities(initial: Identity? = null) : IdentityRepository {
+    private val inner = InMemoryIdentityRepository(initial)
+    @Volatile var failLoad = false
+    @Volatile var failSave = false
+    @Volatile var saveAttempts = 0
+
+    override suspend fun load(): Identity? {
+        if (failLoad) throw IOException("lectura imposible")
+        return inner.load()
+    }
+
+    override suspend fun save(identity: Identity) {
+        saveAttempts++
+        if (failSave) throw IOException("disco lleno")
+        inner.save(identity)
+    }
+
+    override suspend fun wipe() = inner.wipe()
 }
 
 /**

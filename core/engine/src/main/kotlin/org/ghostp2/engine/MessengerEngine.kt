@@ -520,8 +520,8 @@ class MessengerEngine(
     /**
      * Número de seguridad con el contacto (30 dígitos en 6 grupos de 5), el mismo que dio `Paired` al
      * emparejar: solo depende de mi identidad pública y de la suya. Funciona con el motor parado (lee la
-     * identidad del repositorio). Las claves privadas de la identidad leída se rellenan con ceros al
-     * terminar, salvo que sean los mismos arrays que usa la ejecución en curso.
+     * identidad del repositorio). Las claves privadas de la identidad leída (una copia: el repositorio
+     * devuelve copias nuevas en cada lectura) se rellenan con ceros al terminar.
      * @throws NoSuchElementException si [contactId] no es un contacto guardado.
      */
     suspend fun safetyNumber(contactId: String): String {
@@ -531,9 +531,8 @@ class MessengerEngine(
         try {
             return SafetyNumber.compute(mine.identityPublic, contact.peerIdentity)
         } finally {
-            val live = identity
-            if (mine.identityPrivate !== live?.identityPrivate) Primitives.wipe(mine.identityPrivate)
-            mine.onionPrivateKey?.let { key -> if (key !== live?.onionPrivateKey) Primitives.wipe(key) }
+            Primitives.wipe(mine.identityPrivate)
+            mine.onionPrivateKey?.let { Primitives.wipe(it) }
         }
     }
 
@@ -780,6 +779,8 @@ class MessengerEngine(
      * Funciona con el motor parado y aunque Tor falle (sus errores se ignoran); termina siempre en
      * `Stopped`. Solo lanza si falla el borrado de los repositorios (los fallos al detener el motor
      * se adjuntan como suprimidos de ese error, o se ignoran si el borrado fue bien).
+     * También vacía el [DeletionJournal] (mejor esfuerzo); lo que quede se descarta en el siguiente
+     * [start] como entradas sin contacto.
      */
     suspend fun wipeAll() {
         connections?.unpairAll(WIPE_UNPAIR_MILLIS)
@@ -812,8 +813,21 @@ class MessengerEngine(
                     throw e
                 }
                 live.forEach { Primitives.wipe(it) }
+                clearJournal()
             }
         }
+    }
+
+    /** Vacía el diario de borrados pendientes; mejor esfuerzo (sin contactos, lo que quede es obsoleto). */
+    private suspend fun clearJournal() {
+        val pending = try {
+            deletions.pending()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            return
+        }
+        pending.forEach { bestEffort { deletions.remove(it) } }
     }
 
     /** Autorizaciones, contactos e identidad; con ceros solo si el borrado fue bien (si no, siguen en uso). */
@@ -1128,6 +1142,8 @@ class MessengerEngine(
      * Los arrays de `result` pasan al [Contact] que se guarda y no se rellenan con ceros aquí: el
      * repositorio guarda sus propias copias (el real, cifradas) y estos arrays quedan para el recolector
      * de basura (PROTOCOLO §15).
+     * Al terminar bien se quita el id del [DeletionJournal] (mejor esfuerzo): una entrada antigua de un
+     * borrado anterior no puede borrar este emparejamiento nuevo en el siguiente arranque.
      */
     private suspend fun finishPairing(result: PairingResult, myClientAuthPublic: ByteArray, releaseKey: ByteArray?): String {
         val id = contactIdFor(result.peerIdentity)
@@ -1160,6 +1176,7 @@ class MessengerEngine(
             withContext(NonCancellable) { rollbackPairing(contact, previous) }
             throw e
         }
+        bestEffort { deletions.remove(id) }
         val old = previous
         if (old != null && old.peerOnion != result.peerOnion) {
             bestEffort { tor.removeClientAuth(old.peerOnion) }
