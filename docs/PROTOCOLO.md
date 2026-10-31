@@ -127,26 +127,41 @@ Es idéntico en ambos lados. Vector conocido (calculado con Python 3 + `hashlib`
 - Secuencia: invitado → msg1; invitador → msg2; invitado → msg3.
 - `pairSecret = HKDF(salt = secreto de la invitación, ikm = handshakeHash, info = "GhostP2 pair-secret v1", 32)`,
   calculado antes de `split()`.
-- Después se crea un `RatchetChannel` (§8) y se intercambian las ofertas en orden fijo:
-  **primero el invitado** envía su `PairingOffer` y después el invitador la suya (una trama
-  del canal cada una).
+- Después se crea un `RatchetChannel` (§8) y se intercambian tres tramas del canal en orden fijo:
+  1. el **invitado** envía su `PairingOffer`;
+  2. el **invitador** envía la suya;
+  3. el **invitado** envía la trama de cierre con el texto `"GhostP2 pairing ok v1"` (UTF-8,
+     21 bytes; trama de 5 + 256 + 16 = 277 bytes).
+
+  El invitador descifra la trama 3 y la compara en tiempo constante; solo entonces devuelve su
+  resultado. Así el invitador nunca da por emparejado a quien no recibió su oferta. El invitado
+  termina en cuanto escribe la trama 3: si esta se pierde, el invitado queda emparejado y el
+  invitador no (caso residual, §13).
 - Oferta (`PairingPayload`, CBOR, mapa de longitud indefinida con claves de texto):
 
   | Campo | Tipo CBOR | Contenido |
   |---|---|---|
   | `onion` | texto | .onion permanente de quien la envía |
-  | `clientAuthPrivate` | **array** de enteros (no `bstr`) | clave privada x25519 (32 bytes) con la que el otro entrará en mi .onion |
+  | `clientAuthPrivate` | **bstr** (`@ByteString`) | clave privada x25519 (32 bytes) con la que el otro entrará en mi .onion |
 
-  Ejemplo (onion `"ab"`, clave `01 02`): `bf 65 6f6e696f6e 62 6162 71 636c69656e744175746850726976617465 9f 01 02 ff ff`.
-- Validación de la oferta recibida: CBOR decodificable, .onion v3 válida (se normaliza) y clave
-  de 32 bytes; si no ⇒ `ProtocolException`.
+  Ejemplo (onion `"ab"`, clave `01 02`; fijado en `PairingTest.offerWireFormatUsesByteString`):
+  `bf 65 6f6e696f6e 62 6162 71 636c69656e744175746850726976617465 42 0102 ff`.
+- Oferta local: debe tener una .onion v3 válida (tras normalizar) y una clave de 32 bytes; si no
+  ⇒ `IllegalArgumentException` al entrar, sin tocar el flujo (error de programación).
+- Validación de la oferta recibida: CBOR decodificable (cualquier fallo del decodificador, no solo
+  `SerializationException`), .onion v3 válida (se normaliza) y clave de 32 bytes; si no ⇒
+  `ProtocolException`.
 - Resultado (`PairingResult`): identidad del otro, su .onion, la clave de autorización para su
-  .onion, `pairSecret` y número de seguridad (§4.3).
-- Plazo total: **60 s** (`Pairing.TIMEOUT_MILLIS = 60_000`).
-- Errores: `HandshakeFailedException` (autenticación fallida, p. ej. secreto distinto; canal no
-  válido; estado no válido; EOF/E/S; tiempo agotado) y `ProtocolException` (datos mal formados).
-  Ante cualquier fallo se cierra el flujo. Siempre se borran PSK, handshake y canal; si falla,
-  también `pairSecret`.
+  .onion, `pairSecret` y número de seguridad (§4.3). Es de quien llama: debe guardar y luego
+  borrar `pairSecret` y `clientAuthPrivateForPeerOnion`. Al terminar bien el flujo no se cierra:
+  lo cierra quien llama.
+- Plazo total: **60 s** (`Pairing.TIMEOUT_MILLIS = 60_000`), con `withTimeoutOrNull`: un plazo
+  exterior del llamador no se convierte, se propaga como cancelación.
+- Errores: `HandshakeFailedException` con motivo (§7.1) y `ProtocolException` (datos mal
+  formados). Secreto distinto: el invitador lo detecta al leer msg3 (`AUTH`) y el invitado ve
+  cerrarse la conexión (`CONNECTION`). Ante cualquier fallo se cierra el flujo. Siempre se
+  borran PSK, handshake y canal; si falla, también `pairSecret` y la clave de autorización
+  recibida.
 
 ## 7. Sesión (`SessionHandshake`, Noise KKpsk2)
 
@@ -158,7 +173,9 @@ Es idéntico en ambos lados. Vector conocido (calculado con Python 3 + `hashlib`
   con un `HandshakeState` nuevo por cada contacto de la lista `candidates`. msg1 lleva una
   etiqueta AEAD (carga vacía cifrada tras `es`/`ss`), así que solo autentica el contacto cuya
   identidad es la del llamante. Se queda con el primero que autentica y devuelve **la misma
-  instancia** de `ContactKeys`. Ninguno ⇒ `HandshakeFailedException("Llamante desconocido")`.
+  instancia** de `ContactKeys`. Ninguno ⇒ `HandshakeFailedException(UNKNOWN_CALLER, "Llamante desconocido")`.
+  Los candidatos deben tener identidades distintas (si no ⇒ `IllegalArgumentException` al
+  entrar, sin tocar el flujo): la capa de datos guarda un solo contacto por clave de identidad.
 - **Confirmación de clave**: en KKpsk2 la PSK solo entra en msg2, así que msg1 autentica la
   identidad pero no está ligado al `pairSecret`. Por eso, tras completar el handshake, el
   **iniciador** envía como primera trama del canal (contador 0) el texto
@@ -168,9 +185,24 @@ Es idéntico en ambos lados. Vector conocido (calculado con Python 3 + `hashlib`
   aquí: la primera trama de aplicación del iniciador usa el contador 1 y la del respondedor el 0.
 - Plazo: **30 s** (`SessionHandshake.TIMEOUT_MILLIS = 30_000`) para todo el handshake, incluida
   la confirmación. Un plazo exterior del llamador no se convierte: se propaga como cancelación.
-- Errores: como en el emparejamiento (`HandshakeFailedException` / `ProtocolException`); una
-  carga no vacía en un mensaje del handshake ⇒ `ProtocolException`. Ante cualquier fallo se
-  cierra el flujo y se borran todos los estados probados.
+- Errores: `HandshakeFailedException` con motivo (§7.1) y `ProtocolException`; una carga no
+  vacía en un mensaje del handshake ⇒ `ProtocolException`. `pairSecret` distinto: el iniciador
+  lo detecta al leer msg2 (`AUTH`) y el respondedor ve cerrarse la conexión (`CONNECTION`).
+  Ante cualquier fallo se cierra el flujo y se borran todos los estados probados.
+- Propiedad: `ContactKeys` y la identidad son de quien llama (nunca se borran). El
+  `RatchetChannel` devuelto también: si se entrega a una `PeerSession`, ella lo destruye; si no
+  (p. ej. pierde el desempate de conexiones duplicadas, §10.5), quien llama debe hacer
+  `channel.destroy()` y `stream.close()`.
+
+### 7.1 Motivos de `HandshakeFailedException` (`reason`)
+
+| Motivo | Cuándo |
+|---|---|
+| `AUTH` | `AuthenticationException` o `ChannelSecurityException` (secreto o `pairSecret` distinto, trama no auténtica), o trama de confirmación (`session confirm` / `pairing ok`) con otro texto |
+| `UNKNOWN_CALLER` | Sesión, respondedor: ningún candidato autentica msg1 (identidad desconocida o cambiada, o msg1 basura) |
+| `CONNECTION` | `IOException`/EOF: el otro lado cerró o la conexión cayó. Es lo que ve el lado que **no** detectó el fallo |
+| `TIMEOUT` | Venció nuestro plazo (60 s emparejamiento, 30 s sesión); mensajes `"Tiempo de emparejamiento agotado"` / `"Tiempo de sesión agotado"` |
+| `STATE` | `IllegalStateException`, handshake incompleto o sin identidad remota |
 
 ## 8. Canal con ratchet (`RatchetChannel`)
 
@@ -255,17 +287,24 @@ polimorfismo como **array de longitud indefinida** `[etiqueta, objeto]`, con el 
 | Trozo de foto | 32 768 bytes (el último, el resto) |
 | Latido (`Ping`) | cada 20 s, haya o no otro tráfico |
 | Inactividad | sin ninguna trama entrante en 60 s ⇒ `Closed(TIMEOUT)` |
-| Acuse | no recibido en 30 s ⇒ `Failed(id, NO_ACK)` |
+| Acuse | no recibido en 30 s ⇒ `Failed(id, NO_ACK)` (texto: desde que se registra el envío; foto: desde `PhotoEnd`) |
+| Vigilante de escritura | una sola escritura de trama tarda más de 30 s (el plazo de acuse) ⇒ `Closed(IO)` |
+| Cola de acuses salientes (`ACK_QUEUE_CAPACITY`) | 256; si se llena ⇒ `Closed(SECURITY)` |
 | Espera tras `Bye`/`Unpair` (`linger`) | hasta 2 s a que el otro cierre la conexión |
 
 ### 10.2 Arranque y eventos
 
+- Construcción: `PeerSession(stream, channel, scope)`. `scope` debe ser un scope con
+  `SupervisorJob` que viva más que la sesión; cancelarlo cierra la sesión (`LOCAL`). Desde ese
+  momento la sesión es dueña del flujo y del canal.
 - `events` es un `SharedFlow` sin reproducción y con búfer ilimitado. `start()` es `suspend`:
-  **espera a que haya al menos un suscriptor** y entonces lanza el lector, el latido, el
-  vigilante de inactividad y el emisor de acuses. Es idempotente.
-- Contrato: un único recolector de larga vida (repositorio/servicio, no la interfaz),
-  suscrito antes de `start()`. No usar `Dispatchers.Unconfined` (los eventos se emiten con un
-  cerrojo interno tomado).
+  **espera a que haya al menos un suscriptor o a que la sesión se cierre** y entonces (si sigue
+  abierta) lanza el lector, el latido, el vigilante de inactividad y el emisor de acuses. Es
+  idempotente y nunca se queda colgada.
+- Contrato: un único recolector de larga vida (repositorio/servicio, no la interfaz), lanzado
+  antes de `start()`. Los eventos emitidos sin recolector activo **se pierden**, aunque el `Ack`
+  ya se haya enviado (el otro lado verá "entregado"). No usar `Dispatchers.Unconfined` (los
+  eventos se emiten con un cerrojo interno tomado).
 - Eventos: `TextReceived`, `PhotoReceived`, `PhotoProgress` (tras cada trozo enviado),
   `Delivered`, `Failed(id, NOT_CONNECTED | CONNECTION_LOST | NO_ACK)`, `PeerUnpaired`,
   `Closed(PEER_BYE | PEER_UNPAIRED | TIMEOUT | SECURITY | IO | LOCAL)`. Ningún `toString`
@@ -273,18 +312,27 @@ polimorfismo como **array de longitud indefinida** `[etiqueta, objeto]`, con el 
 
 ### 10.3 Envío y descarte
 
-- `sendText`/`sendPhoto` devuelven el id. Si la sesión no está abierta (o se está cerrando) el
-  mensaje **se descarta**: `Failed(id, NOT_CONNECTED)`. No hay cola ni reintentos.
+- `sendText`/`sendPhoto` **no suspenden**: validan (`IllegalArgumentException`), generan el id,
+  registran el envío, lo lanzan en el `scope` de la sesión y devuelven el id enseguida. Ningún
+  evento de ese id se emite mientras la llamada está en curso; con un recolector confinado en el
+  mismo hilo que quien llama, los eventos de un id llegan siempre después de que este lo guarde.
+- Si la sesión no está abierta (o se está cerrando) el mensaje **se descarta**: se devuelve el
+  id y `Failed(id, NOT_CONNECTED)` se emite después, de forma asíncrona. No hay cola ni reintentos.
 - Cada mensaje enviado termina exactamente en un `Delivered` o un `Failed`.
-- El trabajo de envío se ejecuta en el `scope` de la sesión, no en la corrutina que llama: si
-  esta se cancela, la secuencia de tramas sigue hasta el final y el id recibe su evento
-  terminal. Solo cancelar el `scope` interrumpe el envío, y entonces la sesión se cierra (`LOCAL`).
+- El envío se arranca sin despachar (hasta su primera suspensión corre en el hilo de quien
+  llama), así toma su turno en los `Mutex` (justos, FIFO) en el orden de las llamadas: envíos
+  sucesivos desde un mismo hilo salen en ese orden. La cancelación de quien llama no le afecta;
+  solo cancelar el `scope` interrumpe el envío, y entonces la sesión se cierra (`LOCAL`).
 - Cifrar y escribir es atómico (un `Mutex`): el orden de contadores coincide con el del cable.
+- Vigilante de escritura: si una escritura de trama tarda más de 30 s, el otro lado no lee ⇒
+  `Closed(IO)` (y los pendientes `Failed(CONNECTION_LOST)`).
 - Foto: `PhotoStart`, `chunkCount = ⌈total / 32 768⌉` trozos en orden, `PhotoEnd`. **Una sola
   foto saliente a la vez** por sentido (otro `Mutex`). El plazo de acuse empieza tras
   `PhotoEnd`; un `Ack` que llega mientras la foto aún se envía se ignora.
-- Texto: el plazo de acuse empieza tras escribir la trama.
-- Los acuses los envía una corrutina aparte (cola ilimitada), no el lector.
+- Texto: el plazo de acuse empieza al registrar el envío (no al terminar de escribirlo), así un
+  texto atascado en una escritura bloqueada también falla a los 30 s.
+- Los acuses los envía una corrutina aparte (cola de 256), no el lector. Si la cola se llena
+  (el otro lado envía sin leer nuestros acuses) ⇒ `ProtocolException` ⇒ `Closed(SECURITY)`.
 
 ### 10.4 Recepción
 
@@ -308,9 +356,14 @@ polimorfismo como **array de longitud indefinida** `[etiqueta, objeto]`, con el 
 
 ### 10.5 Cierre
 
-- `close()` envía `Bye` y `sendUnpair()` envía `Unpair` (forzando el envío aunque la sesión
-  se esté cerrando) y esperan como mucho 2 s a que el otro cierre; luego `Closed(LOCAL)`.
-  Ambos son idempotentes.
+- `close()` envía `Bye` y `sendUnpair()` envía `Unpair` y esperan como mucho 2 s a que el otro
+  cierre; luego `Closed(LOCAL)`. Ambos son idempotentes. `sendUnpair(): Boolean` devuelve
+  `true` solo si la trama `Unpair` se escribió en el flujo; `false` si la sesión ya se estaba
+  cerrando o estaba cerrada, o si la escritura falló (la app debe reintentarlo en otra conexión,
+  §6.7 bis del diseño).
+- Conexiones duplicadas (ambos llaman a la vez): la app elige la ganadora **antes** de crear la
+  `PeerSession` (la iniciada por la `identityKey` menor) y, para la perdedora, cierra su flujo y
+  destruye su canal **sin enviar `Bye`**.
 - Desmontaje: cancela lector y temporizadores, emite `Failed(id, CONNECTION_LOST)` por cada
   pendiente, descarta en silencio (y borra) la foto entrante incompleta, destruye el canal,
   cierra el flujo, pone `isOpen` a `false` y emite `Closed(motivo)` una sola vez. Gana el
@@ -337,7 +390,7 @@ Ejecutar: `./gradlew test`.
 | Red / operadora / wifi | Ver que usas Tor | Ver con quién hablas ni qué |
 | Nodos de Tor | Ver tráfico cifrado | Leerlo; saber IP y destino a la vez |
 | Quien conozca tu .onion | Nada (autorización de cliente) | Conectar, sondear presencia |
-| Quien robe una invitación antes de usarla | Emparejarse en tu lugar | — (mitigado: 10 min, un uso, número de seguridad) |
+| Quien robe una invitación antes de usarla | Emparejarse en tu lugar | — (mitigado: 10 min y un uso, impuestos por la app en el plan 2, no por el núcleo; número de seguridad) |
 | Robo del móvil bloqueado | — | Leer mensajes (no existen en disco); contactos cifrados con Keystore |
 | Contacto malicioso | Ver lo que le envías | Ver tu IP |
 
@@ -357,17 +410,29 @@ de claves); rechazo de repetición, reordenación y manipulación (cierre de la 
   en v1; la autorización de cliente de Tor limita quién puede llegar a conectar.
 - **El emparejamiento no liga la .onion temporal al handshake**: que el invitador es quien
   sirve esa .onion lo garantiza Tor, no el núcleo (el prólogo no incluye la dirección).
+- **msg2 de XXpsk3 revela la identidad del invitador**: la PSK solo entra en msg3, así que
+  cualquiera que conozca la .onion temporal (aunque no el secreto) puede enviar msg1 y descifrar
+  en msg2 la clave pública de identidad del invitador (vinculación entre invitaciones y
+  contactos). No revela mensajes ni permite emparejarse.
+- **Invitación de un solo uso y caducidad**: las impone la app (plan 2), no el núcleo; `Pairing`
+  no sabe nada de la invitación. Un intento fallido (secreto erróneo, conexión cortada, sondeo
+  de msg2) **no debe** consumir la invitación; solo un emparejamiento terminado bien en el
+  invitador.
+- **Emparejamiento asimétrico residual**: si se pierde la trama final `"GhostP2 pairing ok v1"`,
+  el invitado queda emparejado y el invitador no; al llamar, el invitado obtendrá
+  `UNKNOWN_CALLER` y la app debe proponer volver a emparejar.
 - **Borrado de memoria incompleto**: BouncyCastle copia internamente claves
   (`X25519PrivateKeyParameters`, `KeyParameter`, estado HMAC) que no se pueden borrar; la JVM
   puede copiar arrays al compactar; los textos (`String`) son inmutables y no se borran. Las
   fotos recibidas se entregan a la app, que es quien debe borrarlas.
 - **Búfer de eventos ilimitado**: si el recolector se atasca, los eventos (incluidas fotos de
-  hasta 3 MiB) se acumulan en memoria.
+  hasta 3 MiB) se acumulan en memoria. (La cola de acuses salientes sí está acotada: 256.)
 - **Sin confirmación de lectura**: `Delivered` significa que la `PeerSession` del otro lado
   procesó el mensaje, no que la persona lo haya visto.
 - **Número de seguridad**: 6 grupos de `u32 mod 100000` (≈ 99,7 bits, con un sesgo de módulo
   despreciable).
 - **Límite de contador**: 2^32−1 tramas por sentido y sesión; agotado, la sesión se cierra.
 - **Aún no implementado en el núcleo** (planes 2 y 3): Tor y servicios ocultos, reglas de
-  conexiones simultáneas (conservar la iniciada por la `identityKey` menor), reintentos de
-  presencia, almacenamiento cifrado con Keystore, invitación de 10 minutos y un solo uso.
+  conexiones simultáneas (conservar la iniciada por la `identityKey` menor, elegida antes de
+  crear la `PeerSession`, §10.5), reintentos de presencia, almacenamiento cifrado con Keystore,
+  invitación de 10 minutos y un solo uso.
