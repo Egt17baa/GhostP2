@@ -1,3 +1,5 @@
+@file:OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+
 package org.ghostp2.data
 
 import com.google.crypto.tink.Aead
@@ -9,6 +11,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.cbor.Cbor
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -68,7 +71,7 @@ class EncryptedStoreTest {
         store().update { it.copy(text = "texto-muy-secreto") }
         val raw = file().readBytes()
         assertFalse(String(raw, Charsets.ISO_8859_1).contains("texto-muy-secreto"))
-        assertEquals("primer byte = versión del formato", 1, raw[0].toInt())
+        assertEquals("primer byte = versión del formato", 2, raw[0].toInt())
     }
 
     @Test
@@ -92,10 +95,36 @@ class EncryptedStoreTest {
     }
 
     @Test
-    fun unknownFormatVersionThrowsStoreCorrupted() = runBlocking {
+    fun unknownFormatIsCorrupted() = runBlocking {
         store().update { it.copy(text = "a") }
         val raw = file().readBytes()
-        raw[0] = 2
+        raw[0] = 3
+        file().writeBytes(raw)
+        val s = store()
+        assertCorrupted { s.read() }
+        assertCorrupted { s.update { it.copy(count = 1) } }
+        assertArrayEquals("el archivo de formato desconocido no se toca", raw, file().readBytes())
+    }
+
+    @Test
+    fun readsFormat1AndRewritesFormat2() = runBlocking {
+        // Archivo de formato 1 escrito a mano: 1 ‖ AEAD(CBOR), con datos asociados 1 ‖ etiqueta.
+        val plain = Cbor.encodeToByteArray(Note.serializer(), Note("viejo", 5))
+        file().writeBytes(byteArrayOf(1) + aead.encrypt(plain, byteArrayOf(1) + label))
+        val s = store()
+        assertEquals(Note("viejo", 5), s.read())
+        assertEquals("leer no reescribe el archivo", 1, file().readBytes()[0].toInt())
+        s.update { it.copy(count = 6) }
+        assertEquals("tras update se escribe el formato 2", 2, file().readBytes()[0].toInt())
+        assertEquals(Note("viejo", 6), store().read())
+    }
+
+    @Test
+    fun formatByteIsAuthenticated() = runBlocking {
+        // Un archivo de formato 2 con el byte cambiado a 1 no se autentica (el byte va en los datos asociados).
+        store().update { it.copy(text = "a") }
+        val raw = file().readBytes()
+        raw[0] = 1
         file().writeBytes(raw)
         assertCorrupted { store().read() }
     }

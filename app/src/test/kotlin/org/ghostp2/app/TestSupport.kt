@@ -1,8 +1,13 @@
 package org.ghostp2.app
 
 import android.os.Looper
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.withTimeout
+import org.ghostp2.data.AppSettings
+import org.ghostp2.data.SettingsRepository
 import org.ghostp2.engine.AcceptResult
 import org.ghostp2.engine.ContactRepository
 import org.ghostp2.engine.EngineHarness
@@ -12,6 +17,7 @@ import org.ghostp2.engine.FakeTorNetwork
 import org.ghostp2.engine.Identity
 import org.ghostp2.engine.IdentityRepository
 import org.ghostp2.engine.InMemoryContactRepository
+import org.ghostp2.engine.InMemoryDeletionJournal
 import org.ghostp2.engine.InMemoryIdentityRepository
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
@@ -51,15 +57,39 @@ class TestStorage : AppStorage {
 
     override val contacts: ContactRepository = InMemoryContactRepository()
 
+    override val settings = InMemorySettingsRepository()
+
+    override val deletions = InMemoryDeletionJournal()
+
     override suspend fun probe() {
         identities.load()
     }
 
+    /** Como el real: borra todo el archivo, ajustes y borrados pendientes incluidos. */
     override suspend fun forceReset() {
         forceResets++
         failure = null
         memoryIdentities.wipe()
         contacts.wipe()
+        settings.wipe()
+        deletions.pending().forEach { deletions.remove(it) }
+    }
+}
+
+/** Ajustes en memoria; como el real, las lecturas devuelven [AppSettings.sanitized]. */
+class InMemorySettingsRepository(initial: AppSettings = AppSettings()) : SettingsRepository {
+    private val state = MutableStateFlow(initial.sanitized())
+
+    override val settings: Flow<AppSettings> = state
+
+    override suspend fun get(): AppSettings = state.value
+
+    override suspend fun update(transform: (AppSettings) -> AppSettings) {
+        state.update { transform(it).sanitized() }
+    }
+
+    override suspend fun wipe() {
+        state.value = AppSettings()
     }
 }
 

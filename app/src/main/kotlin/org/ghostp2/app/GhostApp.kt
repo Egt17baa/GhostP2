@@ -21,11 +21,13 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import org.ghostp2.data.SettingsRepository
 import org.ghostp2.data.StoreCorruptedException
 import org.ghostp2.data.StoreUnavailableException
 import org.ghostp2.data.StoredRepositories
 import org.ghostp2.data.createRepositories
 import org.ghostp2.engine.ContactRepository
+import org.ghostp2.engine.DeletionJournal
 import org.ghostp2.engine.EngineStatus
 import org.ghostp2.engine.IdentityRepository
 import org.ghostp2.engine.MessengerEngine
@@ -60,10 +62,15 @@ internal val SilentExceptionHandler = CoroutineExceptionHandler { _, _ ->
 /** El contenedor del proceso a partir de cualquier `Context`. */
 val Context.container: AppContainer get() = (applicationContext as GhostApp).container
 
-/** Almacenamiento de identidad y contactos, con el borrado forzado para cuando "Reintentar" no sirve. */
+/**
+ * Almacenamiento de identidad, contactos, ajustes y borrados pendientes, con el borrado forzado para
+ * cuando "Reintentar" no sirve.
+ */
 interface AppStorage {
     val identities: IdentityRepository
     val contacts: ContactRepository
+    val settings: SettingsRepository
+    val deletions: DeletionJournal
 
     /**
      * Lee el almacenamiento sin conservar nada. Lanza [StoreCorruptedException] o
@@ -78,6 +85,8 @@ interface AppStorage {
 private class StoredAppStorage(private val repositories: StoredRepositories) : AppStorage {
     override val identities: IdentityRepository get() = repositories.identities
     override val contacts: ContactRepository get() = repositories.contacts
+    override val settings: SettingsRepository get() = repositories.settings
+    override val deletions: DeletionJournal get() = repositories.deletions
 
     override suspend fun probe() {
         // `load()` devuelve copias recién descifradas: se rellenan con ceros enseguida.
@@ -154,10 +163,14 @@ class AppContainer internal constructor(
      */
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default + SilentExceptionHandler)
 
-    val engine = MessengerEngine(tor, store.identities, store.contacts, scope)
+    /** Con el diario guardado: los borrados de contacto interrumpidos se reanudan al arrancar. */
+    val engine = MessengerEngine(tor, store.identities, store.contacts, scope, deletions = store.deletions)
 
     /** Contactos guardados (para nombres y la pantalla de diagnóstico). */
     val contacts: ContactRepository get() = store.contacts
+
+    /** Ajustes de la app, en el mismo almacenamiento cifrado. */
+    val settings: SettingsRepository get() = store.settings
 
     private val mutableStorage = MutableStateFlow<StorageState>(StorageState.Unknown)
     val storage: StateFlow<StorageState> = mutableStorage.asStateFlow()

@@ -50,12 +50,17 @@ private class UnreadableContentException : Exception("Contenido descifrado no de
 @OptIn(ExperimentalSerializationApi::class)
 private val STORE_CBOR = Cbor { ignoreUnknownKeys = true }
 
-/** Causa de un archivo que no empieza por la versión de formato conocida. */
+/** Causa de un archivo que no empieza por una versión de formato conocida. */
 private class UnknownFormatException : Exception("Versión de formato desconocida")
 
 /**
  * Un objeto completo `T` guardado en `file` como `versión(1 byte) ‖ AEAD(CBOR(T))`, con datos asociados
- * `versión ‖ associatedData` (una etiqueta fija y versionada, p. ej. "ghostp2-store-v1").
+ * `versión ‖ associatedData` (una etiqueta fija, p. ej. "ghostp2-store-v1").
+ *
+ * - Formatos (R21): se leen el 1 y el 2 ([READABLE_FORMATS]), cada uno con su propio byte en los datos
+ *   asociados; se escribe siempre [FORMAT_VERSION] (2), así que un archivo de formato 1 pasa al 2 en la
+ *   primera escritura. El 2 solo añade campos con valor por defecto a `T`; el formato 1 se lee igual.
+ *   Cualquier otro byte ⇒ [StoreCorruptedException], sin intentar descifrar.
  *
  * - Escritura atómica: `<file>.tmp` + `fsync` + `rename` sobre el destino. Un `.tmp` huérfano (corte a
  *   mitad de escritura) se ignora y se borra en el primer acceso.
@@ -82,7 +87,7 @@ class EncryptedStore<T>(
     /** Envoltorio para distinguir "no cargado" de un `T` nulo y para que cada commit se emita. */
     private class Loaded<T>(val value: T)
 
-    private val associatedData = byteArrayOf(FORMAT_VERSION) + associatedData
+    private val label = associatedData.copyOf()
     private val tmp = File(file.parentFile, file.name + ".tmp")
     private val mutex = Mutex()
     private val latest = MutableStateFlow<Loaded<T>?>(null)
@@ -152,9 +157,9 @@ class EncryptedStore<T>(
         } catch (e: IOException) {
             throw StoreUnavailableException(e)
         }
-        if (bytes.isEmpty() || bytes[0] != FORMAT_VERSION) throw StoreCorruptedException(UnknownFormatException())
+        if (bytes.isEmpty() || bytes[0] !in READABLE_FORMATS) throw StoreCorruptedException(UnknownFormatException())
         val plain = try {
-            aead.decrypt(bytes.copyOfRange(1, bytes.size), associatedData)
+            aead.decrypt(bytes.copyOfRange(1, bytes.size), associatedDataFor(bytes[0]))
         } catch (e: GeneralSecurityException) {
             throw StoreCorruptedException(e)
         }
@@ -175,7 +180,7 @@ class EncryptedStore<T>(
         }
         val plain = STORE_CBOR.encodeToByteArray(serializer, value)
         val sealed = try {
-            aead.encrypt(plain, associatedData)
+            aead.encrypt(plain, associatedDataFor(FORMAT_VERSION))
         } catch (e: GeneralSecurityException) {
             throw StoreUnavailableException(e)
         } finally {
@@ -194,6 +199,9 @@ class EncryptedStore<T>(
         }
         syncDirectory()
     }
+
+    /** Datos asociados del AEAD: el byte de formato del archivo ‖ la etiqueta. */
+    private fun associatedDataFor(format: Byte): ByteArray = byteArrayOf(format) + label
 
     private fun deleteFiles() = unavailableOnIo {
         Files.deleteIfExists(tmp.toPath())
@@ -221,7 +229,11 @@ class EncryptedStore<T>(
         }
     }
 
-    private companion object {
-        const val FORMAT_VERSION: Byte = 1
+    internal companion object {
+        /** Formato que se escribe. */
+        const val FORMAT_VERSION: Byte = 2
+
+        /** Formatos que se leen: el 1 (sin ajustes ni borrados pendientes) y el actual. */
+        val READABLE_FORMATS: Set<Byte> = setOf(1, FORMAT_VERSION)
     }
 }
