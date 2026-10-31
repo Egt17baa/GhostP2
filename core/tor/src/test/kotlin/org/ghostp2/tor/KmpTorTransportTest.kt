@@ -225,12 +225,25 @@ class KmpTorTransportTest {
     }
 
     @Test
+    fun permanentAddressIsNeverPublishedWithoutClientAuth() = runBlocking<Unit> {
+        startReady()
+        val key = ED25519_V3.PrivateKey.generate()
+        // Con clave (la .onion permanente) y sin claves de autorización: se rechaza sin enviar nada a Tor.
+        expectIOException { tor.publishService(key.encoded(), emptyList(), 7420, 5000) }
+        assertTrue(driver.commands.isEmpty())
+        // Sin clave y sin autorización sigue permitido: es el servicio temporal de la invitación.
+        tor.publishService(null, emptyList(), 7420, 5000)
+        assertTrue(driver.commands.single() is TorCmd.Onion.Add)
+    }
+
+    @Test
     fun ambiguousAddFailureRetiresTheAddress() = runBlocking<Unit> {
         startReady()
         val key = ED25519_V3.PrivateKey.generate()
         val expected = key.generatePublicKey().address()
         driver.addFailure = IllegalStateException("conexión de control caída")
-        expectIOException { tor.publishService(key.encoded(), emptyList(), 7420, 5000) }
+        val auth = Primitives.generateX25519().publicKey
+        expectIOException { tor.publishService(key.encoded(), listOf(auth), 7420, 5000) }
         val delete = driver.commands.last() as TorCmd.Onion.Delete
         assertEquals(expected, delete.address)
 

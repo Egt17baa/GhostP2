@@ -129,6 +129,11 @@ class KmpTorTransport internal constructor(
         virtualPort: Int,
         localPort: Int,
     ): PublishedService {
+        // Regla global: una dirección con clave (la .onion permanente) nunca se publica sin autorización
+        // de cliente. Sin clave y sin autorización solo se usa para el servicio temporal de la invitación.
+        if (privateKey != null && clientAuthPublicKeys.isEmpty()) {
+            throw IOException("La .onion permanente necesita autorización de cliente")
+        }
         val d = awaitReady()
         val authKeys = keysOrIOException { clientAuthPublicKeys.map { TorKeys.x25519PublicKey(it) } }
         // La clave se genera aquí también para una dirección nueva: así siempre sabemos qué dirección
