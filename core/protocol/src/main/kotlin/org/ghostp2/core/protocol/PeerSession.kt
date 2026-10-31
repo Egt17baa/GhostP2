@@ -2,6 +2,7 @@ package org.ghostp2.core.protocol
 
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
@@ -12,6 +13,9 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.merge
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -64,6 +68,7 @@ enum class CloseReason { PEER_BYE, PEER_UNPAIRED, TIMEOUT, SECURITY, IO, LOCAL }
  * Temporizadores de la sesión. Los valores por defecto son los de la especificación; las pruebas
  * usan duraciones cortas en tiempo real. [linger]: cuánto se espera, tras enviar `Bye`/`Unpair`,
  * a que el otro lado cierre la conexión, para no cortarla antes de que lea esa última trama.
+ * [ackTimeout] es también el tiempo máximo de UNA escritura de trama (vigilante de escritura).
  */
 internal data class SessionTimings(
     val heartbeat: Duration = 20.seconds,
@@ -75,35 +80,57 @@ internal data class SessionTimings(
 /**
  * Sesión viva con un contacto sobre un canal ya establecido por [SessionHandshake].
  *
+ * Construcción: [scope] debe ser un scope con `SupervisorJob` que viva MÁS que la sesión (p. ej.
+ * el del servicio): el lector, los temporizadores y los envíos se lanzan en él, y el fallo de
+ * uno no debe cancelar a los demás. Cancelar [scope] cierra la sesión con `LOCAL`. Si hay dos
+ * conexiones simultáneas con el mismo contacto, la app elige la ganadora ANTES de crear la
+ * `PeerSession` (§6.5: la iniciada por la `identityKey` menor) y, para la perdedora, cierra su
+ * flujo y destruye su canal sin enviar `Bye` (un `Bye` se interpretaría como fin de la sesión).
+ * Desde que se construye, la sesión es dueña de [stream] y [channel]: los cierra y destruye ella.
+ *
  * Semántica de entrega: si la sesión no está abierta los mensajes se DESCARTAN (nunca se encolan):
- * `sendText`/`sendPhoto` devuelven el id y emiten `Failed(id, NOT_CONNECTED)`. Cada mensaje
- * enviado termina exactamente en un `Delivered` o un `Failed`. Una foto llega entera o no llega.
+ * `sendText`/`sendPhoto` devuelven el id y `Failed(id, NOT_CONNECTED)` se emite DESPUÉS de que
+ * la llamada vuelva. Cada mensaje enviado termina exactamente en un `Delivered` o un `Failed`.
+ * Una foto llega entera o no llega.
+ *
+ * Ids: [sendText] y [sendPhoto] NO suspenden: validan, generan el id, registran el envío, lo
+ * lanzan en [scope] y devuelven el id enseguida. Ningún evento de ese id se emite mientras la
+ * llamada está en curso (salvo si [scope] ya estaba cancelado, en cuyo caso el envío falla al
+ * instante). Un recolector confinado en el mismo hilo que quien llama (p. ej. el hilo principal o
+ * un dispatcher de un solo hilo) recibe siempre los eventos de un id después de que quien llama
+ * lo haya guardado; con un recolector en otro hilo, guarde el id y procese los eventos bajo el
+ * mismo cerrojo. Los envíos sucesivos desde un mismo hilo salen al cable en ese orden.
  *
  * Eventos: [events] es un SharedFlow sin reproducción y con búfer ilimitado, así que `tryEmit`
- * nunca falla ni se bloquea y un recolector lento no pierde nada. Los eventos emitidos sin
- * suscriptores se perderían, por eso [start] SUSPENDE hasta que haya al menos un suscriptor.
- * Contrato: un único recolector de larga vida propiedad de quien posee la sesión (un repositorio
- * o servicio, NO la interfaz, que va y viene), suscrito antes de [start] y mientras dure la
- * sesión. Tras `Closed` solo pueden llegar `Failed(NOT_CONNECTED)` de envíos posteriores.
+ * nunca falla ni se bloquea y un recolector lento no pierde nada. Los eventos emitidos cuando no
+ * hay ningún recolector activo se PIERDEN, aunque el `Ack` correspondiente ya se haya enviado
+ * (el otro lado verá "entregado"). Por eso [start] suspende hasta que haya al menos un suscriptor
+ * (o hasta que la sesión se cierre). Contrato: un único recolector de larga vida propiedad de
+ * quien posee la sesión (un repositorio o servicio, NO la interfaz, que va y viene), lanzado
+ * antes de [start] y activo mientras dure la sesión. Tras `Closed` solo pueden llegar
+ * `Failed(NOT_CONNECTED)` de envíos posteriores.
  * - El recolector NO debe usar `Dispatchers.Unconfined`: los eventos se emiten con un cerrojo
  *   interno tomado y un recolector no confinado se ejecutaría dentro de él.
  * - Como el búfer no tiene límite, si el recolector se atasca se acumulan eventos en memoria,
  *   incluidas fotos recibidas completas (hasta 3 MiB cada una).
  *
  * Cancelación: el trabajo de [sendText]/[sendPhoto] se ejecuta en [scope], no en la corrutina
- * de quien llama. Si esta se cancela (p. ej. el usuario sale del chat), el envío en curso sigue
- * hasta el final y su id recibe igualmente su evento terminal; así nunca queda una foto a medias
- * en el cable. Solo si se cancela [scope] se interrumpe el envío, y entonces la sesión se cierra.
+ * de quien llama, así que nunca queda una foto a medias en el cable por salir de una pantalla.
+ * Solo si se cancela [scope] se interrumpe el envío, y entonces la sesión se cierra.
  *
  * Concurrencia:
  * - Un único bucle de lectura (lanzado en [start]).
- * - Todo envío pasa por un [Mutex]: cifrar y escribir es atómico, así el orden de los contadores
- *   del ratchet coincide siempre con el orden en el cable.
- * - Los acuses los envía una corrutina aparte (cola ilimitada), no el lector, para que dos lados
- *   que escriben a la vez con los búferes llenos no se bloqueen mutuamente.
+ * - Todo envío pasa por un [Mutex] (justo, FIFO): cifrar y escribir es atómico, así el orden de
+ *   los contadores del ratchet coincide siempre con el orden en el cable.
+ * - Vigilante de escritura: si una sola escritura de trama tarda más que el plazo de acuse
+ *   (30 s), el otro lado no está leyendo y la sesión se cierra con `IO`.
+ * - Los acuses los envía una corrutina aparte (cola de [ACK_QUEUE_CAPACITY]), no el lector, para
+ *   que dos lados que escriben a la vez con los búferes llenos no se bloqueen mutuamente. Si la
+ *   cola se llena (el otro lado envía sin leer nuestros acuses), la sesión se cierra con `SECURITY`.
  * - Una sola foto saliente a la vez (otro [Mutex]); por eso el receptor rechaza una segunda foto
  *   entrante simultánea.
- * - Los temporizadores (latido, inactividad, acuses) son corrutinas con `delay` en [scope].
+ * - Los temporizadores (latido, inactividad, acuses) son corrutinas con `delay` en [scope]; el
+ *   tiempo de la última trama recibida se mide con el reloj monótono del sistema.
  *
  * Cierre ([teardown]): cancela lector y temporizadores, emite `Failed(CONNECTION_LOST)` para cada
  * mensaje pendiente, descarta en silencio las fotos entrantes incompletas, destruye el canal,
@@ -116,12 +143,10 @@ class PeerSession internal constructor(
     private val stream: FrameStream,
     private val channel: RatchetChannel,
     private val scope: CoroutineScope,
-    private val clock: TimeSource,
     private val timings: SessionTimings,
 ) {
-    constructor(
-        stream: FrameStream, channel: RatchetChannel, scope: CoroutineScope, clock: TimeSource = TimeSource.Monotonic,
-    ) : this(stream, channel, scope, clock, SessionTimings())
+    constructor(stream: FrameStream, channel: RatchetChannel, scope: CoroutineScope) :
+        this(stream, channel, scope, SessionTimings())
 
     private val _events = MutableSharedFlow<SessionEvent>(replay = 0, extraBufferCapacity = Int.MAX_VALUE)
     val events: SharedFlow<SessionEvent> = _events.asSharedFlow()
@@ -146,10 +171,10 @@ class PeerSession internal constructor(
     private val jobs = mutableListOf<Job>()
     private var readerJob: Job? = null
 
-    private val acks = Channel<String>(Channel.UNLIMITED)
+    private val acks = Channel<String>(ACK_QUEUE_CAPACITY)
 
     @Volatile
-    private var lastReceived: TimeMark = clock.markNow()
+    private var lastReceived: TimeMark = TimeSource.Monotonic.markNow()
 
     /** Mensaje propio pendiente de acuse; [awaitingAck] es false mientras una foto aún se envía. */
     private class Pending(var awaitingAck: Boolean, var timer: Job? = null)
@@ -161,15 +186,19 @@ class PeerSession internal constructor(
 
     /**
      * Espera a que haya al menos un suscriptor de [events] y arranca el lector, el latido, el
-     * vigilante de inactividad y el emisor de acuses. Idempotente.
+     * vigilante de inactividad y el emisor de acuses. Vuelve también (sin arrancar nada) si la
+     * sesión se cierra mientras espera, así que nunca se queda colgada. Idempotente.
+     *
+     * Uso: lance un único recolector de larga vida ANTES de llamar a start(); los eventos
+     * emitidos mientras no hay recolector activo se pierden aunque su `Ack` ya se haya enviado.
      */
     suspend fun start() {
-        _events.subscriptionCount.first { it > 0 }
+        merge(_events.subscriptionCount.map { it > 0 }, _isOpen.map { !it }).first { it }
         val reader: Job
         synchronized(lock) {
-            if (started || closed) return
+            if (started || closed || closeReason.get() != null) return
             started = true
-            lastReceived = clock.markNow()
+            lastReceived = TimeSource.Monotonic.markNow()
             reader = scope.launch { readLoop() }
             readerJob = reader
             jobs += reader
@@ -181,28 +210,33 @@ class PeerSession internal constructor(
         reader.invokeOnCompletion { fail(CloseReason.LOCAL) }
     }
 
-    /** Envía un texto (máx. [MAX_TEXT_CHARS] caracteres Unicode). Devuelve su id. */
-    suspend fun sendText(text: String): String {
+    /**
+     * Envía un texto (máx. [MAX_TEXT_CHARS] caracteres Unicode). No suspende: devuelve el id
+     * enseguida y el envío sigue en [scope] (ver la KDoc de la clase). El plazo de acuse (30 s)
+     * empieza al registrar el envío, no al terminar de escribirlo.
+     * @throws IllegalArgumentException si el texto es demasiado largo.
+     */
+    fun sendText(text: String): String {
         require(text.codePointCount(0, text.length) <= MAX_TEXT_CHARS) {
             "El texto supera $MAX_TEXT_CHARS caracteres"
         }
         val id = newId()
-        if (!register(id, awaitingAck = true)) return id
-        detached { if (sendFrame(AppMessage.Text(id, text))) armAckTimer(id) }
+        if (register(id, awaitingAck = true)) launchSend { sendFrame(AppMessage.Text(id, text)) }
         return id
     }
 
     /**
      * Envía una foto (1..[MAX_PHOTO_BYTES] bytes) en trozos de [CHUNK_BYTES]: `PhotoStart`, los
-     * trozos (con `PhotoProgress` tras cada uno) y `PhotoEnd`. El plazo de acuse empieza tras
-     * `PhotoEnd`. No modifique [jpeg] mientras se envía. Devuelve su id.
+     * trozos (con `PhotoProgress` tras cada uno) y `PhotoEnd`. No suspende: devuelve el id
+     * enseguida y el envío sigue en [scope]. El plazo de acuse empieza tras `PhotoEnd`; mientras
+     * tanto protege el vigilante de escritura. No modifique [jpeg] mientras se envía.
+     * @throws IllegalArgumentException si la foto está vacía o es demasiado grande.
      */
-    suspend fun sendPhoto(jpeg: ByteArray): String {
+    fun sendPhoto(jpeg: ByteArray): String {
         require(jpeg.isNotEmpty()) { "La foto está vacía" }
         require(jpeg.size <= MAX_PHOTO_BYTES) { "La foto supera $MAX_PHOTO_BYTES bytes" }
         val id = newId()
-        if (!register(id, awaitingAck = false)) return id
-        detached { sendPhotoFrames(id, jpeg) }
+        if (register(id, awaitingAck = false)) launchSend { sendPhotoFrames(id, jpeg) }
         return id
     }
 
@@ -232,23 +266,30 @@ class PeerSession internal constructor(
     }
 
     /**
-     * Ejecuta un envío ya registrado en [scope] y espera a que termine. Si quien llama se cancela,
-     * la espera se interrumpe pero el envío sigue (no se corta una secuencia de tramas). Si el
-     * envío no termina normalmente (se canceló [scope]), la sesión se cierra y el id pendiente
-     * recibe `Failed(CONNECTION_LOST)`.
+     * Lanza un envío ya registrado en [scope], sin esperarlo. Se arranca SIN despachar: se
+     * ejecuta en el hilo de quien llama hasta su primera suspensión (como mucho, la escritura en
+     * el socket), así toma su turno en los [Mutex] (justos) en el orden de las llamadas y dos
+     * envíos seguidos salen en ese orden. Hasta esa suspensión no emite ningún evento. Si el envío
+     * no termina normalmente (se canceló [scope]), la sesión se cierra y el id pendiente recibe
+     * `Failed(CONNECTION_LOST)`.
      */
-    private suspend fun detached(block: suspend () -> Unit) {
-        val job = scope.launch { block() }
+    private fun launchSend(block: suspend () -> Unit) {
+        val job = scope.launch(start = CoroutineStart.UNDISPATCHED) { block() }
         job.invokeOnCompletion { cause -> if (cause != null) fail(CloseReason.LOCAL) }
-        job.join()
     }
 
-    /** Avisa al contacto de que se deshace el emparejamiento y cierra la sesión (`LOCAL`). */
-    suspend fun sendUnpair() {
-        if (!closeReason.compareAndSet(null, CloseReason.LOCAL)) return
+    /**
+     * Avisa al contacto de que se deshace el emparejamiento y cierra la sesión (`LOCAL`).
+     * Devuelve true solo si la trama `Unpair` se escribió en el flujo; false si la sesión ya se
+     * estaba cerrando o estaba cerrada, o si la escritura falló (en ese caso la app debe
+     * intentarlo en otra conexión, §6.7 bis).
+     */
+    suspend fun sendUnpair(): Boolean {
+        if (!closeReason.compareAndSet(null, CloseReason.LOCAL)) return false
         _isOpen.value = false
-        sayGoodbye(AppMessage.Unpair)
+        val sent = sayGoodbye(AppMessage.Unpair)
         teardown()
+        return sent
     }
 
     /** Cierra la sesión enviando antes `Bye` si se puede. Idempotente. */
@@ -261,21 +302,39 @@ class PeerSession internal constructor(
 
     // --- Envío ---
 
-    /** Registra un envío pendiente; si la sesión no está abierta emite `Failed(NOT_CONNECTED)`. */
-    private fun register(id: String, awaitingAck: Boolean): Boolean = synchronized(lock) {
-        if (closed || closeReason.get() != null) {
-            _events.tryEmit(SessionEvent.Failed(id, FailReason.NOT_CONNECTED))
-            false
-        } else {
-            pending[id] = Pending(awaitingAck)
-            true
+    /**
+     * Registra un envío pendiente (con su plazo de acuse ya en marcha si [awaitingAck]). Si la
+     * sesión no está abierta devuelve false y emite `Failed(NOT_CONNECTED)` de forma asíncrona.
+     */
+    private fun register(id: String, awaitingAck: Boolean): Boolean {
+        if (!scope.isActive) fail(CloseReason.LOCAL)
+        val accepted = synchronized(lock) {
+            if (closed || closeReason.get() != null) {
+                false
+            } else {
+                pending[id] = Pending(awaitingAck)
+                if (awaitingAck) armAckTimer(id)
+                true
+            }
         }
+        if (!accepted) emitNotConnected(id)
+        return accepted
+    }
+
+    /**
+     * Emite `Failed(id, NOT_CONNECTED)` desde [scope], después de que el envío haya devuelto el id.
+     * Si [scope] ya está cancelado (la corrutina no llega a ejecutarse) se emite al instante.
+     */
+    private fun emitNotConnected(id: String) {
+        val event = SessionEvent.Failed(id, FailReason.NOT_CONNECTED)
+        val job = scope.launch { _events.tryEmit(event) }
+        job.invokeOnCompletion { cause -> if (cause != null) _events.tryEmit(event) }
     }
 
     /** Arranca el plazo de acuse, salvo que el acuse ya haya llegado o la sesión se haya cerrado. */
     private fun armAckTimer(id: String) = synchronized(lock) {
         val p = pending[id] ?: return
-        if (closed) return
+        if (closed || p.timer != null) return
         p.timer = scope.launch {
             delay(timings.ackTimeout)
             synchronized(lock) {
@@ -287,13 +346,20 @@ class PeerSession internal constructor(
     /**
      * Cifra y escribe un mensaje de forma atómica. Devuelve false si no se envió (sesión cerrada o
      * cerrándose, salvo [force] para `Bye`/`Unpair`, o fallo de E/S, que cierra la sesión).
+     * Vigilante de escritura: si la escritura tarda más que [SessionTimings.ackTimeout], el otro
+     * lado no lee; se cierra la sesión con `IO` (cerrar el flujo desbloquea la escritura).
      */
     private suspend fun sendFrame(message: AppMessage, force: Boolean = false): Boolean {
         val plaintext = AppCodec.encode(message)
         try {
             sendMutex.withLock {
                 if (closed || (!force && closeReason.get() != null)) return false
-                stream.send(channel.encrypt(plaintext))
+                val frame = channel.encrypt(plaintext)
+                val written = withTimeoutOrNull(timings.ackTimeout) { stream.send(frame) }
+                if (written == null) {
+                    fail(CloseReason.IO)
+                    return false
+                }
             }
             return true
         } catch (e: CancellationException) {
@@ -310,15 +376,21 @@ class PeerSession internal constructor(
         }
     }
 
-    /** Envía `Bye`/`Unpair` y espera (como mucho [SessionTimings.linger]) a que el otro lado cierre. */
-    private suspend fun sayGoodbye(message: AppMessage) {
+    /**
+     * Envía `Bye`/`Unpair` y espera (como mucho [SessionTimings.linger]) a que el otro lado cierre.
+     * Devuelve true si la trama se escribió.
+     */
+    private suspend fun sayGoodbye(message: AppMessage): Boolean {
+        var sent = false
         try {
             withTimeoutOrNull(timings.linger) {
-                if (sendFrame(message, force = true)) {
+                sent = sendFrame(message, force = true)
+                if (sent) {
                     // El lector sigue leyendo (y descartando) hasta el EOF del otro lado
                     synchronized(lock) { readerJob }?.join()
                 }
             }
+            return sent
         } catch (e: CancellationException) {
             teardown()
             throw e
@@ -355,7 +427,7 @@ class PeerSession internal constructor(
         try {
             while (true) {
                 val frame = stream.receive()
-                lastReceived = clock.markNow()
+                lastReceived = TimeSource.Monotonic.markNow()
                 val plaintext = channel.decrypt(frame)
                 val message = try {
                     AppCodec.decode(plaintext)
@@ -394,7 +466,7 @@ class PeerSession internal constructor(
                     if (closed) return false
                     _events.tryEmit(SessionEvent.TextReceived(message.id, message.text))
                 }
-                acks.trySend(message.id)
+                queueAck(message.id)
             }
             is AppMessage.PhotoStart -> onPhotoStart(message)
             is AppMessage.PhotoChunk -> onPhotoChunk(message)
@@ -465,7 +537,16 @@ class PeerSession internal constructor(
             incoming = null
             _events.tryEmit(SessionEvent.PhotoReceived(photo.id, photo.buffer))
         }
-        acks.trySend(m.id)
+        queueAck(m.id)
+    }
+
+    /**
+     * Encola un acuse. Cola llena = el otro lado nos envía mensajes sin leer nuestros acuses:
+     * se trata como violación del protocolo (`SECURITY`). Cola cerrada = la sesión se cierra.
+     */
+    private fun queueAck(id: String) {
+        val result = acks.trySend(id)
+        if (result.isFailure && !result.isClosed) throw ProtocolException("Cola de acuses llena")
     }
 
     // --- Cierre ---
@@ -505,6 +586,9 @@ class PeerSession internal constructor(
         const val MAX_TEXT_CHARS = 8_000
         const val MAX_PHOTO_BYTES = 3_145_728
         const val CHUNK_BYTES = 32_768
+
+        /** Acuses pendientes de escribir como máximo; si se supera, la sesión se cierra (`SECURITY`). */
+        const val ACK_QUEUE_CAPACITY = 256
 
         private const val ID_BYTES = 12
         private val ID_REGEX = Regex("[0-9a-f]{${ID_BYTES * 2}}")

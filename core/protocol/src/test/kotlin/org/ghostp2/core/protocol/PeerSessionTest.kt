@@ -14,6 +14,9 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import org.ghostp2.core.crypto.Primitives
 import org.ghostp2.core.crypto.RatchetChannel
@@ -23,8 +26,10 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertThrows
 import java.io.OutputStream
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.time.Duration
@@ -77,8 +82,8 @@ class PeerSessionTest {
         streamA: FrameStream = transport.a, streamB: FrameStream = transport.b,
     ): Peers {
         val (ca, cb) = pairedChannels(streamA, streamB)
-        val a = PeerSession(streamA, ca, scope, TimeSource.Monotonic, timingsA)
-        val b = PeerSession(streamB, cb, scope, TimeSource.Monotonic, timingsB)
+        val a = PeerSession(streamA, ca, scope, timingsA)
+        val b = PeerSession(streamB, cb, scope, timingsB)
         return Peers(a, b, EventLog(a, scope), EventLog(b, scope))
     }
 
@@ -161,6 +166,139 @@ class PeerSessionTest {
         override fun close() = delegate.close()
     }
 
+    /**
+     * Flujo cuyas escrituras se bloquean según [gate]; cerrarlo abre la puerta (como un socket
+     * real, que al cerrarse desbloquea una escritura en curso) y cierra el socket.
+     */
+    private fun gatedStream(socket: java.net.Socket, gate: GateOutputStream) =
+        FrameStream(socket.getInputStream(), gate) { gate.open(); socket.close() }
+
+    /** Id de mensaje al que se refiere un evento (null si no se refiere a ninguno). */
+    private fun idOf(e: SessionEvent): String? = when (e) {
+        is SessionEvent.TextReceived -> e.id
+        is SessionEvent.PhotoReceived -> e.id
+        is SessionEvent.PhotoProgress -> e.id
+        is SessionEvent.Delivered -> e.id
+        is SessionEvent.Failed -> e.id
+        else -> null
+    }
+
+    /**
+     * Con un recolector confinado en el mismo hilo que quien llama, ningún evento de un envío
+     * puede registrarse antes de que sendText/sendPhoto devuelvan su id (no suspenden).
+     */
+    @Test
+    fun idIsKnownBeforeAnyEventForIt(): Unit = runBlocking {
+        val confined = Executors.newSingleThreadExecutor().asCoroutineDispatcher()
+        try {
+            val confinedScope = CoroutineScope(scope.coroutineContext + confined)
+            val (ca, cb) = pairedChannels(transport.a, transport.b)
+            val a = PeerSession(transport.a, ca, scope, calm)
+            val b = PeerSession(transport.b, cb, scope, calm)
+            val logA = EventLog(a, confinedScope)
+            EventLog(b, scope)
+            a.start(); b.start()
+
+            val jpeg = Primitives.randomBytes(100_000)
+            val (photoId, beforePhoto) = withContext(confined) {
+                val id = a.sendPhoto(jpeg)
+                id to logA.all.filter { idOf(it) == id }
+            }
+            assertEquals(emptyList<SessionEvent>(), beforePhoto)
+            logA.await { it == SessionEvent.Delivered(photoId) }
+            val progress = logA.all.filterIsInstance<SessionEvent.PhotoProgress>()
+            assertEquals(4, progress.size)
+            assertTrue(progress.all { it.id == photoId })
+
+            val (textId, beforeText) = withContext(confined) {
+                val id = a.sendText("hola")
+                id to logA.all.filter { idOf(it) == id }
+            }
+            assertEquals(emptyList<SessionEvent>(), beforeText)
+            logA.await { it == SessionEvent.Delivered(textId) }
+
+            a.close()
+            logA.await { it is SessionEvent.Closed }
+            val (lateId, beforeLate) = withContext(confined) {
+                val id = a.sendText("tarde")
+                id to logA.all.filter { idOf(it) == id }
+            }
+            assertEquals(emptyList<SessionEvent>(), beforeLate)
+            logA.await { it == SessionEvent.Failed(lateId, FailReason.NOT_CONNECTED) }
+        } finally {
+            confined.close()
+        }
+    }
+
+    /** Los textos enviados uno tras otro desde la misma corrutina llegan en ese orden. */
+    @Test
+    fun sequentialTextsArriveInOrder(): Unit = runBlocking {
+        val p = peers()
+        p.a.start(); p.b.start()
+        val texts = (1..40).map { "mensaje $it" }
+        val ids = texts.map { p.a.sendText(it) }
+        p.logB.awaitLog { log -> log.count { it is SessionEvent.TextReceived } == 40 }
+        val received = p.logB.all.filterIsInstance<SessionEvent.TextReceived>()
+        assertEquals(texts, received.map { it.text })
+        assertEquals(ids, received.map { it.id })
+    }
+
+    /**
+     * El otro lado deja de leer: la escritura se queda bloqueada. El plazo de acuse del texto
+     * corre desde que se registra (no desde que termina la escritura) y el vigilante de escritura
+     * cierra la sesión con IO.
+     */
+    @Test
+    fun stalledWriterFailsPendingTextAndClosesIo(): Unit = runBlocking {
+        val gate = GateOutputStream(transport.rawA.getOutputStream())
+        val streamA = gatedStream(transport.rawA, gate)
+        val p = peers(timingsA = calm.copy(ackTimeout = 500.milliseconds), streamA = streamA)
+        gate.allow(0) // ninguna escritura de A llega a salir
+        p.a.start()
+        val t0 = TimeSource.Monotonic.markNow()
+        val id = p.a.sendText("¿me lees?")
+        val failed = p.logA.await(3.seconds) { it is SessionEvent.Failed } as SessionEvent.Failed
+        assertEquals(id, failed.id)
+        assertTrue(failed.reason == FailReason.NO_ACK || failed.reason == FailReason.CONNECTION_LOST, "$failed")
+        assertEquals(SessionEvent.Closed(CloseReason.IO), p.logA.await(3.seconds) { it is SessionEvent.Closed })
+        assertTrue(t0.elapsedNow() < 2.seconds, "tardó ${t0.elapsedNow()}")
+        assertFalse(p.a.isOpen.value)
+    }
+
+    /** Un lado que no lee pero sigue enviando textos no puede hacer crecer sin límite la cola de acuses. */
+    @Test
+    fun ackQueueOverflowClosesWithSecurity(): Unit = runBlocking {
+        TestTransport().use { t ->
+            val gate = GateOutputStream(t.rawA.getOutputStream())
+            val streamA = gatedStream(t.rawA, gate)
+            val (ca, cb) = pairedChannels(streamA, t.b)
+            val a = PeerSession(streamA, ca, scope, calm)
+            val log = EventLog(a, scope)
+            gate.allow(0) // los acuses de A se quedan bloqueados en la escritura
+            a.start()
+            for (i in 1..300) {
+                t.b.send(cb.encrypt(AppCodec.encode(AppMessage.Text("%024x".format(i), "hola $i"))))
+                if (!a.isOpen.value) break
+            }
+            assertEquals(SessionEvent.Closed(CloseReason.SECURITY), log.await { it is SessionEvent.Closed })
+            assertTrue(log.all.count { it is SessionEvent.TextReceived } >= 256)
+        }
+    }
+
+    @Test
+    fun startReturnsWhenClosedBeforeAnySubscription(): Unit = runBlocking {
+        TestTransport().use { t ->
+            val (ca, _) = pairedChannels(t.a, t.b)
+            val a = PeerSession(t.a, ca, scope, calm)
+            val starting = scope.async { a.start() }
+            delay(100)
+            assertFalse(starting.isCompleted) // sin suscriptor y abierta: start() espera
+            a.close()
+            withTimeout(2_000) { starting.await() }
+            assertFalse(a.isOpen.value)
+        }
+    }
+
     @Test
     fun photoInterruptedIsDiscardedOnBothSides(): Unit = runBlocking {
         val gate = GateOutputStream(transport.rawA.getOutputStream())
@@ -168,16 +306,14 @@ class PeerSessionTest {
         val p = peers(streamA = streamA)
         gate.allow(4) // PhotoStart + 3 trozos; el cuarto trozo se queda bloqueado
         p.a.start(); p.b.start()
-        val sending = scope.async { p.a.sendPhoto(Primitives.randomBytes(200_000)) }
+        val id = p.a.sendPhoto(Primitives.randomBytes(200_000)) // vuelve enseguida con el id
         try {
             assertTrue(gate.blocked.await(5, TimeUnit.SECONDS))
             transport.b.close() // se corta el transporte de B a mitad de la foto
             assertEquals(SessionEvent.Closed(CloseReason.IO), p.logB.await { it is SessionEvent.Closed })
             val failed = p.logA.await { it is SessionEvent.Failed } as SessionEvent.Failed
-            assertEquals(FailReason.CONNECTION_LOST, failed.reason)
+            assertEquals(SessionEvent.Failed(id, FailReason.CONNECTION_LOST), failed)
             p.logA.await { it is SessionEvent.Closed }
-            gate.open()
-            assertEquals(failed.id, sending.await())
         } finally {
             gate.open()
         }
@@ -195,7 +331,12 @@ class PeerSessionTest {
         gate.allow(3) // PhotoStart + 2 trozos; el tercero se queda bloqueado
         p.a.start(); p.b.start()
         val jpeg = Primitives.randomBytes(200_000)
-        val caller = scope.launch { p.a.sendPhoto(jpeg) }
+        val idFromCaller = CompletableDeferred<String>()
+        val caller = scope.launch {
+            idFromCaller.complete(p.a.sendPhoto(jpeg))
+            awaitCancellation() // la pantalla sigue abierta hasta que el usuario sale
+        }
+        val id = withTimeout(5_000) { idFromCaller.await() }
         try {
             assertTrue(gate.blocked.await(5, TimeUnit.SECONDS))
             caller.cancel() // p. ej. el usuario sale del chat a mitad de la subida
@@ -203,7 +344,6 @@ class PeerSessionTest {
         } finally {
             gate.open()
         }
-        val id = (p.logA.await { it is SessionEvent.PhotoProgress } as SessionEvent.PhotoProgress).id
         p.logA.await { it == SessionEvent.Delivered(id) }
         val received = p.logB.await { it is SessionEvent.PhotoReceived } as SessionEvent.PhotoReceived
         assertArrayEquals(jpeg, received.jpeg)
@@ -223,8 +363,8 @@ class PeerSessionTest {
     fun startWaitsForSubscriberSoNoEventIsLost(): Unit = runBlocking {
         TestTransport().use { t ->
             val (ca, cb) = pairedChannels(t.a, t.b)
-            val a = PeerSession(t.a, ca, scope, TimeSource.Monotonic, calm)
-            val b = PeerSession(t.b, cb, scope, TimeSource.Monotonic, calm)
+            val a = PeerSession(t.a, ca, scope, calm)
+            val b = PeerSession(t.b, cb, scope, calm)
             EventLog(b, scope)
             b.start()
             val starting = scope.async { a.start() }
@@ -243,7 +383,7 @@ class PeerSessionTest {
     fun unpairReceivedDuringCloseLingerIsReported(): Unit = runBlocking {
         TestTransport().use { t ->
             val (ca, cb) = pairedChannels(t.a, t.b)
-            val b = PeerSession(t.b, cb, scope, TimeSource.Monotonic, calm.copy(linger = 3.seconds))
+            val b = PeerSession(t.b, cb, scope, calm.copy(linger = 3.seconds))
             val log = EventLog(b, scope)
             b.start()
             val closing = scope.launch { b.close() }
@@ -327,11 +467,48 @@ class PeerSessionTest {
     fun unpairIsDelivered(): Unit = runBlocking {
         val p = peers()
         p.a.start(); p.b.start()
-        p.a.sendUnpair()
+        assertTrue(p.a.sendUnpair()) // la trama Unpair se escribió
         p.logB.await { it is SessionEvent.Closed }
         assertEquals(listOf(SessionEvent.PeerUnpaired, SessionEvent.Closed(CloseReason.PEER_UNPAIRED)), p.logB.all)
         assertEquals(listOf<SessionEvent>(SessionEvent.Closed(CloseReason.LOCAL)), listOf(p.logA.await { it is SessionEvent.Closed }))
         assertFalse(p.a.isOpen.value || p.b.isOpen.value)
+    }
+
+    @Test
+    fun unpairOnClosedSessionReturnsFalse(): Unit = runBlocking {
+        val p = peers()
+        p.a.start(); p.b.start()
+        p.a.close()
+        assertFalse(p.a.sendUnpair())
+        p.logB.await { it is SessionEvent.Closed }
+        assertFalse(p.logB.all.contains(SessionEvent.PeerUnpaired))
+    }
+
+    /** Escrituras que fallan con IOException a partir de [broken] (p. ej. conexión rota). */
+    private class BreakableOutputStream(private val delegate: OutputStream) : OutputStream() {
+        @Volatile var broken = false
+
+        override fun write(b: Int) = write(byteArrayOf(b.toByte()), 0, 1)
+
+        override fun write(b: ByteArray, off: Int, len: Int) {
+            if (broken) throw java.io.IOException("Conexión rota")
+            delegate.write(b, off, len)
+        }
+
+        override fun flush() = delegate.flush()
+        override fun close() = delegate.close()
+    }
+
+    @Test
+    fun unpairWriteFailureReturnsFalse(): Unit = runBlocking {
+        val out = BreakableOutputStream(transport.rawA.getOutputStream())
+        val streamA = FrameStream(transport.rawA.getInputStream(), out, transport.rawA)
+        val p = peers(streamA = streamA)
+        p.a.start(); p.b.start()
+        out.broken = true
+        assertFalse(p.a.sendUnpair())
+        assertEquals(SessionEvent.Closed(CloseReason.LOCAL), p.logA.await { it is SessionEvent.Closed })
+        assertFalse(p.logB.all.contains(SessionEvent.PeerUnpaired))
     }
 
     @Test
@@ -394,9 +571,9 @@ class PeerSessionTest {
     fun oversizeInputsRejected(): Unit = runBlocking {
         val p = peers()
         p.a.start(); p.b.start()
-        assertThrowsSuspend<IllegalArgumentException> { p.a.sendText("a".repeat(8_001)) }
-        assertThrowsSuspend<IllegalArgumentException> { p.a.sendPhoto(ByteArray(3_145_729)) }
-        assertThrowsSuspend<IllegalArgumentException> { p.a.sendPhoto(ByteArray(0)) }
+        assertThrows<IllegalArgumentException> { p.a.sendText("a".repeat(8_001)) }
+        assertThrows<IllegalArgumentException> { p.a.sendPhoto(ByteArray(3_145_729)) }
+        assertThrows<IllegalArgumentException> { p.a.sendPhoto(ByteArray(0)) }
         // Los límites exactos sí se aceptan (8 000 caracteres, también fuera del BMP)
         val max = p.a.sendText("😀".repeat(8_000))
         p.logA.await { it == SessionEvent.Delivered(max) }
@@ -428,7 +605,7 @@ class PeerSessionTest {
     private fun assertSecurityClose(build: (RatchetChannel) -> List<ByteArray>): Unit = runBlocking {
         TestTransport().use { t ->
             val (ca, cb) = pairedChannels(t.a, t.b)
-            val b = PeerSession(t.b, cb, scope, TimeSource.Monotonic, calm)
+            val b = PeerSession(t.b, cb, scope, calm)
             val log = EventLog(b, scope)
             b.start()
             for (frame in build(ca)) t.a.send(frame)
@@ -505,7 +682,7 @@ class PeerSessionTest {
         // Control positivo del arnés anterior: la misma secuencia bien formada sí produce PhotoReceived
         TestTransport().use { t ->
             val (ca, cb) = pairedChannels(t.a, t.b)
-            val b = PeerSession(t.b, cb, scope, TimeSource.Monotonic, calm)
+            val b = PeerSession(t.b, cb, scope, calm)
             val log = EventLog(b, scope)
             b.start()
             for (m in listOf(AppMessage.PhotoStart(pid, 70_000, 3), chunk(0), chunk(1), chunk(2, 70_000 - 65_536), AppMessage.PhotoEnd(pid))) {

@@ -8,7 +8,7 @@ kotlin {
 }
 
 dependencies {
-    implementation(project(":core:crypto"))
+    api(project(":core:crypto"))
     implementation(libs.coroutines.core)
     implementation(libs.serialization.cbor)
     testImplementation(platform(libs.junit.bom))
