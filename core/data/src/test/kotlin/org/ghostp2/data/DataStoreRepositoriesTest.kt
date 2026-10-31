@@ -227,6 +227,70 @@ class DataStoreRepositoriesTest {
     }
 
     @Test
+    fun forceResetDeletesEverythingWhateverTheState() = runBlocking {
+        val context: Context = RuntimeEnvironment.getApplication()
+        val target = File(context.noBackupFilesDir, STORE_FILE_NAME)
+        val backend = FakeKeyBackend(stored = true, confirmed = true, key = aead)
+        val repos = createRepositories(context, RecoverableAead({ target.exists() }, backend, recheckWait = {}))
+        val (ids, contacts) = repos
+        ids.save(identity())
+        contacts.upsert(contact(1))
+        File(context.noBackupFilesDir, "$STORE_FILE_NAME.tmp").writeBytes(byteArrayOf(1))
+        val seen = CopyOnWriteArrayList<Int>()
+        val job = launch(Dispatchers.Default) { contacts.contacts.collect { seen += it.size } }
+        waitUntil { seen.lastOrNull() == 1 }
+
+        repos.forceReset()
+        assertFalse(target.exists())
+        assertFalse(File(context.noBackupFilesDir, "$STORE_FILE_NAME.tmp").exists())
+        assertEquals(1, backend.resets)
+        waitUntil { seen.last() == 0 }
+        job.cancel()
+        assertNull(ids.load())
+        ids.save(identity())
+        assertEquals("la próxima escritura genera una clave nueva", 1, backend.generates)
+        assertEquals(identity(), ids.load())
+    }
+
+    @Test
+    fun forceResetWorksWhileStoreIsUnavailable() = runBlocking {
+        val context: Context = RuntimeEnvironment.getApplication()
+        val target = File(context.noBackupFilesDir, STORE_FILE_NAME)
+        createRepositories(context, aead).identities.save(identity())
+        val backend = FakeKeyBackend(stored = true, confirmed = true, key = aead)
+        backend.openFailure = java.security.KeyStoreException("Keystore ocupado")
+        val repos = createRepositories(context, RecoverableAead({ target.exists() }, backend, recheckWait = {}))
+        assertUnavailable { repos.identities.load() }
+        assertUnavailable { repos.contacts.wipe() }
+        repos.forceReset()
+        assertFalse(target.exists())
+        assertEquals(1, backend.resets)
+        backend.openFailure = null
+        assertNull(repos.identities.load())
+    }
+
+    @Test
+    fun keystoreBackendResetDeletesKeysetAndMarkerPrefs() {
+        val context: Context = RuntimeEnvironment.getApplication()
+        val prefs = context.getSharedPreferences(KeystoreKeyBackend.PREF_FILE, Context.MODE_PRIVATE)
+        assertTrue(
+            prefs.edit()
+                .putString(KeystoreKeyBackend.KEYSET_NAME, "0a0b")
+                .putBoolean(KeystoreKeyBackend.CONFIRMED, true)
+                .commit(),
+        )
+        val backend = KeystoreKeyBackend(context)
+        assertTrue(backend.keysetStored())
+        assertTrue(backend.keysetConfirmed())
+        backend.reset() // Sin Android Keystore en Robolectric: el borrado de la clave maestra se ignora.
+        assertFalse(backend.keysetStored())
+        assertFalse(backend.keysetConfirmed())
+        assertFalse(
+            context.getSharedPreferences(KeystoreKeyBackend.PREF_FILE, Context.MODE_PRIVATE).contains(KeystoreKeyBackend.KEYSET_NAME),
+        )
+    }
+
+    @Test
     fun wipeSemanticsInSharedFile() = runBlocking {
         val (ids, contacts) = repos()
         ids.save(identity())
@@ -345,7 +409,7 @@ class DataStoreRepositoriesTest {
         contacts.upsert(contact(1))
         val target = File(context.noBackupFilesDir, "ghostp2.bin")
         assertTrue(target.exists())
-        assertEquals(identity(), createRepositories(context, aead).first.load())
+        assertEquals(identity(), createRepositories(context, aead).identities.load())
     }
 
     private suspend fun waitUntil(condition: () -> Boolean) {

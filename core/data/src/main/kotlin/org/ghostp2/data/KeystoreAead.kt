@@ -30,6 +30,7 @@ import javax.crypto.AEADBadTagException
  * genera un keyset nuevo; el fallo se informa como [StoreCorruptedException].
  */
 object KeystoreAead {
+    /** Devuelve un [RecoverableAead]; su `forceReset()` borra keyset, marca y clave maestra. */
     fun create(context: Context, dataExists: () -> Boolean): Aead =
         RecoverableAead(dataExists, KeystoreKeyBackend(context.applicationContext))
 }
@@ -42,10 +43,13 @@ internal interface KeyBackend {
     /** El keyset guardado se confirmó envuelto por Keystore al crearlo (marca escrita tras comprobarlo). */
     fun keysetConfirmed(): Boolean
 
-    /** La clave maestra existe en Keystore; `null` si no se puede saber. */
+    /**
+     * La clave maestra existe en Keystore; `null` si no se puede saber. Un `false` puede ser falso: ver
+     * [confirmedMasterKeyPresence].
+     */
     fun masterKeyPresent(): Boolean?
 
-    /** Abre el keyset guardado. */
+    /** Abre el keyset guardado; nunca borra ni genera nada. */
     fun open(): Aead
 
     /** Borra keyset, marca y clave maestra y crea otros; solo cuando no hay datos que dependan de ellos. */
@@ -60,7 +64,9 @@ internal enum class KeyPlan { OPEN, GENERATE, DATA_WITHOUT_KEY }
 /**
  * Qué hacer con la clave. Un keyset sin marca de confirmación (p. ej. el keyset en claro que Tink escribe
  * si Keystore falla, o uno a medio crear) no es de fiar: nunca se usa. Sin keyset de fiar y con datos,
- * los datos son irrecuperables: no se genera una clave nueva encima.
+ * los datos son irrecuperables: no se genera una clave nueva encima. Un keyset en claro *con* marca solo
+ * se rechaza si además falla `getAead` de la clave maestra (Tink lo lee entonces sin Keystore); fabricarlo
+ * exige privilegios de la propia app y queda fuera del modelo de amenazas.
  */
 internal fun planKeyOpen(keysetStored: Boolean, keysetConfirmed: Boolean, dataExists: Boolean): KeyPlan = when {
     keysetStored && keysetConfirmed -> KeyPlan.OPEN
@@ -71,19 +77,40 @@ internal fun planKeyOpen(keysetStored: Boolean, keysetConfirmed: Boolean, dataEx
 internal enum class OpenFailure { KEY_LOST, TRANSIENT }
 
 /**
- * Un keyset confirmado no se pudo abrir. Pérdida definitiva: etiqueta AEAD incorrecta (clave maestra
- * distinta), clave maestra ausente o keyset ilegible (IOException de Tink). Cualquier otro error de
- * Keystore se considera pasajero y se puede reintentar.
+ * Un keyset confirmado no se pudo abrir. Pérdida definitiva: Tink lo leyó sin Keystore
+ * ([KeystoreNotUsedException]), etiqueta AEAD incorrecta (clave maestra distinta), clave maestra ausente
+ * tras volver a comprobarlo ([confirmedMasterKeyPresence]) o keyset ilegible (IOException de Tink).
+ * Cualquier otro error de Keystore se considera pasajero y se puede reintentar.
  */
 internal fun classifyOpenFailure(error: Throwable, masterKeyPresent: Boolean?): OpenFailure = when {
+    error is KeystoreNotUsedException -> OpenFailure.KEY_LOST
     generateSequence(error) { it.cause }.any { it is AEADBadTagException } -> OpenFailure.KEY_LOST
     masterKeyPresent == false -> OpenFailure.KEY_LOST
     error is IOException -> OpenFailure.KEY_LOST
     else -> OpenFailure.TRANSIENT
 }
 
+/**
+ * Presencia de la clave maestra, con una segunda comprobación tras `wait` si la primera dice que falta.
+ * En Keystore2 (AOSP `AndroidKeyStoreSpi.getKeyMetadata`), `containsAlias` devuelve `false` ante
+ * *cualquier* `KeyStoreException` (la registra y devuelve null), no solo ante KEY_NOT_FOUND: un fallo
+ * pasajero parece una clave borrada. Solo dos "falta" seguidos cuentan como clave perdida.
+ */
+internal fun confirmedMasterKeyPresence(check: () -> Boolean?, wait: () -> Unit): Boolean? {
+    val first = check()
+    if (first != false) return first
+    wait()
+    return check()
+}
+
+/** Pausa antes de volver a comprobar la clave maestra. */
+internal const val MASTER_KEY_RECHECK_MILLIS = 300L
+
 /** Causa de un almacenamiento cuya clave ya no existe o no es de fiar. */
 internal class KeyLostException : Exception("Clave del almacenamiento perdida")
+
+/** Tink abrió el keyset sin Android Keystore (lo leyó en claro): no se usa. */
+internal class KeystoreNotUsedException : GeneralSecurityException("Keyset no envuelto por Android Keystore")
 
 /**
  * [Aead] que abre su clave en el primer uso (no al arrancar la app) y no la guarda si falla, así que un
@@ -94,6 +121,7 @@ internal class KeyLostException : Exception("Clave del almacenamiento perdida")
 internal class RecoverableAead(
     private val dataExists: () -> Boolean,
     private val backend: KeyBackend,
+    private val recheckWait: () -> Unit = { Thread.sleep(MASTER_KEY_RECHECK_MILLIS) },
 ) : Aead {
     private var delegate: Aead? = null
 
@@ -106,7 +134,11 @@ internal class RecoverableAead(
             KeyPlan.OPEN -> try {
                 backend.open()
             } catch (e: Exception) {
-                when (classifyOpenFailure(e, runCatching { backend.masterKeyPresent() }.getOrNull())) {
+                val present = confirmedMasterKeyPresence(
+                    check = { runCatching { backend.masterKeyPresent() }.getOrNull() },
+                    wait = recheckWait,
+                )
+                when (classifyOpenFailure(e, present)) {
                     OpenFailure.TRANSIENT -> throw StoreUnavailableException(e)
                     OpenFailure.KEY_LOST ->
                         if (dataExists()) throw StoreCorruptedException(KeyLostException()) else generate()
@@ -115,6 +147,16 @@ internal class RecoverableAead(
         }
         delegate = opened
         return opened
+    }
+
+    /**
+     * Borrado forzado de la clave (keyset, marca y clave maestra), sea cual sea su estado, y olvido de la
+     * clave abierta: la próxima operación genera otra. Solo junto con el borrado de los datos.
+     */
+    @Synchronized
+    fun forceReset() {
+        delegate = null
+        backend.reset()
     }
 
     private fun generate(): Aead = try {
@@ -140,13 +182,25 @@ internal class KeystoreKeyBackend(private val context: Context) : KeyBackend {
 
     override fun masterKeyPresent(): Boolean = AndroidKeystore.hasKey(MASTER_ALIAS)
 
-    override fun open(): Aead = build().also { requireKeystore(it) }.primitive()
+    /**
+     * Sin plantilla, para que Tink nunca genere un keyset aquí. Si Tink lo abrió sin Keystore (solo pasa
+     * si `getAead` de la clave maestra falló y el keyset estaba en claro) se rechaza sin borrar nada.
+     */
+    override fun open(): Aead {
+        val manager = build(withTemplate = false)
+        if (!manager.isUsingKeystore) throw KeystoreNotUsedException()
+        return manager.primitive()
+    }
 
     override fun generate(): Aead {
         reset()
         generateStrongBoxMasterKeyIfPossible()
-        val manager = build()
-        requireKeystore(manager)
+        val manager = build(withTemplate = true)
+        if (!manager.isUsingKeystore) {
+            // Tink cae a un keyset en claro si Keystore falla; no se admite (restricción global).
+            reset()
+            throw GeneralSecurityException("Android Keystore no disponible")
+        }
         // La marca solo se escribe tras comprobar que el keyset está envuelto por Keystore.
         if (!prefs.edit().putBoolean(CONFIRMED, true).commit()) throw IOException("No se pudo confirmar la clave")
         return manager.primitive()
@@ -158,24 +212,17 @@ internal class KeystoreKeyBackend(private val context: Context) : KeyBackend {
             AndroidKeystore.deleteKey(MASTER_ALIAS)
         } catch (_: GeneralSecurityException) {
             // Sin Keystore no hay clave que borrar.
+        } catch (_: ProviderException) {
         }
     }
 
-    private fun build(): AndroidKeysetManager {
+    private fun build(withTemplate: Boolean): AndroidKeysetManager {
         registered
-        return AndroidKeysetManager.Builder()
+        val builder = AndroidKeysetManager.Builder()
             .withSharedPref(context, KEYSET_NAME, PREF_FILE)
-            .withKeyTemplate(KeyTemplate.createFrom(PredefinedAeadParameters.AES256_GCM))
             .withMasterKeyUri(MASTER_KEY_URI)
-            .build()
-    }
-
-    /** Tink cae a un keyset en claro si Keystore falla; no se admite (restricción global). */
-    private fun requireKeystore(manager: AndroidKeysetManager) {
-        if (!manager.isUsingKeystore) {
-            reset()
-            throw GeneralSecurityException("Android Keystore no disponible")
-        }
+        if (withTemplate) builder.withKeyTemplate(KeyTemplate.createFrom(PredefinedAeadParameters.AES256_GCM))
+        return builder.build()
     }
 
     private fun AndroidKeysetManager.primitive(): Aead =
@@ -212,13 +259,13 @@ internal class KeystoreKeyBackend(private val context: Context) : KeyBackend {
         }
     }
 
-    private companion object {
+    internal companion object {
         const val KEYSET_NAME = "ghostp2_keyset"
         const val PREF_FILE = "ghostp2_keyset_prefs"
         const val CONFIRMED = "ghostp2_keyset_keystore_confirmed"
         const val MASTER_ALIAS = "ghostp2_master"
         const val MASTER_KEY_URI = "android-keystore://$MASTER_ALIAS"
 
-        val registered by lazy { AeadConfig.register() }
+        private val registered by lazy { AeadConfig.register() }
     }
 }

@@ -39,17 +39,42 @@ fun ghostStore(file: File, aead: Aead): EncryptedStore<StoredData> =
  * Repositorios listos para producción: `noBackupFilesDir/ghostp2.bin` cifrado con [KeystoreAead]. La clave
  * se abre en el primer acceso (no en esta llamada); sus fallos llegan como [StoreCorruptedException]
  * (clave perdida con datos: "Empezar de cero") o [StoreUnavailableException] ("Reintentar").
- * Llamar una sola vez por proceso y compartir el resultado.
+ * Llamar una sola vez por proceso y compartir el resultado; admite `val (ids, contacts) = ...`.
  */
-fun createRepositories(context: Context): Pair<IdentityRepository, ContactRepository> {
+fun createRepositories(context: Context): StoredRepositories {
     val app = context.applicationContext
     val file = File(app.noBackupFilesDir, STORE_FILE_NAME)
     return createRepositories(app, KeystoreAead.create(app, dataExists = { file.exists() }))
 }
 
-internal fun createRepositories(context: Context, aead: Aead): Pair<IdentityRepository, ContactRepository> {
+internal fun createRepositories(context: Context, aead: Aead): StoredRepositories {
     val store = ghostStore(File(context.noBackupFilesDir, STORE_FILE_NAME), aead)
-    return StoredIdentityRepository(store) to StoredContactRepository(store)
+    val keyReset: () -> Unit = (aead as? RecoverableAead)?.let { it::forceReset } ?: {}
+    return StoredRepositories(StoredIdentityRepository(store), StoredContactRepository(store), store, keyReset)
+}
+
+/** Los dos repositorios sobre el mismo almacén, más el borrado forzado. */
+class StoredRepositories internal constructor(
+    val identities: IdentityRepository,
+    val contacts: ContactRepository,
+    private val store: EncryptedStore<StoredData>,
+    private val keyReset: () -> Unit,
+) {
+    operator fun component1(): IdentityRepository = identities
+
+    operator fun component2(): ContactRepository = contacts
+
+    /**
+     * "Borrar todo" sin condiciones, para cuando "Reintentar" ya no sirve (p. ej. StoreUnavailableException
+     * repetida): borra `ghostp2.bin` (y su `.tmp`), el keyset de las preferencias, su marca de
+     * confirmación y la clave maestra de Keystore, sea cual sea su estado; el flujo de contactos emite la
+     * lista vacía y la próxima escritura genera una clave nueva. Irreversible: la interfaz debe pedir una
+     * doble confirmación. Primero el archivo y después la clave: si el borrado del archivo falla
+     * ([StoreUnavailableException]) la clave no se toca.
+     */
+    suspend fun forceReset() {
+        store.reset(alsoUnderLock = keyReset)
+    }
 }
 
 /** Sobre un almacén dañado, un borrado deja el almacén vacío y utilizable. */

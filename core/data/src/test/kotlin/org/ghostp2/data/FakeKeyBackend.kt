@@ -13,6 +13,7 @@ internal class FakeKeyBackend(
     var generateFailure: Exception? = null
     var opens = 0
     var generates = 0
+    var resets = 0
 
     override fun keysetStored() = stored
 
@@ -37,6 +38,7 @@ internal class FakeKeyBackend(
     }
 
     override fun reset() {
+        resets++
         stored = false
         confirmed = false
     }

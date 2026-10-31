@@ -108,12 +108,64 @@ class RecoverableAeadTest {
     }
 
     @Test
+    fun confirmedMasterKeyPresenceRechecksOnlyWhenMissing() {
+        var waits = 0
+        val wait = { waits++; Unit }
+        assertEquals(true, confirmedMasterKeyPresence({ true }, wait))
+        assertEquals(null, confirmedMasterKeyPresence({ null }, wait))
+        assertEquals(0, waits)
+        val answers = ArrayDeque(listOf(false, true))
+        assertEquals(true, confirmedMasterKeyPresence({ answers.removeFirst() }, wait))
+        assertEquals(1, waits)
+        assertEquals(false, confirmedMasterKeyPresence({ false }, wait))
+        assertEquals(2, waits)
+    }
+
+    @Test
+    fun transientlyMissingMasterKeyIsUnavailableNotCorrupted() {
+        // Keystore2 devuelve "no existe" ante cualquier KeyStoreException: la segunda comprobación la ve.
+        val b = FakeKeyBackend(stored = true, confirmed = true, masterPresent = false)
+        b.openFailure = KeyStoreException("Keystore ocupado")
+        var waits = 0
+        val a = RecoverableAead({ true }, b, recheckWait = { waits++; b.masterPresent = true })
+        assertThrows<StoreUnavailableException> { a.decrypt(byteArrayOf(1), ad) }
+        assertEquals(1, waits)
+        assertEquals(0, b.generates)
+        assertEquals(0, b.resets)
+    }
+
+    @Test
+    fun openWithoutKeystoreIsKeyLostAndDestroysNothing() {
+        assertEquals(OpenFailure.KEY_LOST, classifyOpenFailure(KeystoreNotUsedException(), masterKeyPresent = true))
+        val b = FakeKeyBackend(stored = true, confirmed = true)
+        b.openFailure = KeystoreNotUsedException()
+        assertThrows<StoreCorruptedException> { RecoverableAead({ true }, b, recheckWait = {}).decrypt(byteArrayOf(1), ad) }
+        assertEquals(0, b.resets)
+        assertEquals(0, b.generates)
+        assertTrue(b.stored && b.confirmed)
+    }
+
+    @Test
+    fun forceResetForgetsOpenKeyAndResetsBackend() {
+        val b = FakeKeyBackend(stored = true, confirmed = true)
+        val a = RecoverableAead({ false }, b, recheckWait = {})
+        a.encrypt(byteArrayOf(1), ad)
+        assertEquals(1, b.opens)
+        a.forceReset()
+        assertEquals(1, b.resets)
+        a.encrypt(byteArrayOf(1), ad)
+        assertEquals("tras el borrado forzado se genera otra clave", 1, b.generates)
+    }
+
+    @Test
     fun lostMasterKeyWithDataIsCorruptedWithoutDataIsRegenerated() {
         val b = FakeKeyBackend(stored = true, confirmed = true, masterPresent = false)
         b.openFailure = KeyStoreException("the master key exists but is unusable")
         var data = true
-        val a = RecoverableAead({ data }, b)
+        var waits = 0
+        val a = RecoverableAead({ data }, b, recheckWait = { waits++ })
         assertThrows<StoreCorruptedException> { a.decrypt(byteArrayOf(1), ad) }
+        assertEquals("falta en las dos comprobaciones", 1, waits)
         assertEquals(0, b.generates)
         data = false
         val ct = a.encrypt(byteArrayOf(5), ad)

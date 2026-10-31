@@ -109,13 +109,17 @@ class EncryptedStore<T>(
         next
     }
 
-    /** Borra el archivo (aunque esté dañado) y deja el almacén en `default`, de nuevo utilizable. */
-    suspend fun reset() {
+    /**
+     * Borra el archivo (aunque esté dañado) y deja el almacén en `default`, de nuevo utilizable.
+     * `alsoUnderLock` se ejecuta después, con el cerrojo tomado (p. ej. borrar la clave).
+     */
+    suspend fun reset(alsoUnderLock: () -> Unit = {}) {
         mutex.withLock {
             withContext(Dispatchers.IO) {
                 deleteFiles()
                 orphanChecked = true
                 latest.value = Loaded(default)
+                alsoUnderLock()
             }
         }
     }
