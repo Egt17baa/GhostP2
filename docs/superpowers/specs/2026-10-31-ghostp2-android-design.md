@@ -1,6 +1,6 @@
 # GhostP2 para Android — Diseño
 
-Fecha: 2026-10-31 · Estado: borrador para aprobación
+Fecha: 2026-10-31 · Estado: pendiente de aprobación final del usuario
 
 ## 1. Intención
 
@@ -168,9 +168,25 @@ Generadas en el primer arranque, nunca salen del móvil:
   contacto no está conectado. Descartado". No se reintenta jamás.
 - Si hay sesión: se envía y queda "enviando…" hasta el acuse cifrado ⇒ "✓ entregado".
 - Si la sesión cae antes del acuse, o no llega en 30 s ⇒ "No entregado. Descartado".
-- Los mensajes de una conversación viven en memoria dentro del servicio mientras la sesión
-  con ese contacto está abierta; al cerrarse la sesión, al pulsar "Borrar" o al detener
-  GhostP2 se eliminan.
+- **Historial en memoria (decisión del usuario):** los mensajes y fotos ya enviados o
+  recibidos viven en memoria dentro del servicio (no ligados a la sesión) y **sobreviven a
+  los cortes breves de conexión**. Solo se eliminan al pulsar "Borrar" en la conversación,
+  al borrar el contacto, o al detener GhostP2. Nunca se escriben en disco.
+- Lo que se intente enviar mientras no hay sesión se sigue descartando (no hay cola).
+
+### 6.7 bis Borrar un contacto (decisión del usuario: avisarle)
+
+- Al borrar un contacto, si hay sesión abierta se le envía un mensaje cifrado `unpair`; si
+  no la hay, la app intenta conectar durante un breve plazo (p. ej. 2 min mientras GhostP2
+  esté activo) solo para entregarlo, y si no lo logra lo borra igualmente.
+- Al recibir `unpair` (autenticado por la sesión), la app del contacto muestra "<nombre> te
+  ha eliminado de sus contactos" y lo borra también (claves, .onion, autorización).
+- En ambos lados se revoca la autorización de cliente del servicio oculto permanente
+  (requiere volver a publicarlo con `DEL_ONION`/`ADD_ONION`; corte de unos segundos para el
+  resto de contactos, aceptable).
+- Se puede volver a emparejar con una invitación nueva.
+- "Borrar todo" envía `unpair` a todos los contactos con sesión abierta (mejor esfuerzo, sin
+  esperas largas) antes de borrar.
 
 ### 6.8 Fotos
 
@@ -198,8 +214,8 @@ Generadas en el primer arranque, nunca salen del móvil:
 
 Pantallas: Bienvenida/activación · Lista de contactos (en línea / desconectado / verificado)
 · Chat · Añadir contacto (mostrar QR / escanear / pegar) · Detalle de contacto (número de
-seguridad, verificar, renombrar, borrar) · Ajustes (bloqueo, notificaciones, relés no aplica,
-tamaño de foto, borrar todo) · Bloqueo.
+seguridad, verificar, renombrar, borrar) · Ajustes (bloqueo, notificaciones, tamaño de foto,
+borrar todo) · Bloqueo.
 
 - `FLAG_SECURE` en toda la app (sin capturas ni vista previa en recientes).
 - Bloqueo opcional con huella/PIN del sistema (`BiometricPrompt` con credencial del
