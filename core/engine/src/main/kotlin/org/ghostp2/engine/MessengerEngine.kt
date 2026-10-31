@@ -11,7 +11,10 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
@@ -30,6 +33,8 @@ import org.ghostp2.core.protocol.HandshakeFailedException
 import org.ghostp2.core.protocol.Pairing
 import org.ghostp2.core.protocol.PairingOffer
 import org.ghostp2.core.protocol.PairingResult
+import org.ghostp2.core.protocol.PeerSession
+import org.ghostp2.core.protocol.SessionEvent
 import java.io.IOException
 import java.net.InetAddress
 import java.net.ServerSocket
@@ -48,8 +53,9 @@ sealed interface EngineStatus {
 
 /**
  * Motor de mensajería P2P sobre Tor. En esta fase: arranque/parada, identidad local, escucha local,
- * publicación de la .onion permanente (ver [OnionPublisher]) e invitaciones/emparejamiento
- * ([createInvitation], [acceptInvitation]).
+ * publicación de la .onion permanente (ver [OnionPublisher]), invitaciones/emparejamiento
+ * ([createInvitation], [acceptInvitation]) y presencia con conexión automática a los contactos
+ * ([presence], [onNetworkChanged], [notices]; ver [Connections]).
  *
  * Todas las corrutinas del motor cuelgan de un `SupervisorJob` hijo de `scope` (regla R7: el scope
  * inyectado debe ser `SupervisorJob() + Dispatchers.Default`); [stop] las cancela y espera, de modo que
@@ -67,7 +73,7 @@ class MessengerEngine(
     private val contacts: ContactRepository,
     private val scope: CoroutineScope,
     private val config: EngineConfig = EngineConfig(),
-    @Suppress("unused") private val random: java.util.Random = java.security.SecureRandom(),
+    private val random: java.util.Random = java.security.SecureRandom(),
 ) {
     private val mutableStatus = MutableStateFlow<EngineStatus>(EngineStatus.Stopped)
     val status: StateFlow<EngineStatus> = mutableStatus.asStateFlow()
@@ -76,6 +82,30 @@ class MessengerEngine(
 
     /** .onion permanente publicada ahora mismo (sin ".onion"); `null` si no hay contactos o el motor está parado. */
     val myOnion: StateFlow<String?> = mutableMyOnion.asStateFlow()
+
+    private val mutablePresence = MutableStateFlow<Map<String, Presence>>(emptyMap())
+
+    /**
+     * Presencia por id de contacto mientras el motor está en marcha (ver [Connections]). Con el motor
+     * parado el mapa está **vacío** (no se conserva un `OFFLINE` por contacto).
+     */
+    val presence: StateFlow<Map<String, Presence>> = mutablePresence.asStateFlow()
+
+    private val mutableNotices = MutableSharedFlow<Notice>(extraBufferCapacity = NOTICE_BUFFER)
+
+    /**
+     * Avisos para la app (sin reproducción). Búfer de [NOTICE_BUFFER] avisos por suscriptor; si un
+     * suscriptor se atasca y lo llena, quien emite **espera** (no se descarta ninguno). Sin suscriptores
+     * los avisos se pierden: la app debe recolectar desde que arranca el motor.
+     */
+    val notices: SharedFlow<Notice> = mutableNotices.asSharedFlow()
+
+    /** Todos los eventos de todas las sesiones, con el id del contacto (para pruebas y Tasks 6–7). */
+    private val mutableSessionEvents =
+        MutableSharedFlow<Pair<String, SessionEvent>>(extraBufferCapacity = SESSION_EVENT_BUFFER)
+    internal val sessionEvents: SharedFlow<Pair<String, SessionEvent>> = mutableSessionEvents.asSharedFlow()
+
+    @Volatile private var connections: Connections? = null
 
     private val lifecycle = Mutex()
 
@@ -161,13 +191,30 @@ class MessengerEngine(
         val id = identities.load() ?: createIdentity()
         identity = id
         startTor(engineScope)
+        val c = Connections(
+            tor, contacts, config, random, engineScope, KeyPair25519(id.identityPrivate, id.identityPublic),
+            mutablePresence, mutableNotices, mutableSessionEvents,
+        )
+        connections = c
         val l = Listener(engineScope, ::onIncoming)
         listener = l
         val p = OnionPublisher(tor, identities, config.virtualPort, l.port)
         publisher = p
         identity = p.sync(id, contacts.all())
         mutableMyOnion.value = p.publishedOnion
+        c.start()
     }
+
+    /** Corta las esperas de reintento de todos los contactos, vuelve a la espera mínima y reintenta ya. */
+    fun onNetworkChanged() {
+        connections?.onNetworkChanged()
+    }
+
+    /** Sesión abierta con el contacto, si la hay (para las tareas 6–7). */
+    internal fun sessionFor(contactId: String): PeerSession? = connections?.sessionFor(contactId)
+
+    /** Si la sesión actual con el contacto la inicié yo (`null` sin sesión); para pruebas del desempate. */
+    internal fun sessionInitiatedByMe(contactId: String): Boolean? = connections?.sessionInitiatedByMe(contactId)
 
     /** Crea la identidad local (par X25519 nuevo, todavía sin .onion) y la guarda. */
     private suspend fun createIdentity(): Identity {
@@ -481,12 +528,10 @@ class MessengerEngine(
         }
     }
 
-    /**
-     * Conexión entrante en el listener. En esta fase todavía no hay protocolo de sesión: se cierra.
-     * Tareas posteriores harán aquí el handshake de invitación/contacto.
-     */
+    /** Conexión entrante en el listener: handshake de sesión en otra corrutina ([Connections.accept]). */
     private fun onIncoming(socket: Socket) {
-        runCatching { socket.close() }
+        val c = connections
+        if (c == null) runCatching { socket.close() } else c.accept(socket)
     }
 
     /** Cierra sesiones, invitaciones y listener, retira servicios, para Tor y borra el estado en memoria. */
@@ -497,6 +542,9 @@ class MessengerEngine(
         bootJob = null
         listener?.closeAndJoin()
         listener = null
+        // Bucles y handshakes parados; sesiones cerradas con Bye; presencia vacía.
+        connections?.let { c -> runCatching { c.shutdown() } }
+        connections = null
         // Antes de retirar la .onion: las invitaciones y emparejamientos en curso pueden re-sincronizarla.
         engineJob?.cancelAndJoin()
         engineJob = null
@@ -513,6 +561,12 @@ class MessengerEngine(
 }
 
 private const val BACKLOG = 50
+
+/** Avisos en búfer por suscriptor de [MessengerEngine.notices]. */
+private const val NOTICE_BUFFER = 256
+
+/** Eventos de sesión en búfer por suscriptor de `sessionEvents`. */
+private const val SESSION_EVENT_BUFFER = 1_024
 
 /** Máximo de intentos de emparejamiento simultáneos por invitación (los demás se cierran al aceptarlos). */
 private const val MAX_CONCURRENT_ATTEMPTS = 32

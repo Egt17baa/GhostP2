@@ -121,6 +121,9 @@ class FakeTor(private val network: FakeTorNetwork) : TorTransport {
 
     private val clientAuth = ConcurrentHashMap<String, ByteArray>()
 
+    /** Llamadas a [connect] hechas con esta instancia (con éxito o no), para pruebas de reintentos. */
+    val connectAttempts = AtomicInteger(0)
+
     override suspend fun start() {
         mutableState.value = TorState.Starting(0)
         mutableState.value = TorState.Ready
@@ -165,6 +168,7 @@ class FakeTor(private val network: FakeTorNetwork) : TorTransport {
     }
 
     override suspend fun connect(onion: String, port: Int, timeoutMillis: Long): Socket {
+        connectAttempts.incrementAndGet()
         val target = OnionAddress.normalize(onion)
         if (mutableState.value != TorState.Ready) throw IOException("Tor no está listo")
         if (!network.online) throw IOException("Red sin conexión")
