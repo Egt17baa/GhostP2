@@ -44,6 +44,8 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         refreshBattery()
+        // Al abrir la app (o volver a ella) se reintenta ya con los contactos desconectados.
+        container.onAppOpened()
     }
 
     private fun refreshBattery() {

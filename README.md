@@ -21,9 +21,9 @@ está conectado, el mensaje no se guarda ni se reenvía: se descarta y lo ves co
 
 La app actual muestra una **pantalla de diagnóstico temporal** ("GhostP2 · diagnóstico"):
 activar y desconectar, estado de Tor, crear y aceptar invitaciones (texto), lista de contactos con
-su presencia y un chat mínimo de texto. Sirve para la [prueba manual](docs/PRUEBA-MANUAL.md); no
-permite todavía borrar ni renombrar contactos, borrar conversaciones ni enviar fotos (el motor ya
-lo hace; falta la interfaz).
+su presencia, un chat mínimo de texto, "Borrar chat" y "Borrar" contacto (con aviso al otro lado).
+Sirve para la [prueba manual](docs/PRUEBA-MANUAL.md); no permite todavía renombrar contactos,
+"Borrar todo" ni enviar fotos (el motor ya lo hace; falta la interfaz).
 
 ## Compilar y probar
 

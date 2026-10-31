@@ -93,6 +93,7 @@ la ejecución en segundo plano en los ajustes del fabricante.
 | 23 | Si en el paso 21 enviaste algo **antes** de que A viera "desconectado": | Ese texto termina como `(no enviado)` como mucho a los 30 s (sin acuse). |
 | 24 | Quita el modo avión en B y no toques nada más. | En unos minutos los dos vuelven a "Contacto nuevo · en línea" solos. Los mensajes anteriores siguen en el chat de ambos (el historial en memoria sobrevive a los cortes). El texto descartado del paso 22 no llega a B. |
 | 25 | Envía un texto de A a B. | `(entregado)` otra vez. |
+| 25 bis | Repite los pasos 21 y 24, pero al quitar el modo avión **vuelve a abrir GhostP2** en B (sal a la pantalla de inicio y entra otra vez, o ábrelo desde la notificación). | Abrir la app corta la espera de reconexión (como un cambio de red): B llama a A enseguida y los dos vuelven a "en línea" en segundos, sin esperar la siguiente llamada programada. Con GhostP2 detenido, abrir la app no arranca nada. |
 
 ### Error, Reintentar y Desconectar
 
@@ -119,6 +120,18 @@ R16). No hay forma sencilla de provocarlo a mano: está cubierto por pruebas.
 No uses `adb shell am force-stop` para el paso 30: equivale a que el usuario fuerce la
 detención, y Android no vuelve a crear el servicio.
 
+### Borrar chat y borrar contacto (aviso `Unpair`)
+
+Con A y B activos, emparejados y "en línea" (si hace falta, pulsa "Activar" en los dos).
+
+| # | Paso | Resultado esperado |
+|---|---|---|
+| 33 bis | En A, pulsa "Borrar chat" bajo "Contacto nuevo". | El chat de A con ese contacto queda vacío (sin confirmación). El de B no cambia. |
+| 33 ter | En A, pulsa "Borrar" bajo el contacto y confirma con "Borrar" en el diálogo "¿Borrar a Contacto nuevo?". | En A, en segundos: "Contacto nuevo borrado. Ha recibido el aviso." (desaparece a los pocos segundos), "Contactos: 0" y, al poco, "Mi .onion: sin publicar". En B: notificación "Contacto nuevo te ha eliminado de sus contactos" (en la pantalla de bloqueo, "Aviso de un contacto") y "Contactos: 0". |
+| 33 quater | (Opcional.) Empareja de nuevo (pasos 7, 11 y 12), activa el modo avión en B y borra el contacto en A. | A sigue intentando entregar el aviso durante hasta 2 min y después muestra "Contacto nuevo borrado. No se le pudo avisar." y "Contactos: 0". Al quitar el modo avión, B sigue teniendo el contacto (desconectado para siempre): no recibió el aviso. |
+
+Antes de seguir, vuelve a emparejar A y B (pasos 7, 11 y 12) si vas a hacer la reinstalación.
+
 ### Fin
 
 | # | Paso | Resultado esperado |
@@ -130,17 +143,13 @@ detención, y Android no vuelve a crear el servicio.
 | # | Paso | Resultado esperado |
 |---|---|---|
 | 35 | Con A y B activos y emparejados, desinstala GhostP2 de B, vuelve a instalarlo y actívalo. | B empieza de cero: "Contactos: 0", identidad y .onion nuevas. En A, el contacto antiguo queda "desconectado" para siempre (con ratos en "conectando" mientras lo reintenta: su .onion ya no existe). A no recibe ningún aviso. |
-| 36 | Empareja de nuevo (pasos 7, 11 y 12). | Emparejamiento correcto con un número de seguridad **distinto** del anterior. En A aparece un segundo "Contacto nuevo" (el antiguo sigue, desconectado: la pantalla de diagnóstico no permite borrarlo). |
+| 36 | Empareja de nuevo (pasos 7, 11 y 12). | Emparejamiento correcto con un número de seguridad **distinto** del anterior. En A aparece un segundo "Contacto nuevo"; el antiguo sigue, desconectado, hasta que lo borres con "Borrar" (no recibirá el aviso: su .onion ya no existe). |
 
 ## Lo que esta pantalla no permite probar
 
-- **Borrar un contacto y el aviso al otro lado** ("<nombre> te ha eliminado de sus
-  contactos"). El motor lo implementa (`MessengerEngine.deleteContact`, con `Unpair` y hasta
-  2 min de intentos de entrega) y lo cubren las pruebas `UnpairTest`, pero la pantalla de
-  diagnóstico no tiene botón para borrar contactos. Queda para el plan 3.
-- **"Borrar" la conversación**, renombrar, marcar como verificado y "Borrar todo". Están en el
-  motor y no en la pantalla. "Empezar de cero" solo aparece si el almacenamiento falla.
+- **Renombrar, marcar como verificado y "Borrar todo"**. Están en el motor y no en la pantalla.
+  "Empezar de cero" solo aparece si el almacenamiento falla.
 - **Identidad cambiada** ("La identidad de <nombre> ha cambiado"): hace falta que un solo lado
-  vuelva a emparejar con la misma identidad, y para eso hay que borrar un contacto. Lo cubren
-  las pruebas de `ConnectionsTest`.
+  vuelva a emparejar con la misma identidad sin que el otro se entere, y "Borrar" siempre
+  intenta avisar al otro lado. Lo cubren las pruebas de `ConnectionsTest`.
 - **Fotos**: la pantalla solo muestra "[foto]" para las recibidas y no permite enviarlas.

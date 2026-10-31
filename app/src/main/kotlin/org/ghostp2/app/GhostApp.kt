@@ -11,6 +11,7 @@ import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -24,10 +25,12 @@ import org.ghostp2.data.StoreUnavailableException
 import org.ghostp2.data.StoredRepositories
 import org.ghostp2.data.createRepositories
 import org.ghostp2.engine.ContactRepository
+import org.ghostp2.engine.EngineStatus
 import org.ghostp2.engine.IdentityRepository
 import org.ghostp2.engine.MessengerEngine
 import org.ghostp2.engine.Notice
 import org.ghostp2.engine.TorTransport
+import org.ghostp2.engine.UnpairDelivery
 import org.ghostp2.tor.KmpTorTransport
 
 /** Aplicación: crea los canales de notificación y es la única dueña del [AppContainer]. */
@@ -289,6 +292,22 @@ class AppContainer internal constructor(
                 probeLocked()
             }
         }
+    }
+
+    /**
+     * Borra el contacto avisándole ([MessengerEngine.deleteContact]) en el scope del proceso: salir de
+     * la pantalla no corta la entrega (hasta 2 min) ni el borrado local.
+     */
+    fun deleteContact(contactId: String): Deferred<UnpairDelivery> =
+        scope.async { engine.deleteContact(contactId) }
+
+    /**
+     * La app se ha abierto (o ha vuelto a primer plano): con el motor en marcha, corta las esperas de
+     * reconexión y reintenta ya, como un cambio de red (restricción global: "reinicio al cambiar la red
+     * o al abrir la app"). Con el motor parado no hace nada.
+     */
+    fun onAppOpened() {
+        if (engine.status.value == EngineStatus.Online) engine.onNetworkChanged()
     }
 
     private suspend fun stopEverything() {

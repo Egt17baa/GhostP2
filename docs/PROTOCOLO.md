@@ -522,7 +522,8 @@ valores por defecto están en `EngineConfig`.
   (por cualquier motivo) el contacto pasa a `OFFLINE` y el bucle vuelve a llamar tras la espera
   mínima (con variación).
 - Un cambio de la red por defecto de Android (`onAvailable`/`onLost` del `NetworkCallback` del
-  servicio) corta las esperas, vuelve a la mínima y reintenta enseguida.
+  servicio) **o abrir la app** (cada `onResume` de la actividad, con el motor `Online`) corta las
+  esperas, vuelve a la mínima y reintenta enseguida.
 - Presencia: `OFFLINE`, `CONNECTING`, `ONLINE` o `IDENTITY_CHANGED`. Con el motor parado no hay
   presencia (mapa vacío). `ONLINE` puede verse un instante antes de que la sesión acepte envíos.
 - Conexiones entrantes: handshake de respondedor (§7) con los contactos `ACTIVE` como candidatos.
@@ -583,8 +584,9 @@ Si mientras tanto se volvió a emparejar con el mismo contacto, el emparejamient
 conserva. Al **recibir** `Unpair` se hace el mismo borrado local y se avisa "<nombre> te ha
 eliminado de sus contactos" (con el nombre que tenía). "Borrar todo" envía `Unpair` en paralelo
 a las sesiones abiertas (2,5 s en total, mejor esfuerzo), detiene el motor y borra identidad,
-contactos, autorizaciones y el estado de Tor en disco. La pantalla de diagnóstico del plan 2 no
-ofrece todavía borrar contactos ni "Borrar todo" (plan 3).
+contactos, autorizaciones y el estado de Tor en disco. La pantalla de diagnóstico del plan 2
+ofrece "Borrar" contacto (con confirmación; muestra si el aviso se entregó) y "Borrar chat", pero
+todavía no "Borrar todo" (plan 3).
 
 ### 14.7 Ciclo de vida del motor y Tor (reglas R13 y R18)
 

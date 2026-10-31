@@ -1,13 +1,19 @@
 package org.ghostp2.app
 
 import android.os.Looper
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeout
+import org.ghostp2.engine.AcceptResult
 import org.ghostp2.engine.ContactRepository
+import org.ghostp2.engine.EngineHarness
+import org.ghostp2.engine.InvitationState
 import org.ghostp2.engine.FakeTor
 import org.ghostp2.engine.FakeTorNetwork
 import org.ghostp2.engine.Identity
 import org.ghostp2.engine.IdentityRepository
 import org.ghostp2.engine.InMemoryContactRepository
 import org.ghostp2.engine.InMemoryIdentityRepository
+import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.robolectric.Shadows.shadowOf
 
@@ -66,4 +72,17 @@ fun eventually(timeoutMillis: Long = 10_000, condition: () -> Boolean) {
         if (System.currentTimeMillis() > deadline) fail("La condición no se cumplió en $timeoutMillis ms")
         Thread.sleep(20)
     }
+}
+
+/**
+ * Empareja el motor del [AppContainer] de [app] (ya `Online`) con el motor 0 de [peer] (arrancado, en la
+ * misma `FakeTorNetwork`): invita el otro lado y acepta GhostP2. Devuelve (id del otro en GhostP2,
+ * id de GhostP2 en el otro).
+ */
+suspend fun pairWithPeer(app: TestGhostApp, peer: EngineHarness, timeoutMillis: Long = 20_000): Pair<String, String> {
+    val handle = peer.engine(0).createInvitation()
+    val waiting = withTimeout(timeoutMillis) { handle.state.first { it is InvitationState.Waiting } } as InvitationState.Waiting
+    assertTrue(app.container.engine.acceptInvitation(waiting.text) is AcceptResult.Paired)
+    withTimeout(timeoutMillis) { handle.state.first { it is InvitationState.Paired } }
+    return app.storage.contacts.all().single().id to peer.contacts(0).all().single().id
 }

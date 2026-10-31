@@ -14,10 +14,8 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.ghostp2.data.StoreCorruptedException
 import org.ghostp2.data.StoreUnavailableException
-import org.ghostp2.engine.AcceptResult
 import org.ghostp2.engine.EngineHarness
 import org.ghostp2.engine.EngineStatus
-import org.ghostp2.engine.InvitationState
 import org.ghostp2.engine.Presence
 import org.ghostp2.engine.TorState
 import org.junit.After
@@ -253,16 +251,8 @@ class GhostServiceTest {
         EngineHarness(1, network = app.network).use { peer ->
             runBlocking {
                 peer.startAll()
-                // El otro lado invita; GhostP2 (el del AppContainer) acepta.
-                val handle = peer.engine(0).createInvitation()
-                val waiting = withTimeout(TIMEOUT) {
-                    handle.state.first { it is InvitationState.Waiting }
-                } as InvitationState.Waiting
-                assertTrue(engine.acceptInvitation(waiting.text) is AcceptResult.Paired)
-                withTimeout(TIMEOUT) { handle.state.first { it is InvitationState.Paired } }
-                val peerInMine = app.storage.contacts.all().single().id
+                val (peerInMine, mineInPeer) = pairWithPeer(app, peer, TIMEOUT)
                 engine.renameContact(peerInMine, "Ana")
-                val mineInPeer = peer.contacts(0).all().single().id
                 // ONLINE puede verse antes que la sesión: se reenvía hasta que llegue.
                 withTimeout(TIMEOUT) {
                     while (engine.conversations.value[peerInMine].isNullOrEmpty()) {

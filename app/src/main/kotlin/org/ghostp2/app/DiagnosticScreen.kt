@@ -40,6 +40,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
@@ -54,6 +55,7 @@ import org.ghostp2.engine.InvitationHandle
 import org.ghostp2.engine.InvitationState
 import org.ghostp2.engine.Notice
 import org.ghostp2.engine.Presence
+import org.ghostp2.engine.UnpairDelivery
 
 /*
  * Pantalla de diagnóstico TEMPORAL para la prueba manual entre dos móviles (el plan 3 la sustituye por la
@@ -215,6 +217,11 @@ private fun EnginePanel(container: AppContainer, actions: DiagnosticActions, bat
         Text(stringResource(R.string.diag_contacts_error))
         OutlinedButton(onClick = { contactsAttempt++ }) { Text(stringResource(R.string.diag_retry)) }
     }
+    var confirmDelete by remember { mutableStateOf<Contact?>(null) }
+    var deleteMessage by remember { mutableStateOf<String?>(null) }
+    val deliveredText = stringResource(R.string.diag_delete_delivered)
+    val notDeliveredText = stringResource(R.string.diag_delete_not_delivered)
+    val deleteFailedText = stringResource(R.string.diag_delete_failed)
     contacts.forEach { contact ->
         Text(
             "${contact.name} · ${presenceText(presence[contact.id])}",
@@ -222,6 +229,45 @@ private fun EnginePanel(container: AppContainer, actions: DiagnosticActions, bat
                 .fillMaxWidth()
                 .clickable { openChat = contact.id }
                 .padding(vertical = 4.dp),
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            TextButton(onClick = { openChat = contact.id }) { Text(stringResource(R.string.diag_open_chat)) }
+            TextButton(onClick = { container.engine.clearConversation(contact.id) }) {
+                Text(stringResource(R.string.diag_clear_chat))
+            }
+            TextButton(onClick = { confirmDelete = contact }) { Text(stringResource(R.string.diag_delete_contact)) }
+        }
+    }
+    deleteMessage?.let { message ->
+        Text(message)
+        // Aviso breve: desaparece a los pocos segundos.
+        LaunchedEffect(message) {
+            delay(DELETE_MESSAGE_MILLIS)
+            deleteMessage = null
+        }
+    }
+    confirmDelete?.let { contact ->
+        AlertDialog(
+            onDismissRequest = { confirmDelete = null },
+            title = { Text(stringResource(R.string.diag_delete_confirm_title, contact.name)) },
+            text = { Text(stringResource(R.string.diag_delete_confirm_text)) },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmDelete = null
+                    if (openChat == contact.id) openChat = null
+                    deleteMessage = null
+                    val pending = container.deleteContact(contact.id)
+                    // El resultado llega aunque se salga de la pantalla; solo se muestra si sigue abierta.
+                    container.scope.launch {
+                        deleteMessage = when (runCatching { pending.await() }.getOrNull()) {
+                            UnpairDelivery.DELIVERED -> deliveredText.format(contact.name)
+                            UnpairDelivery.NOT_DELIVERED -> notDeliveredText.format(contact.name)
+                            null -> deleteFailedText
+                        }
+                    }
+                }) { Text(stringResource(R.string.diag_delete_contact)) }
+            },
+            dismissButton = { TextButton(onClick = { confirmDelete = null }) { Text(stringResource(R.string.diag_cancel)) } },
         )
     }
     val chatContact = contacts.firstOrNull { it.id == openChat }
@@ -391,3 +437,4 @@ private fun chatLine(item: ChatItem): String {
 }
 
 private const val MAX_SHOWN = 50
+private const val DELETE_MESSAGE_MILLIS = 6_000L

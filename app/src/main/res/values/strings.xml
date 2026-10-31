@@ -64,6 +64,14 @@
     <string name="diag_failed">no enviado</string>
     <string name="diag_send_only_online">Solo se puede enviar con GhostP2 en línea</string>
 
+    <string name="diag_open_chat">Chat</string>
+    <string name="diag_clear_chat">Borrar chat</string>
+    <string name="diag_delete_contact">Borrar</string>
+    <string name="diag_delete_confirm_title">¿Borrar a %1$s?</string>
+    <string name="diag_delete_confirm_text">Se le avisará (si es posible, durante hasta 2 min) y se borrará de tus contactos. Para volver a hablar tendréis que emparejaros de nuevo.</string>
+    <string name="diag_delete_delivered">%1$s borrado. Ha recibido el aviso.</string>
+    <string name="diag_delete_not_delivered">%1$s borrado. No se le pudo avisar.</string>
+    <string name="diag_delete_failed">No se pudo borrar el contacto</string>
     <string name="diag_send_failed">No se pudo enviar</string>
     <string name="diag_contacts_error">No se pudieron leer tus contactos</string>
     <string name="diag_unexpected">Ha ocurrido un error inesperado. Tus datos no se han tocado.</string>
