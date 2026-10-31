@@ -68,9 +68,12 @@ Lo que GhostP2 **no** protege, en resumen (detalle en
 [PROTOCOLO §13 y §15](docs/PROTOCOLO.md#15-limitaciones-del-nivel-de-aplicación)):
 
 - **Solo en memoria quiere decir que se pierde**: si el contacto no está conectado el mensaje se
-  descarta; el historial desaparece al desconectar, si Tor falla o si el sistema mata la app.
+  descarta; el historial desaparece al desconectar, si Tor falla o si el sistema mata la app. Las
+  fotos ocupan como mucho 64 MiB en total: por encima, las más antiguas quedan como "foto
+  descartada".
 - **Dispositivo comprometido** (malware, root, depurador): fuera de alcance. Las claves están en
-  memoria mientras la app funciona, y algunas no se pueden borrar de ella: kmp-tor pasa las
+  memoria mientras la app funciona, y no hay garantía de borrarlas de ella: el motor rellena con
+  ceros solo algunas de sus copias (otras quedan para el recolector de basura), y kmp-tor pasa las
   claves de los servicios ocultos y de autorización a Tor como `String` por el puerto de control;
   Tor corre en otro proceso.
 - **Android Keystore obligatorio**: si no funciona, la app se niega a usar el almacenamiento (no
@@ -80,7 +83,8 @@ Lo que GhostP2 **no** protege, en resumen (detalle en
   observe gran parte de la red. El estado de Tor (guardas, consenso) está en disco.
 - **Sin puentes** (obfs4, Snowflake): en redes que bloquean Tor no funciona.
 - Sin arranque automático tras reiniciar el móvil; con ahorro de batería agresivo la conexión
-  puede cortarse.
+  puede cortarse. Si Tor falla, al volver la red se reintenta una sola vez (como mucho una cada
+  30 s); si sigue fallando, queda "Reintentar".
 
 ## Documentación
 

@@ -281,3 +281,39 @@
 - [ ] **Step 2:** Actualizar README (estado: plan 2 completo, cómo compilar el APK, enlace a la prueba manual) y PROTOCOLO.
 - [ ] **Step 3:** `./gradlew test :app:assembleDebug` → PASA.
 - [ ] **Step 4:** Commit `docs: prueba manual con dos móviles y reglas del nivel de aplicación`.
+
+## Decisiones durante la ejecución
+
+Reglas acordadas mientras se ejecutaba el plan (el detalle está en `docs/PROTOCOLO.md` §14 y §15):
+
+- **R9**: los `testFixtures` de `:core:engine` declaran BouncyCastle explícitamente (FakeTor necesita ed25519 para generar .onion).
+- **R10**: si quien empareja aún no tiene .onion permanente, se publica durante el emparejamiento ya con la clave pública de autorización del contacto pendiente (nunca sin autorización); si el emparejamiento falla y no quedan contactos, se retira.
+- **R11**: los módulos Android (`:core:data`, `:core:tor`, `:app`) usan JUnit4 (Robolectric); los módulos JVM siguen con JUnit5.
+- **R12**: se mantienen AGP 8.13.2, compileSdk 36 y Kotlin 2.4.21; core-ktx 1.18.0, lifecycle 2.10.0 y Compose BOM 2026.06.01 (las versiones más nuevas exigen AGP 9.1+/compileSdk 37).
+- **R13**: al volver de `TorTransport.start()` el estado es `Starting`, `Ready` o `Error`, nunca `Off`.
+- **R14**: quien reinstala genera identidad y .onion nuevas; para los demás el contacto antiguo solo queda desconectado (sin señal en el protocolo); `IDENTITY_CHANGED` por `AUTH` cubre el re-emparejamiento de un solo lado.
+- **R15**: `sendText`/`sendPhoto` con el motor parado o hacia un id desconocido devuelven un id y no guardan nada.
+- **R16**: si Android Keystore no se puede usar, el almacenamiento falla cerrado (nunca un keyset en claro).
+- **R17**: `:core:data` usa un almacén propio (`EncryptedStore`: archivo atómico y `StateFlow`), sin DataStore.
+- **R18** (modificada en la revisión final): con el motor `Online` se vigila el estado de Tor; si Tor falla, el motor libera todo y queda en `Error` (presencia vacía). Al volver la red, el servicio lo reinicia una sola vez (como mucho un reinicio por aviso de red y uno cada 30 s); si sigue fallando, queda "Reintentar".
+- **R19**: `GhostService` devuelve `START_STICKY`; un intent nulo vuelve a primer plano y arranca el motor; "Desconectar" lo detiene para siempre; no hay arranque tras reiniciar el móvil.
+
+### Pendiente para el plan 3
+
+- Reinicio de Tor tras "Empezar de cero" (borrado de su estado): comprobarlo y asegurarlo; de momento hay un paso en `docs/PRUEBA-MANUAL.md` (pasos 37–42).
+- Persistir los borrados de contacto pendientes (`deleting` es solo de memoria: si el proceso muere a mitad, el borrado no se reanuda).
+- Teclado sin aprendizaje personalizado (`imeOptions`/`KeyboardOptions` de incógnito) en todos los campos de texto.
+- API del número de seguridad para la interfaz y traducción a la interfaz de los fallos al guardar la identidad.
+- Tema Material 3 de la aplicación (ahora es el `Theme.Material` de la plataforma).
+- Estado de Tor obsoleto entre ejecuciones de `KmpTorTransport` (aplazado en la tarea 3).
+- Carrera comprobar-y-fijar de `activeInvitationOnion` (la cubre la comprobación por identidad propia).
+- Emparejamientos simultáneos con el mismo contacto: orden de los deshacer cuando ambos fallan (la revisión final solo cubre el borrado y el re-emparejamiento intercalados).
+- `FakeTor` usa un cerrojo bloqueante en su puerta de conexiones (solo pruebas).
+- `stop()` no se puede interrumpir si `tor.stop()` se cuelga (la liberación va con `NonCancellable`).
+- Sesión preferida obsoleta hasta ~60 s si solo el lado mayor pierde la red.
+- `incomingInFlight` es global y no por contacto.
+- `deliverUnpair` cancela su trabajo sin esperarlo (inofensivo).
+- Una sola nueva comprobación de Keystore a los 300 ms: un corte largo acaba como "datos ilegibles".
+- KDoc de `forceReset`: el borrado de la clave de Keystore es de mejor esfuerzo.
+- `GhostService.onDestroy` no pone `foreground = false`; falta probar que se relanza otra `IllegalStateException` en el reinicio STICKY.
+- La prueba de parar el motor a mitad de enviar una foto puede pasar sin llegar a ejercitar el caso.

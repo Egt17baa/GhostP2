@@ -457,6 +457,8 @@ valores por defecto están en `EngineConfig`.
 | Arranque de Tor hasta `Ready` | 180 s |
 | Registro de autorizaciones de cliente al arrancar | 30 s en total, en paralelo |
 | Historial en memoria | 500 elementos por contacto (se descartan los más antiguos) |
+| Fotos en el historial, sumando todas las conversaciones | 64 MiB (`maxPhotoBytesInMemory`; se descartan las más antiguas) |
+| Handshakes de sesión entrantes simultáneos | 32 (las conexiones de más se cierran al aceptarlas) |
 
 ### 14.1 Publicación de la .onion permanente
 
@@ -477,6 +479,9 @@ valores por defecto están en `EngineConfig`.
   puede usarla). Al emparejar, la clave del contacto sustituye a la de reserva; si el
   emparejamiento no termina, la clave pendiente se retira y, sin contactos, la .onion deja de
   publicarse.
+- Defensa en profundidad: `TorTransport.publishService` rechaza (`IOException`, sin enviar nada a
+  Tor) una publicación con clave de servicio (la .onion permanente) y sin claves de autorización.
+  Sin clave y sin autorización solo se publica el servicio temporal de la invitación (§14.2).
 - **Autorizaciones para las .onion de los contactos.** Tor las guarda solo en memoria
   (`ONION_CLIENT_AUTH_ADD` sin `Permanent`, sin `ClientOnionAuthDir`). En cada arranque, con Tor
   `Ready` y antes de los bucles de conexión, se registran de nuevo las de todos los contactos
@@ -528,7 +533,10 @@ valores por defecto están en `EngineConfig`.
   presencia (mapa vacío). `ONLINE` puede verse un instante antes de que la sesión acepte envíos.
 - Conexiones entrantes: handshake de respondedor (§7) con los contactos `ACTIVE` como candidatos.
   Cualquier fallo (llamante desconocido, conexión, plazo…) cierra en silencio, sin cambiar el
-  estado de nadie.
+  estado de nadie. Como mucho 32 handshakes entrantes a la vez: las conexiones de más se cierran
+  nada más aceptarlas (como los intentos de una invitación, §14.2).
+- Si al recibir `AUTH` el almacenamiento falla y no se puede guardar `IDENTITY_CHANGED`, el
+  contacto no se marca: el bucle sigue con la espera creciente y lo vuelve a intentar.
 - **Desempate** (§10.5): por contacto puede haber dos conexiones autenticadas a la vez, la
   iniciada por cada lado. Se conserva siempre la **iniciada por el lado cuya `identityKey`
   pública es menor** (orden de bytes sin signo). La decisión se toma antes de crear la
@@ -561,6 +569,12 @@ valores por defecto están en `EngineConfig`.
   muere el proceso. Nunca se escriben en disco. Las fotos se rellenan con ceros al salir del
   historial.
 - Solo hay conversaciones de contactos guardados: los mensajes de ids desconocidos no se guardan.
+- **Presupuesto global de fotos**: sumando todas las conversaciones, las fotos del historial ocupan
+  como mucho 64 MiB (`EngineConfig.maxPhotoBytesInMemory`; cada foto puede tener hasta 3 MiB, §10.1).
+  Al superarlo, tras guardar una foto nueva (enviada o recibida), se descartan primero las **más
+  antiguas**, de cualquier contacto: sus bytes se rellenan con ceros y el mensaje sigue en el
+  historial (mismo id, estado y hora) como "foto descartada" (`ChatContent.PhotoDiscarded`, solo con
+  su tamaño). Una foto que se está enviando no se descarta hasta que termina su envío.
 - Enviar sin sesión abierta ⇒ el elemento queda en el historial como `Failed(NOT_CONNECTED)` al
   momento ("no enviado"). No hay cola ni reintentos (§10.3).
 - **R15**: `sendText`/`sendPhoto` con el motor parado, o hacia un id que no es un contacto
@@ -586,7 +600,8 @@ eliminado de sus contactos" (con el nombre que tenía). "Borrar todo" envía `Un
 a las sesiones abiertas (2,5 s en total, mejor esfuerzo), detiene el motor y borra identidad,
 contactos, autorizaciones y el estado de Tor en disco. La pantalla de diagnóstico del plan 2
 ofrece "Borrar" contacto (con confirmación; muestra si el aviso se entregó) y "Borrar chat", pero
-todavía no "Borrar todo" (plan 3).
+todavía no "Borrar todo" (plan 3). Mientras dura un borrado, el motor expone su id en `deleting` (solo en
+memoria: si el proceso muere a mitad, el borrado no se reanuda; plan 3).
 
 ### 14.7 Ciclo de vida del motor y Tor (reglas R13 y R18)
 
@@ -597,11 +612,17 @@ todavía no "Borrar todo" (plan 3).
   `Error`; nunca lanza.
 - **R13**: al volver de `TorTransport.start()` el estado de Tor ya es `Starting`, `Ready` o
   `Error`, nunca `Off`.
-- **R18**: con el motor `Online` se vigila el estado de Tor. Si pasa a `Error` (p. ej. su proceso
-  muere) o a `Off` sin pedirlo, el motor libera la ejecución como al detenerse (sesiones
-  cerradas, presencia vacía, historial borrado) y queda en `Error`. **No se reinicia solo**: la
-  app muestra "Reintentar" (y "Desconectar"), y la notificación fija pasa a "GhostP2 sin
-  conexión · error".
+- **R18 (modificada)**: con el motor `Online` se vigila el estado de Tor. Si pasa a `Error` (p. ej.
+  su proceso muere) o a `Off` sin pedirlo, el motor libera la ejecución como al detenerse
+  (sesiones cerradas, presencia vacía, historial borrado) y queda en `Error`. La app muestra
+  "Reintentar" (y "Desconectar"), y la notificación fija pasa a "GhostP2 sin conexión · error".
+  **Un único reinicio acotado al volver la red**: si el servicio recibe `onAvailable` de la red por
+  defecto con el motor en `Error` (también si el error fue al arrancar) y el usuario no ha pulsado
+  "Desconectar", vuelve a arrancar el motor una vez; como mucho un reinicio por aviso de red y con
+  al menos 30 s entre dos reinicios, para no entrar en bucle si Tor sigue fallando (entonces queda
+  "Reintentar").
+- Una excepción inesperada en una corrutina del proceso (motor, sesiones, servicio) no cierra la
+  app: los scopes llevan un `CoroutineExceptionHandler` que la descarta sin registrarla.
 
 ### 14.8 Servicio en primer plano (regla R19)
 
@@ -633,7 +654,11 @@ todavía no "Borrar todo" (plan 3).
 - **R16**: si Android Keystore no se puede usar, el almacenamiento **falla cerrado**: nunca se
   acepta el keyset en claro con el que Tink se conformaría, y el motor no arranca. Un fallo
   pasajero ofrece "Reintentar" (y, tras 3 seguidos, "Empezar de cero" con doble confirmación);
-  datos ilegibles ofrecen solo "Empezar de cero". Nunca se borra nada sin que el usuario lo pida.
+  datos ilegibles ofrecen "Empezar de cero" y también "Reintentar", que solo vuelve a leer (por si
+  el fallo era pasajero). Nunca se borra nada sin que el usuario lo pida.
+- Compatibilidad hacia delante: los campos CBOR desconocidos (escritos por una versión más nueva)
+  se ignoran al leer; un valor desconocido de un enum o un campo obligatorio ausente siguen siendo
+  "datos ilegibles".
 - Estado de Tor en `noBackupFilesDir/tor` (consenso, guardas, cookie de control); sin claves de
   servicios ni de autorización.
 - Sin copias de seguridad: `allowBackup="false"` y reglas de extracción que excluyen todo.
@@ -647,11 +672,16 @@ Complementan las del núcleo (§13). GhostP2 no promete más de lo que hay aquí
   en `String`, que no se pueden rellenar con ceros. Además el proceso de Tor (aparte) las tiene
   en su memoria mientras está en marcha.
 - **Material de claves en memoria**: identidad, `pairSecret` y claves de autorización están en
-  memoria mientras el motor funciona; el motor borra sus copias al dejar de usarlas, pero no las
-  de la JVM, BouncyCastle o Tink (§13).
+  memoria mientras el motor funciona. El motor rellena con ceros **algunas** de sus copias al dejar
+  de usarlas (las del contacto borrado, las del emparejamiento descartado, todo lo vivo al "Borrar
+  todo"), pero **no todas**: el repositorio entrega copias nuevas en cada lectura y muchas de esas
+  copias transitorias (y las de `PairingResult` tras guardar el contacto) se sueltan sin rellenar y
+  quedan en la memoria hasta que el recolector de basura las reutiliza. Tampoco se borran las copias
+  internas de la JVM, BouncyCastle o Tink (§13). No hay garantía de borrado en memoria.
 - **Mensajes solo en memoria**: se descartan si el destinatario no está conectado (no hay cola) y
   el historial se pierde al desconectar, si Tor falla, si el sistema mata la app o al reiniciar
-  el móvil. "Entregado" significa recibido por su app, no leído.
+  el móvil. "Entregado" significa recibido por su app, no leído. Con muchas fotos, las más antiguas
+  se descartan de la memoria (64 MiB en total, §14.5).
 - **Android Keystore obligatorio** (R16): en dispositivos con Keystore roto la app no funciona.
   La protección en reposo es la de Keystore: con el móvil desbloqueado (o con root), quien
   ejecute código como la app puede descifrar `ghostp2.bin`. La clave maestra no exige

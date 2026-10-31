@@ -101,12 +101,14 @@ la ejecución en segundo plano en los ajustes del fabricante.
 |---|---|---|
 | 26 | En B, pulsa "Desconectar" (en la pantalla o en la notificación). | La notificación fija desaparece. "Estado: detenido" y botón "Activar". El chat de B queda vacío (el historial se borra al detener). En A, el contacto pasa a "desconectado" en pocos segundos. |
 | 27 | Con B detenido y en modo avión, pulsa "Activar". Espera hasta unos 3 minutos. | "Estado: arrancando Tor (N %)" y después "Estado: error · <motivo>" (p. ej. "Tor no terminó de arrancar"). La notificación fija pasa a "GhostP2 sin conexión · error" / "Abre la app para reintentar", con "Desconectar". En la pantalla, los botones "Reintentar" y "Desconectar". |
-| 28 | Quita el modo avión y pulsa "Reintentar". | Vuelve a "arrancando Tor" y a "Estado: en línea". La notificación vuelve a "GhostP2 activo · cifrado". El contacto vuelve a "en línea" en ambos. |
+| 28 | Quita el modo avión **sin pulsar nada**. | Al volver la red, GhostP2 se reinicia solo una vez (regla R18 modificada): vuelve a "arrancando Tor" y a "Estado: en línea". La notificación vuelve a "GhostP2 activo · cifrado". El contacto vuelve a "en línea" en ambos. Si no ocurre en un par de minutos, pulsa "Reintentar": debe dar el mismo resultado. |
+| 28 bis | Repite el paso 27 y, cuando esté en error, pulsa "Reintentar" sin quitar el modo avión. | Vuelve a "arrancando Tor" y, al rato, otra vez a error (sin red). Activar y quitar el modo avión varias veces seguidas en menos de 30 s reinicia como mucho una vez cada 30 s. |
 | 29 | Repite el paso 27 y esta vez pulsa "Desconectar". | La notificación desaparece y queda "Estado: detenido". Quita el modo avión y pulsa "Activar" para seguir. |
 
 Si el almacenamiento cifrado no se puede leer (Android Keystore no disponible), la pantalla
 muestra "No se pudo acceder a tus datos cifrados" con "Reintentar" y no arranca nada (regla
-R16). No hay forma sencilla de provocarlo a mano: está cubierto por pruebas.
+R16). No hay forma sencilla de provocarlo a mano: está cubierto por pruebas. Los datos
+ilegibles sí se pueden provocar (ver "Empezar de cero" al final).
 
 ### El sistema mata el proceso (regla R19)
 
@@ -145,11 +147,26 @@ Antes de seguir, vuelve a emparejar A y B (pasos 7, 11 y 12) si vas a hacer la r
 | 35 | Con A y B activos y emparejados, desinstala GhostP2 de B, vuelve a instalarlo y actívalo. | B empieza de cero: "Contactos: 0", identidad y .onion nuevas. En A, el contacto antiguo queda "desconectado" para siempre (con ratos en "conectando" mientras lo reintenta: su .onion ya no existe). A no recibe ningún aviso. |
 | 36 | Empareja de nuevo (pasos 7, 11 y 12). | Emparejamiento correcto con un número de seguridad **distinto** del anterior. En A aparece un segundo "Contacto nuevo"; el antiguo sigue, desconectado, hasta que lo borres con "Borrar" (no recibirá el aviso: su .onion ya no existe). |
 
+### Empezar de cero y Tor (opcional, destruye la identidad de B)
+
+Solo con el APK de depuración (`run-as`). Al terminar, A tendrá un contacto antiguo de B que
+ya no sirve: bórralo con "Borrar".
+
+| # | Paso | Resultado esperado |
+|---|---|---|
+| 37 | En B, pulsa "Desconectar". Después estropea su archivo cifrado y cierra la app: `adb -s <serie-B> shell run-as org.ghostp2.app sh -c 'printf x > no_backup/ghostp2.bin'` y `adb -s <serie-B> shell am force-stop org.ghostp2.app`. | Nada visible todavía. |
+| 38 | Abre GhostP2 en B. | "No se pudieron leer tus datos cifrados" con los botones "Reintentar" y "Empezar de cero". No arranca nada. |
+| 39 | Pulsa "Reintentar". | Sigue en la misma pantalla (solo vuelve a leer; no borra nada). |
+| 40 | Pulsa "Empezar de cero" y confirma. | La pantalla pasa a "Estado: detenido" con "Activar" y "Contactos: 0". |
+| 41 | Pulsa "Activar" y espera hasta unos 3 minutos. | **Tor vuelve a arrancar** tras haberse borrado su estado: "arrancando Tor (N %)" y después "Estado: en línea", con "Contactos: 0" y "Mi .onion: sin publicar". Si se queda en "arrancando Tor" o termina en error, pulsa "Reintentar"; si tampoco arranca, anótalo (pendiente del plan 3: reinicio de Tor tras borrar su estado). |
+| 42 | Empareja de nuevo A y B (pasos 7, 11 y 12). | Emparejamiento correcto con una .onion nueva para B y un número de seguridad distinto del anterior. |
+
 ## Lo que esta pantalla no permite probar
 
 - **Renombrar, marcar como verificado y "Borrar todo"**. Están en el motor y no en la pantalla.
-  "Empezar de cero" solo aparece si el almacenamiento falla.
+  "Empezar de cero" solo aparece si el almacenamiento falla (pasos 37–41).
 - **Identidad cambiada** ("La identidad de <nombre> ha cambiado"): hace falta que un solo lado
   vuelva a emparejar con la misma identidad sin que el otro se entere, y "Borrar" siempre
   intenta avisar al otro lado. Lo cubren las pruebas de `ConnectionsTest`.
-- **Fotos**: la pantalla solo muestra "[foto]" para las recibidas y no permite enviarlas.
+- **Fotos**: la pantalla solo muestra "[foto]" para las recibidas (o "[foto descartada para liberar
+  memoria]" si se superan los 64 MiB de fotos en total) y no permite enviarlas.
