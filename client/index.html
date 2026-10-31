@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' ws: wss:; base-uri 'none'; form-action 'none'">
+  <meta name="referrer" content="no-referrer">
+  <meta name="color-scheme" content="light dark">
+  <title>GhostP2</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cpath fill='%237c5cff' d='M32 4C19 4 10 14 10 27v31l7-6 7 6 8-6 8 6 7-6 7 6V27C54 14 45 4 32 4z'/%3E%3Ccircle cx='24' cy='28' r='5' fill='%23fff'/%3E%3Ccircle cx='40' cy='28' r='5' fill='%23fff'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css">
+  <script type="module" src="js/app.js"></script>
+</head>
+<body>
+  <header class="top">
+    <h1>Ghost<span>P2</span></h1>
+    <p>Mensajería P2P cifrada de extremo a extremo · sin servidores de mensajes · sin historial</p>
+  </header>
+
+  <main>
+    <section id="setup" class="card">
+      <div class="tabs" role="tablist">
+        <button type="button" role="tab" data-tab="code" aria-selected="true">Con código</button>
+        <button type="button" role="tab" data-tab="manual" aria-selected="false">Manual (sin servidor)</button>
+      </div>
+
+      <div id="tab-code" role="tabpanel">
+        <form id="code-form">
+          <p>Uno genera el código y se lo pasa al otro por un canal de confianza (en persona, llamada…). Los dos lo introducís y pulsáis <b>Conectar</b>: os veréis cuando estéis conectados a la vez.</p>
+          <label for="code-input">Código de emparejamiento</label>
+          <div class="row">
+            <input id="code-input" placeholder="XXXX-XXXX-XXXX-XXXX-XXXX" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="40">
+            <button type="button" id="code-generate">Generar</button>
+            <button type="button" id="code-copy">Copiar</button>
+          </div>
+          <label for="signal-url">Servidor de señalización</label>
+          <input id="signal-url" placeholder="wss://tu-servidor.example/ws" autocomplete="off" spellcheck="false">
+          <p class="hint">Solo sirve para que os encontréis. Recibe datos cifrados con una clave derivada del código, no puede leerlos ni guarda nada, y se desconecta en cuanto la conexión directa está lista. Puede ser tuyo (privado) o público.</p>
+          <button type="submit" id="code-connect" class="primary">Conectar</button>
+        </form>
+      </div>
+
+      <div id="tab-manual" role="tabpanel" hidden>
+        <p>Sin ningún servidor: intercambiáis dos códigos largos por el medio que queráis. Después verificad el número de seguridad.</p>
+        <div class="grid">
+          <div class="step">
+            <h2>Si invitas tú</h2>
+            <button type="button" id="manual-create">1 · Crear invitación</button>
+            <textarea id="manual-offer-out" readonly placeholder="Aquí aparecerá tu invitación"></textarea>
+            <button type="button" id="manual-offer-copy">Copiar invitación</button>
+            <textarea id="manual-answer-in" placeholder="3 · Pega aquí la respuesta de tu contacto" spellcheck="false"></textarea>
+            <button type="button" id="manual-answer-apply" class="primary">Conectar</button>
+          </div>
+          <div class="step">
+            <h2>Si te han invitado</h2>
+            <textarea id="manual-offer-in" placeholder="Pega aquí la invitación recibida" spellcheck="false"></textarea>
+            <button type="button" id="manual-accept">2 · Generar respuesta</button>
+            <textarea id="manual-answer-out" readonly placeholder="Aquí aparecerá tu respuesta"></textarea>
+            <button type="button" id="manual-answer-copy">Copiar respuesta</button>
+          </div>
+        </div>
+      </div>
+
+      <details id="advanced">
+        <summary>Ajustes avanzados de red</summary>
+        <label for="ice-servers">Servidores STUN/TURN (uno por línea; vacío = solo red local)</label>
+        <textarea id="ice-servers" spellcheck="false"></textarea>
+        <p class="hint">STUN solo ayuda a atravesar el router y ve tu IP pública, nunca los mensajes. Formato TURN: <code>turn:usuario:clave@host:3478</code></p>
+        <label class="check"><input type="checkbox" id="relay-only"> Ocultar mi IP al contacto: usar solo TURN (necesita un servidor TURN)</label>
+      </details>
+
+      <p id="setup-status" role="status" aria-live="polite"></p>
+    </section>
+
+    <section id="chat" class="card" hidden>
+      <div class="chat-head">
+        <span id="peer-state" class="dot" data-state="offline"></span>
+        <span id="peer-state-text"></span>
+        <button type="button" id="reconnect" hidden>Volver a conectar</button>
+        <button type="button" id="disconnect" class="danger">Desconectar y borrar</button>
+      </div>
+      <div class="safety">
+        <div>Número de seguridad: <code id="safety-number"></code></div>
+        <button type="button" id="verify">Marcar como verificado</button>
+        <p class="hint">Comparadlo por otro canal. Si es idéntico en los dos lados, nadie se ha interpuesto en la conexión.</p>
+      </div>
+      <ol id="messages" aria-live="polite"></ol>
+      <form id="composer">
+        <textarea id="message-input" rows="2" maxlength="8000" placeholder="Escribe un mensaje… (Intro para enviar, Mayús+Intro salto de línea)"></textarea>
+        <button type="submit" class="primary">Enviar</button>
+      </form>
+    </section>
+  </main>
+
+  <footer>Código abierto (Apache-2.0). Los mensajes solo existen en la memoria de esta pestaña: al cerrarla desaparecen. Si tu contacto no está conectado, el mensaje no se guarda ni se reenvía: se descarta.</footer>
+</body>
+</html>
