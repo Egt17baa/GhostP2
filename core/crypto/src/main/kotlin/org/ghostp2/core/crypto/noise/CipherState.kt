@@ -6,7 +6,8 @@ import org.ghostp2.core.crypto.Primitives
 /**
  * CipherState de Noise (rev. 34, §5.1) con ChaCha20-Poly1305.
  * El nonce es 4 bytes a cero seguidos del contador de 64 bits en little-endian.
- * Sin clave, cifrar/descifrar devuelve el texto tal cual (solo durante el handshake).
+ * Sin clave, cifrar/descifrar devuelve el texto tal cual (solo durante el handshake; los estados
+ * públicos de transporte siempre tienen clave). Tras [wipe] cualquier uso lanza [IllegalStateException].
  */
 class CipherState internal constructor(key: ByteArray?) {
     private var k: ByteArray? = key?.copyOf()
@@ -14,9 +15,16 @@ class CipherState internal constructor(key: ByteArray?) {
     /** Contador tratado como entero sin signo de 64 bits; 2^64-1 está reservado. */
     private var n: Long = 0
 
+    private var wiped = false
+
     /** Copia de la clave actual (para derivar el ratchet), o `null` si aún no hay clave. */
     val key: ByteArray?
-        get() = k?.copyOf()
+        get() {
+            checkNotWiped()
+            return k?.copyOf()
+        }
+
+    private fun checkNotWiped() = check(!wiped) { "CipherState borrado: no puede usarse" }
 
     internal val hasKey: Boolean
         get() = k != null
@@ -34,6 +42,7 @@ class CipherState internal constructor(key: ByteArray?) {
     }
 
     fun encryptWithAd(ad: ByteArray, plaintext: ByteArray): ByteArray {
+        checkNotWiped()
         val key = k ?: return plaintext.copyOf()
         require(plaintext.size <= MAX_MESSAGE - TAG_SIZE) { "Mensaje Noise demasiado grande" }
         val ct = Primitives.chachaSeal(key, nonce(), ad, plaintext)
@@ -43,6 +52,7 @@ class CipherState internal constructor(key: ByteArray?) {
 
     /** Lanza [AuthenticationException] si la etiqueta no es válida; en ese caso el contador no avanza. */
     fun decryptWithAd(ad: ByteArray, ciphertext: ByteArray): ByteArray {
+        checkNotWiped()
         val key = k ?: return ciphertext.copyOf()
         if (ciphertext.size > MAX_MESSAGE) throw AuthenticationException("Mensaje Noise demasiado grande")
         if (ciphertext.size < TAG_SIZE) throw AuthenticationException("Mensaje Noise demasiado corto")
@@ -51,11 +61,12 @@ class CipherState internal constructor(key: ByteArray?) {
         return pt
     }
 
-    /** Borra la clave de memoria; el estado queda inutilizable para cifrar. */
+    /** Borra la clave de memoria; a partir de aquí cifrar, descifrar o leer [key] lanza [IllegalStateException]. */
     fun wipe() {
         k?.let { Primitives.wipe(it) }
         k = null
         n = 0
+        wiped = true
     }
 
     internal companion object {

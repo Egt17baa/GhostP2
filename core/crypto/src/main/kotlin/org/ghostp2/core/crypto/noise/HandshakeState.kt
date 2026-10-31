@@ -8,7 +8,8 @@ import org.ghostp2.core.crypto.Primitives
  * HandshakeState de Noise (rev. 34, §5.3 y §9) para [HandshakePattern.KKpsk2] y [HandshakePattern.XXpsk3].
  *
  * Al ser patrones PSK, cada token `e` hace también MixKey(e.pub) tras MixHash, y el token `psk`
- * hace MixKeyAndHash(psk). Si [readMessage] falla, el handshake queda abortado.
+ * hace MixKeyAndHash(psk). Si [readMessage] o [writeMessage] fallan, el handshake queda abortado
+ * y sus secretos se borran; cualquier llamada posterior lanza [IllegalStateException].
  *
  * @param remoteStatic obligatoria en KKpsk2 (pre-mensaje); debe ser `null` en XXpsk3.
  * @param fixedEphemeral solo para pruebas con vectores; en producción se genera al azar.
@@ -30,6 +31,7 @@ class HandshakeState(
     private var messageIndex = 0
     private var failed = false
     private var splitDone = false
+    private var wiped = false
 
     init {
         require(psk.size == KEY_LEN) { "La PSK debe tener 32 bytes" }
@@ -67,10 +69,18 @@ class HandshakeState(
     val remoteStaticKey: ByteArray?
         get() = remoteStaticValue?.copyOf()
 
-    fun handshakeHash(): ByteArray = symmetric.handshakeHash()
+    fun handshakeHash(): ByteArray {
+        checkUsable()
+        return symmetric.handshakeHash()
+    }
+
+    private fun checkUsable() {
+        check(!wiped) { "HandshakeState borrado: no puede usarse" }
+        check(!failed) { "Handshake abortado tras un error" }
+    }
 
     private fun checkTurn(writing: Boolean) {
-        check(!failed) { "Handshake abortado tras un error" }
+        checkUsable()
         check(!isComplete) { "El handshake ya está completo" }
         val initiatorTurn = messageIndex % 2 == 0
         check((initiatorTurn == initiator) == writing) {
@@ -98,12 +108,12 @@ class HandshakeState(
             }
             out.write(symmetric.encryptAndHash(payload))
         } catch (e: Exception) {
-            failed = true
+            abort()
             throw e
         }
         val message = out.toByteArray()
         if (message.size > CipherState.MAX_MESSAGE) {
-            failed = true
+            abort()
             throw IllegalArgumentException("Mensaje Noise demasiado grande")
         }
         advance()
@@ -140,7 +150,7 @@ class HandshakeState(
             advance()
             return payload
         } catch (e: Exception) {
-            failed = true
+            abort()
             throw e
         }
     }
@@ -172,15 +182,38 @@ class HandshakeState(
      * [handshakeHash] sigue disponible después.
      */
     fun split(): Pair<CipherState, CipherState> {
-        check(isComplete && !failed) { "El handshake no está completo" }
+        checkUsable()
+        check(isComplete) { "El handshake no está completo" }
         check(!splitDone) { "split() ya se llamó" }
         splitDone = true
         val (c1, c2) = symmetric.split()
+        wipeEphemeralAndPsk()
+        return if (initiator) c1 to c2 else c2 to c1
+    }
+
+    /**
+     * Borra todos los secretos del handshake (ck, h, efímera generada, PSK). Tras llamarlo,
+     * cualquier operación (incluida [handshakeHash]) lanza [IllegalStateException].
+     * No afecta a los CipherState ya devueltos por [split].
+     */
+    fun wipe() {
+        if (wiped) return
+        wiped = true
+        symmetric.wipe()
+        wipeEphemeralAndPsk()
+    }
+
+    private fun abort() {
+        failed = true
+        symmetric.wipe()
+        wipeEphemeralAndPsk()
+    }
+
+    private fun wipeEphemeralAndPsk() {
         // Solo se borran las efímeras generadas aquí; la fija pertenece al llamador (pruebas)
         localEphemeral?.let { if (it !== fixedEphemeral) Primitives.wipe(it.privateKey) }
         localEphemeral = null
         Primitives.wipe(psk)
-        return if (initiator) c1 to c2 else c2 to c1
     }
 
     private companion object {
