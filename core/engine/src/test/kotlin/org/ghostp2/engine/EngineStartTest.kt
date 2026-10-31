@@ -186,7 +186,7 @@ class EngineStartTest {
         try {
             val engine = MessengerEngine(tor, InMemoryIdentityRepository(), InMemoryContactRepository(), scope)
             val starting = scope.launch { engine.start() }
-            withTimeout(5_000) { engine.status.first { it == EngineStatus.StartingTor(0) } }
+            tor.awaitStarted()
             tor.mutableState.value = TorState.Starting(55)
             withTimeout(5_000) { engine.status.first { it == EngineStatus.StartingTor(55) } }
             tor.mutableState.value = TorState.Ready
@@ -208,7 +208,7 @@ class EngineStartTest {
             val contacts = InMemoryContactRepository(listOf(contact("Ana")))
             val engine = MessengerEngine(tor, InMemoryIdentityRepository(), contacts, scope)
             val starting = scope.launch { engine.start() }
-            withTimeout(5_000) { engine.status.first { it is EngineStatus.StartingTor } }
+            tor.awaitStarted()
             tor.mutableState.value = TorState.Error("sin red")
             withTimeout(5_000) { starting.join() }
             assertEquals(EngineStatus.Error("sin red"), engine.status.value)
@@ -241,6 +241,73 @@ class EngineStartTest {
             scope.cancel()
         }
     }
+
+    @Test
+    fun stopInterruptsStalledStart() = runBlocking {
+        val tor = ControlledTor(FakeTorNetwork())
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        try {
+            val engine = MessengerEngine(tor, InMemoryIdentityRepository(), InMemoryContactRepository(), scope)
+            val starting = scope.launch { engine.start() }
+            tor.awaitStarted()
+            tor.mutableState.value = TorState.Starting(5) // Tor atascado
+            withTimeout(5_000) { engine.status.first { it == EngineStatus.StartingTor(5) } }
+            withTimeout(2_000) { engine.stop() }
+            assertEquals(EngineStatus.Stopped, engine.status.value)
+            assertTrue(tor.stopped)
+            assertNull(engine.localPort)
+            withTimeout(2_000) { starting.join() }
+            // start() termina normalmente (no lanza al llamante, que no fue cancelado).
+            assertTrue(!starting.isCancelled)
+            assertEquals(EngineStatus.Stopped, engine.status.value)
+            assertEquals(0, scope.coroutineContext[Job]!!.children.count())
+            // Se puede volver a arrancar.
+            tor.autoReady = true
+            engine.start()
+            assertEquals(EngineStatus.Online, engine.status.value)
+            engine.stop()
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun torGoingOffDuringStartIsAnError() = runBlocking {
+        val tor = ControlledTor(FakeTorNetwork())
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        try {
+            val engine = MessengerEngine(tor, InMemoryIdentityRepository(), InMemoryContactRepository(), scope)
+            val starting = scope.launch { engine.start() }
+            tor.awaitStarted()
+            tor.mutableState.value = TorState.Off
+            withTimeout(5_000) { starting.join() }
+            assertEquals(EngineStatus.Error("Tor se detuvo durante el arranque"), engine.status.value)
+            assertTrue(tor.stopped)
+            assertEquals(0, scope.coroutineContext[Job]!!.children.count())
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun torBootstrapTimeoutIsAnError() = runBlocking {
+        val tor = ControlledTor(FakeTorNetwork())
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        try {
+            val contacts = InMemoryContactRepository(listOf(contact("Ana")))
+            val engine = MessengerEngine(
+                tor, InMemoryIdentityRepository(), contacts, scope, EngineConfig(torBootstrapTimeoutMillis = 200),
+            )
+            withTimeout(5_000) { engine.start() }
+            assertEquals(EngineStatus.Error("Tor no terminó de arrancar"), engine.status.value)
+            assertTrue(tor.stopped)
+            assertNull(engine.localPort)
+            assertNull(engine.myOnion.value)
+            assertEquals(0, scope.coroutineContext[Job]!!.children.count())
+        } finally {
+            scope.cancel()
+        }
+    }
 }
 
 /**
@@ -261,6 +328,11 @@ private class ControlledTor(network: FakeTorNetwork) : TorTransport {
         stopped = false
         delegate.start()
         mutableState.value = if (autoReady) TorState.Ready else TorState.Starting(0)
+    }
+
+    /** Espera a que el motor haya llamado a `start()` (antes de mover el estado desde la prueba). */
+    suspend fun awaitStarted() {
+        withTimeout(5_000) { mutableState.first { it is TorState.Starting } }
     }
 
     override suspend fun stop() {

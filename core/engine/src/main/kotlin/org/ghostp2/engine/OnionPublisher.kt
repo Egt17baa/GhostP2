@@ -72,11 +72,11 @@ internal class OnionPublisher(
         mutex.withLock { publishedOnion?.let { retire(it) } }
     }
 
+    /** Retira el servicio; si Tor falla, el error se propaga y el estado sigue diciendo "publicado". */
     private suspend fun retire(onion: String) {
-        // Se da por retirada aunque Tor falle: no reintentamos sobre un servicio en estado dudoso.
+        tor.unpublishService(onion)
         publishedOnion = null
         publishedKeys = emptySet()
-        tor.unpublishService(onion)
     }
 
     /** Si la identidad recibida es antigua (sin .onion), completa con la clave ya publicada. */

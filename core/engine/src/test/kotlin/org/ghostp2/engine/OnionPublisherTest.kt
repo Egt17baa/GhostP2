@@ -129,6 +129,39 @@ class OnionPublisherTest {
         publisher.unpublish() // idempotente
     }
 
+    /** Tor cuyo `unpublishService` puede fallar a voluntad. */
+    private class FlakyUnpublishTor(private val delegate: FakeTor) : TorTransport by delegate {
+        @Volatile var failUnpublish = false
+
+        override suspend fun unpublishService(onion: String) {
+            if (failUnpublish) throw IOException("fallo al retirar")
+            delegate.unpublishService(onion)
+        }
+    }
+
+    @Test
+    fun failedUnpublishKeepsPublishedState() = runBlocking {
+        val net = FakeTorNetwork()
+        val tor = FlakyUnpublishTor(FakeTor(net).also { it.start() })
+        val publisher = OnionPublisher(tor, InMemoryIdentityRepository(), 7420, 5555)
+        val c1 = contact()
+        val id = publisher.sync(identity(), listOf(c1))
+        tor.failUnpublish = true
+        assertThrows<IOException> { publisher.unpublish() }
+        assertEquals(id.onion, publisher.publishedOnion)
+        assertThrows<IOException> { publisher.sync(id, emptyList()) }
+        assertEquals(id.onion, publisher.publishedOnion)
+        // Cambio de claves con retirada fallida: tampoco se da por retirada ni se republica.
+        assertThrows<IOException> { publisher.sync(id, listOf(c1, contact())) }
+        assertEquals(id.onion, publisher.publishedOnion)
+        assertEquals(listOf(c1.myClientAuthPublic.hex()), net.published.value[id.onion]!!.clientAuthPublicKeys.map { it.hex() })
+        // Cuando Tor se recupera, la retirada funciona.
+        tor.failUnpublish = false
+        publisher.unpublish()
+        assertNull(publisher.publishedOnion)
+        assertTrue(net.published.value.isEmpty())
+    }
+
     @Test
     fun listenerDeliversSocketsAndClosesCleanly() = runBlocking {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)

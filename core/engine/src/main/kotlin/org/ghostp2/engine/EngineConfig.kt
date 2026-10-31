@@ -8,4 +8,6 @@ data class EngineConfig(
     val backoffMaxMillis: Long = 300_000,
     val unpairDeliveryWindowMillis: Long = 120_000,
     val connectTimeoutMillis: Long = 60_000,
+    /** Tiempo máximo para que Tor llegue a `Ready` al arrancar el motor. */
+    val torBootstrapTimeoutMillis: Long = 180_000,
 )
