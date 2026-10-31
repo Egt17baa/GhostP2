@@ -19,4 +19,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "GhostP2"
 
-include(":core:crypto", ":core:protocol", ":app")
+include(":core:crypto", ":core:protocol", ":core:engine", ":app")
