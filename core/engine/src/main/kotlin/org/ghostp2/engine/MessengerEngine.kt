@@ -31,6 +31,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import org.ghostp2.core.crypto.Invitation
 import org.ghostp2.core.crypto.KeyPair25519
 import org.ghostp2.core.crypto.Primitives
+import org.ghostp2.core.crypto.SafetyNumber
 import org.ghostp2.core.protocol.FrameStream
 import org.ghostp2.core.protocol.HandshakeFailedException
 import org.ghostp2.core.protocol.Pairing
@@ -46,12 +47,17 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 
+/** Origen de un [EngineStatus.Error]: el almacenamiento cifrado o cualquier otra cosa (Tor). */
+enum class EngineErrorKind { TOR, STORAGE }
+
 /** Estado visible del motor. */
 sealed interface EngineStatus {
     data object Stopped : EngineStatus
     data class StartingTor(val percent: Int) : EngineStatus
     data object Online : EngineStatus
-    data class Error(val message: String) : EngineStatus
+
+    /** Fallo al arrancar o con el motor en marcha; [kind] es `STORAGE` solo si falló el almacenamiento. */
+    data class Error(val message: String, val kind: EngineErrorKind = EngineErrorKind.TOR) : EngineStatus
 }
 
 /** Resultado de [MessengerEngine.deleteContact]: si el contacto recibió el aviso `Unpair`. */
@@ -75,11 +81,13 @@ const val MAX_CONTACT_NAME_CHARS = 64
  * no queda ninguna viva tras detener el motor.
  *
  * Transiciones: `Stopped → StartingTor(p) → Online`, o `→ Error(mensaje)` si Tor falla (en ese caso se
- * liberan los recursos y se puede volver a llamar a [start]). Tor falla si informa `Error`, si vuelve a
- * `Off` durante el arranque o si no está listo en `EngineConfig.torBootstrapTimeoutMillis`. Con el
- * motor `Online`, si Tor pasa a `Error`/`Off` se libera todo y se pasa a `Error` (regla R18). [start] y
- * [stop] están serializados y son idempotentes; [stop] cancela un [start] en curso (que termina en
- * `Stopped` sin lanzar).
+ * liberan los recursos y se puede volver a llamar a [start]). Si al arrancar falla el almacenamiento
+ * (leer contactos o identidad, o guardar la identidad), el estado es `Error(STORAGE_ERROR_MESSAGE,
+ * EngineErrorKind.STORAGE)` (Tor no llega a arrancar si el fallo es anterior a él); cualquier otro
+ * fallo es de `kind = TOR`. Tor falla si informa `Error`, si vuelve a `Off` durante el arranque o si
+ * no está listo en `EngineConfig.torBootstrapTimeoutMillis`. Con el motor `Online`, si Tor pasa a
+ * `Error`/`Off` se libera todo y se pasa a `Error` (regla R18). [start] y [stop] están serializados y
+ * son idempotentes; [stop] cancela un [start] en curso (que termina en `Stopped` sin lanzar).
  */
 class MessengerEngine(
     private val tor: TorTransport,
@@ -90,6 +98,8 @@ class MessengerEngine(
     private val random: java.util.Random = java.security.SecureRandom(),
     /** Reloj de pared para las marcas de tiempo de los mensajes (inyectable en pruebas). */
     clock: () -> Long = System::currentTimeMillis,
+    /** Borrados de contacto pendientes, para reanudarlos al arrancar (ver [deleteContact]). */
+    private val deletions: DeletionJournal = NoDeletionJournal,
 ) {
     private val mutableStatus = MutableStateFlow<EngineStatus>(EngineStatus.Stopped)
     val status: StateFlow<EngineStatus> = mutableStatus.asStateFlow()
@@ -148,30 +158,30 @@ class MessengerEngine(
      * Borrados en curso por id (local o aviso recibido): las llamadas simultáneas comparten el resultado.
      * Solo se modifica con su propio monitor, en el mismo paso que se publica [deleting].
      */
-    private val deletions = HashMap<String, CompletableDeferred<UnpairDelivery>>()
+    private val inFlightDeletions = HashMap<String, CompletableDeferred<UnpairDelivery>>()
 
     private val mutableDeleting = MutableStateFlow<Set<String>>(emptySet())
 
     /**
      * Ids de contactos que se están borrando ahora mismo ([deleteContact] en curso, p. ej. esperando a
-     * entregar `Unpair`, o un aviso `Unpair` recibido que se está aplicando). Solo en memoria: si el
-     * proceso muere a mitad, el borrado no se reanuda (plan 3).
+     * entregar `Unpair`, o un aviso `Unpair` recibido que se está aplicando). Este conjunto es solo de
+     * memoria; los borrados locales constan además en el [DeletionJournal] y se reanudan al arrancar.
      */
     val deleting: StateFlow<Set<String>> = mutableDeleting.asStateFlow()
 
     /** Registra `mine` como el borrado en curso de `id`; si ya había uno, lo devuelve (y no registra nada). */
     private fun claimDeletion(id: String, mine: CompletableDeferred<UnpairDelivery>): CompletableDeferred<UnpairDelivery>? =
-        synchronized(deletions) {
-            deletions[id]?.let { return it }
-            deletions[id] = mine
-            mutableDeleting.value = deletions.keys.toSet()
+        synchronized(inFlightDeletions) {
+            inFlightDeletions[id]?.let { return it }
+            inFlightDeletions[id] = mine
+            mutableDeleting.value = inFlightDeletions.keys.toSet()
             null
         }
 
     private fun releaseDeletion(id: String, mine: CompletableDeferred<UnpairDelivery>) {
-        synchronized(deletions) {
-            if (deletions[id] === mine) deletions.remove(id)
-            mutableDeleting.value = deletions.keys.toSet()
+        synchronized(inFlightDeletions) {
+            if (inFlightDeletions[id] === mine) inFlightDeletions.remove(id)
+            mutableDeleting.value = inFlightDeletions.keys.toSet()
         }
     }
 
@@ -271,7 +281,11 @@ class MessengerEngine(
                 } catch (secondary: Exception) {
                     e.addSuppressed(secondary)
                 } finally {
-                    mutableStatus.value = EngineStatus.Error(e.message ?: e.javaClass.simpleName)
+                    mutableStatus.value = if (e is StorageStartException) {
+                        EngineStatus.Error(STORAGE_ERROR_MESSAGE, EngineErrorKind.STORAGE)
+                    } else {
+                        EngineStatus.Error(e.message ?: e.javaClass.simpleName)
+                    }
                 }
             }
         }
@@ -294,15 +308,19 @@ class MessengerEngine(
         }
     }
 
-    /** Arranque completo: identidad, Tor, listener y publicación. Lanza [TorStartException] si Tor falla. */
+    /**
+     * Arranque completo: identidad, Tor, listener, publicación y reanudación de los borrados pendientes.
+     * Lanza [TorStartException] si Tor falla y [StorageStartException] si falla una llamada a los
+     * repositorios (también el guardado de la identidad que hace [OnionPublisher] durante el arranque).
+     */
     private suspend fun bootstrap(engineScope: CoroutineScope) {
         // Historial activo desde el principio: un envío mientras Tor arranca queda como NOT_CONNECTED.
         chats.open()
-        chats.applySnapshot(contacts.all().map { it.id })
+        chats.applySnapshot(storage { contacts.all() }.map { it.id })
         engineScope.launch(start = CoroutineStart.UNDISPATCHED) {
             contacts.contacts.collect { list -> chats.applySnapshot(list.map { it.id }) }
         }
-        val id = identities.load() ?: createIdentity()
+        val id = storage { identities.load() } ?: storage { createIdentity() }
         identity = id
         startTor(engineScope)
         registerClientAuth()
@@ -318,11 +336,75 @@ class MessengerEngine(
         connections = c
         val l = Listener(engineScope, ::onIncoming)
         listener = l
-        val p = OnionPublisher(tor, identities, config.virtualPort, l.port)
+        val guarded = StartupGuardedIdentities(identities)
+        val p = OnionPublisher(tor, guarded, config.virtualPort, l.port)
         publisher = p
-        identity = p.sync(id, contacts.all())
+        identity = p.sync(id, storage { contacts.all() })
+        // Pasado el arranque, los fallos al guardar vuelven a llegar tal cual a quien llame a `sync`.
+        guarded.starting = false
         mutableMyOnion.value = p.publishedOnion
         c.start()
+        resumePendingDeletions(engineScope)
+    }
+
+    /**
+     * Reanuda los borrados que quedaron a medias en una ejecución anterior (ver [deleteContact]): cada id
+     * del diario que sigue siendo un contacto guardado se borra en el scope del motor (con aviso
+     * `Unpair`, como un borrado normal); los demás se quitan del diario. Si no se puede leer el diario,
+     * no se reanuda ninguno.
+     */
+    private suspend fun resumePendingDeletions(engineScope: CoroutineScope) {
+        val pending = try {
+            deletions.pending()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            emptySet()
+        }
+        if (pending.isEmpty()) return
+        val stored = storage { contacts.all() }.map { it.id }.toSet()
+        for (contactId in pending) {
+            if (contactId in stored) {
+                // Sin dejar escapar fallos: una excepción no capturada en el scope del motor cerraría la app.
+                engineScope.launch(start = CoroutineStart.UNDISPATCHED) { bestEffort { deleteContact(contactId) } }
+            } else {
+                bestEffort { deletions.remove(contactId) }
+            }
+        }
+    }
+
+    /** Ejecuta una llamada a los repositorios durante el arranque: un fallo (no cancelación) pasa a [StorageStartException]. */
+    private suspend inline fun <T> storage(block: () -> T): T =
+        try {
+            block()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            throw StorageStartException(e)
+        }
+
+    /**
+     * Repositorio de identidad que recibe [OnionPublisher]: mientras [starting], sus fallos pasan a
+     * [StorageStartException] (el `sync` del arranque también llama a Tor, cuyos fallos no son del
+     * almacenamiento). Después se comporta igual que `inner`.
+     */
+    private class StartupGuardedIdentities(private val inner: IdentityRepository) : IdentityRepository {
+        @Volatile var starting = true
+
+        override suspend fun load(): Identity? = guard { inner.load() }
+
+        override suspend fun save(identity: Identity) = guard { inner.save(identity) }
+
+        override suspend fun wipe() = guard { inner.wipe() }
+
+        private suspend inline fun <T> guard(block: () -> T): T =
+            try {
+                block()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (starting) throw StorageStartException(e) else throw e
+            }
     }
 
     /**
@@ -334,7 +416,7 @@ class MessengerEngine(
      * arranque (ellos sí pueden llamarnos).
      */
     private suspend fun registerClientAuth() {
-        val active = contacts.all().filter { it.status == ContactStatus.ACTIVE }
+        val active = storage { contacts.all() }.filter { it.status == ContactStatus.ACTIVE }
         if (active.isEmpty()) return
         val pending: MutableSet<String> = ConcurrentHashMap.newKeySet<String>().apply { addAll(active.map { it.id }) }
         withTimeoutOrNull(config.clientAuthRegistrationTimeoutMillis) {
@@ -435,6 +517,26 @@ class MessengerEngine(
         chats.clear(contactId)
     }
 
+    /**
+     * Número de seguridad con el contacto (30 dígitos en 6 grupos de 5), el mismo que dio `Paired` al
+     * emparejar: solo depende de mi identidad pública y de la suya. Funciona con el motor parado (lee la
+     * identidad del repositorio). Las claves privadas de la identidad leída se rellenan con ceros al
+     * terminar, salvo que sean los mismos arrays que usa la ejecución en curso.
+     * @throws NoSuchElementException si [contactId] no es un contacto guardado.
+     */
+    suspend fun safetyNumber(contactId: String): String {
+        val contact = contacts.all().firstOrNull { it.id == contactId }
+            ?: throw NoSuchElementException("Contacto desconocido")
+        val mine = identities.load() ?: throw IllegalStateException("No hay identidad local")
+        try {
+            return SafetyNumber.compute(mine.identityPublic, contact.peerIdentity)
+        } finally {
+            val live = identity
+            if (mine.identityPrivate !== live?.identityPrivate) Primitives.wipe(mine.identityPrivate)
+            mine.onionPrivateKey?.let { key -> if (key !== live?.onionPrivateKey) Primitives.wipe(key) }
+        }
+    }
+
     // --- Contactos: borrar, aviso recibido, renombrar, verificar y borrar todo (Task 7) ---
 
     /**
@@ -459,6 +561,10 @@ class MessengerEngine(
      * relanza su excepción (en esta ejecución el contacto sigue olvidado). Si mientras se intentaba
      * entregar se volvió a emparejar con el mismo contacto (mismo id), el emparejamiento nuevo se
      * conserva intacto y el borrado antiguo devuelve `NOT_DELIVERED` (ver [removeLocally]).
+     *
+     * Diario: tras leer el contacto se apunta su id en el [DeletionJournal] (si falla, el borrado sigue
+     * solo en memoria) y se quita al terminar el borrado local. Si el proceso muere a mitad, el siguiente
+     * [start] reanuda el borrado.
      */
     suspend fun deleteContact(contactId: String): UnpairDelivery {
         val mine = CompletableDeferred<UnpairDelivery>()
@@ -484,9 +590,16 @@ class MessengerEngine(
         } ?: return UnpairDelivery.NOT_DELIVERED
         var delivered = false
         try {
+            // Apuntado para reanudarlo si el proceso muere a mitad; si no se puede, sigue solo en memoria.
+            bestEffort { deletions.add(contactId) }
             delivered = connections?.deliverUnpair(contactId, config.unpairDeliveryWindowMillis) == true
         } finally {
-            withContext(NonCancellable) { removeLocally(contact) }
+            withContext(NonCancellable) {
+                removeLocally(contact)
+                // También si se conservó un re-emparejamiento: este borrado ya terminó. Si removeLocally
+                // lanzó (el repositorio no pudo borrar), la entrada se queda y se reanuda al arrancar.
+                bestEffort { deletions.remove(contactId) }
+            }
         }
         return if (delivered) UnpairDelivery.DELIVERED else UnpairDelivery.NOT_DELIVERED
     }
@@ -1206,3 +1319,9 @@ private inline fun succeeded(block: () -> Unit): Boolean =
 
 /** Fallo al arrancar Tor; el mensaje es el que se muestra en [EngineStatus.Error]. */
 internal class TorStartException(message: String) : Exception(message)
+
+/** Fallo del almacenamiento durante el arranque; [MessengerEngine.start] lo muestra como `Error(…, STORAGE)`. */
+internal class StorageStartException(cause: Throwable) : Exception("Fallo del almacenamiento al arrancar", cause)
+
+/** Mensaje de [EngineStatus.Error] cuando falla el almacenamiento al arrancar. */
+internal const val STORAGE_ERROR_MESSAGE = "No se pudieron leer o guardar tus datos cifrados"

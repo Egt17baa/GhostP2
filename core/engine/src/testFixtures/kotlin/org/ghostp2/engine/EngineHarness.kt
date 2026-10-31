@@ -8,7 +8,7 @@ import kotlinx.coroutines.runBlocking
 
 /**
  * Banco de pruebas: `n` motores sobre una [FakeTorNetwork] compartida, cada uno con su [FakeTor],
- * repositorios en memoria y su propio `scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)`
+ * repositorios en memoria, su diario de borrados pendientes ([InMemoryDeletionJournal]) y su propio `scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)`
  * (regla R7). [close] detiene todos los motores y cancela sus scopes.
  *
  * Uso: `EngineHarness(2).use { h -> h.startAll(); h.engine(0) ... }`.
@@ -25,6 +25,7 @@ class EngineHarness(
         val tor: FakeTor,
         val identities: InMemoryIdentityRepository,
         val contacts: InMemoryContactRepository,
+        val journal: InMemoryDeletionJournal,
         val scope: CoroutineScope,
         val engine: MessengerEngine,
     )
@@ -33,8 +34,9 @@ class EngineHarness(
         val tor = FakeTor(network, forgetClientAuthOnStop)
         val identities = InMemoryIdentityRepository()
         val contacts = InMemoryContactRepository()
+        val journal = InMemoryDeletionJournal()
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-        Node(tor, identities, contacts, scope, MessengerEngine(tor, identities, contacts, scope, config))
+        Node(tor, identities, contacts, journal, scope, MessengerEngine(tor, identities, contacts, scope, config, deletions = journal))
     }
 
     fun node(i: Int): Node = nodes[i]
@@ -46,6 +48,8 @@ class EngineHarness(
     fun identities(i: Int): InMemoryIdentityRepository = nodes[i].identities
 
     fun contacts(i: Int): InMemoryContactRepository = nodes[i].contacts
+
+    fun journal(i: Int): InMemoryDeletionJournal = nodes[i].journal
 
     fun scope(i: Int): CoroutineScope = nodes[i].scope
 

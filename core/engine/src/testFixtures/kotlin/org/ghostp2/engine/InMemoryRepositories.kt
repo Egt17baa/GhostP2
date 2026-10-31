@@ -58,3 +58,18 @@ class InMemoryContactRepository(initial: List<Contact> = emptyList()) : ContactR
         state.value = Snapshot(emptyList())
     }
 }
+
+/** Diario de borrados pendientes en memoria para pruebas. */
+class InMemoryDeletionJournal(initial: Set<String> = emptySet()) : DeletionJournal {
+    private val ids = MutableStateFlow(initial)
+
+    override suspend fun pending(): Set<String> = ids.value
+
+    override suspend fun add(contactId: String) {
+        ids.update { it + contactId }
+    }
+
+    override suspend fun remove(contactId: String) {
+        ids.update { it - contactId }
+    }
+}

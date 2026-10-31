@@ -346,6 +346,48 @@ class EngineStartTest {
             scope.cancel()
         }
     }
+
+    @Test
+    fun identitySaveFailureIsStorageError() = runBlocking {
+        val tor = ControlledTor(FakeTorNetwork()).apply { autoReady = true }
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        try {
+            // Almacenamiento que no puede guardar: la identidad nueva no se puede crear.
+            val identities = object : IdentityRepository by InMemoryIdentityRepository() {
+                override suspend fun save(identity: Identity) {
+                    throw IOException("disco lleno")
+                }
+            }
+            val engine = MessengerEngine(tor, identities, InMemoryContactRepository(), scope)
+            engine.start()
+            val status = engine.status.value
+            assertEquals(
+                EngineStatus.Error("No se pudieron leer o guardar tus datos cifrados", EngineErrorKind.STORAGE),
+                status,
+            )
+            assertEquals(0, tor.startCalls) { "Tor no debe arrancar" }
+            assertNull(engine.localPort)
+            assertEquals(0, scope.coroutineContext[Job]!!.children.count())
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun torFailureIsTorError() = runBlocking {
+        val tor = ControlledTor(FakeTorNetwork()).apply { failOnStart = IOException("binario ausente") }
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        try {
+            val engine = MessengerEngine(tor, InMemoryIdentityRepository(), InMemoryContactRepository(), scope)
+            engine.start()
+            val status = engine.status.value
+            assertTrue(status is EngineStatus.Error)
+            assertEquals(EngineErrorKind.TOR, (status as EngineStatus.Error).kind)
+            assertEquals("binario ausente", status.message)
+        } finally {
+            scope.cancel()
+        }
+    }
 }
 
 /**
@@ -361,7 +403,10 @@ private class ControlledTor(network: FakeTorNetwork) : TorTransport {
     @Volatile var autoReady = false
     @Volatile var failOnStart: Exception? = null
 
+    @Volatile var startCalls = 0
+
     override suspend fun start() {
+        startCalls++
         failOnStart?.let { throw it }
         stopped = false
         delegate.start()

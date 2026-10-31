@@ -40,3 +40,26 @@ interface ContactRepository {
 
     suspend fun wipe()
 }
+
+/**
+ * Diario de borrados de contacto pendientes (persistente en la app): [MessengerEngine.deleteContact]
+ * apunta el id antes de empezar y lo quita al terminar el borrado local; al arrancar, el motor reanuda
+ * los que quedaron a medias (p. ej. si el proceso murió mientras esperaba entregar `Unpair`).
+ * Solo guarda ids de contacto, nunca claves ni contenido.
+ */
+interface DeletionJournal {
+    suspend fun pending(): Set<String>
+
+    suspend fun add(contactId: String)
+
+    suspend fun remove(contactId: String)
+}
+
+/** Diario que no guarda nada: los borrados interrumpidos no se reanudan (comportamiento anterior). */
+object NoDeletionJournal : DeletionJournal {
+    override suspend fun pending(): Set<String> = emptySet()
+
+    override suspend fun add(contactId: String) = Unit
+
+    override suspend fun remove(contactId: String) = Unit
+}
