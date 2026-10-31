@@ -12,7 +12,8 @@ import org.ghostp2.engine.Identity
 /**
  * Contenido completo de `ghostp2.bin`: identidad y contactos en un único objeto CBOR, para que escribir
  * uno nunca pierda el otro. Inmutable; las conversiones a/desde el modelo del motor copian siempre los
- * `ByteArray` (el motor pone a cero los arrays que entrega y los que recibe).
+ * `ByteArray`, así que el motor puede rellenar con ceros sus arrays sin tocar los de aquí. Ni estas copias
+ * ni muchas de las que entrega se rellenan con ceros: quedan para el recolector de basura (PROTOCOLO §15).
  */
 @Serializable
 class StoredData internal constructor(

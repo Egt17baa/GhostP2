@@ -27,6 +27,10 @@ class EncryptedStoreTest {
     @Serializable
     data class Note(val text: String = "", val count: Int = 0)
 
+    /** Una versión futura de [Note] con un campo más. */
+    @Serializable
+    data class NoteV2(val text: String = "", val count: Int = 0, val extra: String = "")
+
     private val label = "ghostp2-store-v1".toByteArray()
     private val aead = TestAeads.newAead()
 
@@ -65,6 +69,14 @@ class EncryptedStoreTest {
         val raw = file().readBytes()
         assertFalse(String(raw, Charsets.ISO_8859_1).contains("texto-muy-secreto"))
         assertEquals("primer byte = versión del formato", 1, raw[0].toInt())
+    }
+
+    @Test
+    fun payloadWithAnUnknownFieldIsStillReadable() = runBlocking {
+        // Escrito por una versión más nueva de la app (con un campo que esta no conoce)...
+        EncryptedStore(file(), aead, NoteV2.serializer(), NoteV2(), label).update { NoteV2("hola", 2, "nuevo") }
+        // ...esta versión lo lee ignorando el campo desconocido, en vez de darlo por ilegible.
+        assertEquals(Note("hola", 2), store().read())
     }
 
     @Test

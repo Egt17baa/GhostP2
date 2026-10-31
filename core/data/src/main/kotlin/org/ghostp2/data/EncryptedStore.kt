@@ -42,6 +42,14 @@ class StoreUnavailableException(cause: Throwable) : Exception("Almacenamiento no
 /** Causa saneada de un CBOR ilegible: la excepción original podría citar parte del texto en claro. */
 private class UnreadableContentException : Exception("Contenido descifrado no decodificable")
 
+/**
+ * CBOR del almacén. `ignoreUnknownKeys`: un archivo escrito por una versión más nueva de la app (con
+ * campos que esta no conoce) se sigue leyendo en vez de darlo por ilegible (que solo ofrecería "Empezar
+ * de cero"). Un valor desconocido de un enum o un campo obligatorio ausente siguen siendo ilegibles.
+ */
+@OptIn(ExperimentalSerializationApi::class)
+private val STORE_CBOR = Cbor { ignoreUnknownKeys = true }
+
 /** Causa de un archivo que no empieza por la versión de formato conocida. */
 private class UnknownFormatException : Exception("Versión de formato desconocida")
 
@@ -55,7 +63,8 @@ private class UnknownFormatException : Exception("Versión de formato desconocid
  * - Toda lectura-modificación-escritura pasa por un único [Mutex]; [data] publica tras cada commit, en
  *   orden, nunca una instantánea anterior después de otra más reciente.
  * - Archivo no auténtico o indecodificable ⇒ [StoreCorruptedException] (también en [update], que entonces
- *   no escribe nada). Solo [reset] borra un archivo dañado.
+ *   no escribe nada). Solo [reset] borra un archivo dañado. Los campos CBOR desconocidos (de una versión
+ *   más nueva) se ignoran: no hacen el archivo ilegible.
  * - Error de E/S al leer o escribir ⇒ [StoreUnavailableException]. Las excepciones que lance el propio
  *   `aead` y no sean [GeneralSecurityException] (p. ej. las de [RecoverableAead]) salen tal cual.
  * - El CBOR en claro que crea esta clase se pone a cero tras cifrar y tras decodificar.
@@ -150,7 +159,7 @@ class EncryptedStore<T>(
             throw StoreCorruptedException(e)
         }
         try {
-            return Cbor.decodeFromByteArray(serializer, plain)
+            return STORE_CBOR.decodeFromByteArray(serializer, plain)
         } catch (_: Exception) {
             throw StoreCorruptedException(UnreadableContentException())
         } finally {
@@ -164,7 +173,7 @@ class EncryptedStore<T>(
             deleteFiles()
             return
         }
-        val plain = Cbor.encodeToByteArray(serializer, value)
+        val plain = STORE_CBOR.encodeToByteArray(serializer, value)
         val sealed = try {
             aead.encrypt(plain, associatedData)
         } catch (e: GeneralSecurityException) {
