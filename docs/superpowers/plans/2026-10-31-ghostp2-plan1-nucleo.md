@@ -292,3 +292,14 @@
 - [ ] **Step 3:** Escribir `docs/PROTOCOLO.md`: nombres Noise, prólogos, derivaciones HKDF (todas las cadenas `info` de este plan), formato de trama y de ratchet, mensajes CBOR, tiempos y límites, y el modelo de amenazas resumido del spec §7.
 - [ ] **Step 4:** Reescribir `README.md`: qué es GhostP2, estado (núcleo listo; Android en planes 2 y 3), cómo ejecutar `./gradlew test`, enlace a `docs/PROTOCOLO.md`.
 - [ ] **Step 5:** Commit `test(protocol): prueba de extremo a extremo con sockets y documentación del protocolo`.
+
+## Decisiones tomadas durante la ejecución (registro)
+
+- Ruling R1: rename crypto `SecurityException` → `ChannelSecurityException` (org.ghostp2.core.crypto) — avoids shadowing java.lang.SecurityException — cost if wrong: trivial rename.
+- Ruling R2: tests needing a duplex stream use a shared test helper of connected loopback `Socket` pairs (or java.nio Pipe-backed streams), not PipedInput/OutputStream — Piped streams break across thread pools — cost: none.
+- Ruling R3: PeerSession timers (heartbeat 20s, idle 60s, ack 30s) run via `delay` on the injected scope so `runTest` virtual time drives them; blocking reads stay on Dispatchers.IO. `clock` param may be dropped if unused — cost: minor API diff.
+- Ruling R4: SafetyNumber = h0=SHA256(label||low||high) then 5200 further iterations h=SHA256(h||low||high) — matches plan text literally; Task 9 PROTOCOLO.md must state it — cost: none (no deployed peers).
+- Ruling R5: Invitation as plain class with contentEquals/hashCode and secret-hiding toString instead of data class — data class would leak secret in toString — cost: none.
+- Ruling R6: KKpsk2 responder cannot verify pairSecret from msg1 (psk only in msg2) — add key confirmation: after handshake the initiator immediately sends one RatchetChannel-encrypted confirm frame (fixed plaintext "GhostP2 session confirm v1"); respond() decrypts and checks it (constant-time) before returning, all inside the 30 s timeout; failure → HandshakeFailedException. Restores the brief's sessionRejectsWrongPairSecret on both sides — cost: one extra frame per session; PeerSession counters start after it.
+- Ruling R7: plan 2 must run PeerSession with a service-owned SupervisorJob scope on Dispatchers.Default (never Main/Main.immediate/Unconfined) and collect events there — residual minor "immediate dispatchers break id-before-event" — cost: none if plan 2 follows it.
+- Ruling R8: ack-queue overflow closes with SECURITY but may happen to an honest peer on a very slow link; plan 2 must not treat Closed(SECURITY) alone as proof of attack (no auto-block) — cost: misleading label only.
