@@ -40,6 +40,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.map
@@ -96,12 +97,17 @@ fun DiagnosticScreen(container: AppContainer, actions: DiagnosticActions, batter
 
 @Composable
 private fun CorruptedPanel(container: AppContainer) {
+    val ui = rememberCoroutineScope()
     var failed by remember { mutableStateOf(false) }
     var confirming by remember { mutableStateOf(false) }
     Text(stringResource(R.string.store_corrupted), style = MaterialTheme.typography.titleMedium)
     Text(stringResource(R.string.store_corrupted_detail))
     if (failed) Text(stringResource(R.string.store_reset_failed))
-    Button(onClick = { confirming = true }) { Text(stringResource(R.string.store_reset)) }
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        // Solo lectura: vuelve a comprobar (p. ej. Keystore tardó en responder) sin borrar nada.
+        OutlinedButton(onClick = { ui.launch { container.checkStorage() } }) { Text(stringResource(R.string.diag_retry)) }
+        Button(onClick = { confirming = true }) { Text(stringResource(R.string.store_reset)) }
+    }
     if (confirming) {
         ConfirmDialog(
             title = stringResource(R.string.store_reset_confirm_title),
@@ -109,7 +115,7 @@ private fun CorruptedPanel(container: AppContainer) {
             onConfirm = {
                 confirming = false
                 // En el scope del proceso: salir de la pantalla no deja el borrado a medias.
-                container.scope.launch { failed = runCatching { container.wipeCorrupted() }.isFailure }
+                container.scope.launch { failed = !attempt { container.wipeCorrupted() } }
             },
             onDismiss = { confirming = false },
         )
@@ -141,12 +147,23 @@ private fun RetryPanel(container: AppContainer, state: StorageState.FailureStrea
             text = stringResource(R.string.store_reset_confirm_again_text),
             onConfirm = {
                 step = 0
-                container.scope.launch { failed = runCatching { container.forceReset() }.isFailure }
+                container.scope.launch { failed = !attempt { container.forceReset() } }
             },
             onDismiss = { step = 0 },
         )
     }
 }
+
+/** `true` si `block` termina sin lanzar; la cancelación se relanza (a diferencia de `runCatching`). */
+private suspend inline fun attempt(block: () -> Unit): Boolean =
+    try {
+        block()
+        true
+    } catch (e: CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        false
+    }
 
 /** Contactos guardados, o error de lectura (se muestra, no se esconde como lista vacía). */
 private sealed interface ContactsView {
@@ -425,6 +442,7 @@ private fun chatLine(item: ChatItem): String {
     val body = when (val c = item.content) {
         is ChatContent.Text -> c.text
         is ChatContent.Photo -> stringResource(R.string.diag_photo) // nunca se leen los bytes vivos
+        is ChatContent.PhotoDiscarded -> stringResource(R.string.diag_photo_discarded)
     }
     val arrow = if (item.direction == Direction.OUT) "→" else "←"
     val state = when (item.status) {

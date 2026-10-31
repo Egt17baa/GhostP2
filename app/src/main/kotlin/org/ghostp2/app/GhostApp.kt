@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
@@ -45,6 +46,15 @@ open class GhostApp : Application() {
         super.onCreate()
         Notifications.createChannels(this)
     }
+}
+
+/**
+ * Manejador de los scopes del proceso ([AppContainer.scope], que heredan el motor y sus sesiones, y el del
+ * [GhostService]): una excepción inesperada en una corrutina hija no cierra la app (en Android, sin
+ * manejador, mataría el proceso). No registra nada: la excepción podría citar datos de la app.
+ */
+internal val SilentExceptionHandler = CoroutineExceptionHandler { _, _ ->
+    // A propósito vacío: sin registros (regla de no registrar contenido ni claves).
 }
 
 /** El contenedor del proceso a partir de cualquier `Context`. */
@@ -138,8 +148,11 @@ class AppContainer internal constructor(
 
     private val appContext: Context = context.applicationContext
 
-    /** Scope del proceso (vive lo que la aplicación). */
-    val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    /**
+     * Scope del proceso (vive lo que la aplicación), con [SilentExceptionHandler]: el motor lo recibe y
+     * todos sus scopes (bucles, sesiones) lo heredan.
+     */
+    val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default + SilentExceptionHandler)
 
     val engine = MessengerEngine(tor, store.identities, store.contacts, scope)
 

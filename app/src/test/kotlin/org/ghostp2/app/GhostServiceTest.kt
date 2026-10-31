@@ -8,7 +8,13 @@ import android.app.Service
 import android.content.Intent
 import android.net.ConnectivityManager
 import android.os.Looper
+import kotlinx.coroutines.CoroutineExceptionHandler
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -279,6 +285,110 @@ class GhostServiceTest {
         }
         assertFalse(everything.any { it.contains(SECRET) })
         assertEquals(Notification.VISIBILITY_PRIVATE, n.visibility)
+    }
+
+    @Test
+    fun stopUsesTheLatestStartIdSoAQueuedStartIsNotLost() {
+        val controller = startService() // startId 1
+        val service = controller.get()
+        eventually { engine.status.value == EngineStatus.Online }
+
+        service.onStartCommand(GhostService.stopIntent(app), 0, 2)
+
+        // stopSelfResult(2): si el sistema ya tuviera encolado un START posterior (3), no se detendría.
+        assertEquals(2, shadowOf(service).stopSelfResultId)
+    }
+
+    @Test
+    fun brokenStorageStopsWithTheLatestStartId() {
+        app.storage.failure = StoreUnavailableException(IOException("x"))
+        val service = Robolectric.buildService(GhostService::class.java, GhostService.startIntent(app)).create().get()
+
+        service.onStartCommand(GhostService.startIntent(app), 0, 5)
+
+        eventually { shadowOf(service).isStoppedBySelf }
+        assertEquals(5, shadowOf(service).stopSelfResultId)
+    }
+
+    @Test
+    fun containerAndServiceScopesSwallowChildCrashes() {
+        val uncaught = java.util.Collections.synchronizedList(mutableListOf<Throwable>())
+        val previous = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { _, e -> uncaught += e }
+        try {
+            val service = startService().get()
+            assertNotNull(app.container.scope.coroutineContext[CoroutineExceptionHandler])
+            assertNotNull(service.scope.coroutineContext[CoroutineExceptionHandler])
+            runBlocking {
+                app.container.scope.launch { throw IllegalStateException("fallo simulado") }.join()
+                service.scope.launch { throw IllegalStateException("fallo simulado") }.join()
+                // Como los scopes del motor: SupervisorJob hijo que hereda el contexto del proceso.
+                val child = CoroutineScope(app.container.scope.coroutineContext + SupervisorJob(app.container.scope.coroutineContext[Job]))
+                child.launch { throw IllegalStateException("fallo simulado") }.join()
+            }
+            assertTrue(app.container.scope.isActive)
+            assertTrue(service.scope.isActive)
+            assertTrue(uncaught.toString(), uncaught.isEmpty())
+        } finally {
+            Thread.setDefaultUncaughtExceptionHandler(previous)
+        }
+    }
+
+    @Test
+    fun networkReturnRestartsAnEngineInErrorAtMostOncePer30Seconds() {
+        var now = 1_000_000L
+        val service = startService().get()
+        service.elapsedRealtime = { now }
+        eventually { engine.status.value == EngineStatus.Online }
+        val callback = networkCallbacks().single()
+
+        runBlocking { app.tor.stop() } // Tor se cae: Error (R18)
+        eventually { engine.status.value is EngineStatus.Error }
+        callback.onAvailable(ShadowNetwork.newInstance(1))
+        eventually { engine.status.value == EngineStatus.Online } // un reinicio al volver la red
+
+        runBlocking { app.tor.stop() }
+        eventually { engine.status.value is EngineStatus.Error }
+        now += 10_000
+        callback.onAvailable(ShadowNetwork.newInstance(2))
+        Thread.sleep(300)
+        shadowOf(Looper.getMainLooper()).idle()
+        assertTrue("antes de 30 s no se reinicia otra vez", engine.status.value is EngineStatus.Error)
+
+        now += 25_000
+        callback.onAvailable(ShadowNetwork.newInstance(3))
+        eventually { engine.status.value == EngineStatus.Online }
+    }
+
+    @Test
+    fun networkReturnDoesNotRestartAfterTheUserDisconnected() {
+        val controller = startService()
+        val service = controller.get()
+        eventually { engine.status.value == EngineStatus.Online }
+        val callback = networkCallbacks().single()
+        runBlocking { app.tor.stop() }
+        eventually { engine.status.value is EngineStatus.Error }
+
+        service.onStartCommand(GhostService.stopIntent(app), 0, 2) // "Desconectar"
+        eventually { engine.status.value == EngineStatus.Stopped }
+        callback.onAvailable(ShadowNetwork.newInstance(1)) // un aviso tardío del callback ya retirado
+        Thread.sleep(300)
+        shadowOf(Looper.getMainLooper()).idle()
+        assertEquals(EngineStatus.Stopped, engine.status.value)
+    }
+
+    @Test
+    fun corruptedStorageCanBeRecheckedWithoutWipingAnything() {
+        app.storage.failure = StoreCorruptedException(IOException("x"))
+        val container = app.container
+        runBlocking { container.checkStorage() }
+        assertEquals(StorageState.Corrupted, container.storage.value)
+        // "Reintentar" (solo lectura): si el fallo era pasajero, se recupera sin borrar nada.
+        app.storage.failure = null
+        runBlocking { container.checkStorage() }
+        assertEquals(StorageState.Ok, container.storage.value)
+        assertEquals(0, app.storage.forceResets)
+        assertEquals(0, app.tor.wipeStateCalls.get())
     }
 
     private fun notificationManager() = shadowOf(app.getSystemService(NotificationManager::class.java))

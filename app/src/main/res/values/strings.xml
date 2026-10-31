@@ -59,6 +59,7 @@
     <string name="diag_message_hint">Mensaje</string>
     <string name="diag_send">Enviar</string>
     <string name="diag_photo">[foto]</string>
+    <string name="diag_photo_discarded">[foto descartada para liberar memoria]</string>
     <string name="diag_sending">enviando…</string>
     <string name="diag_delivered">entregado</string>
     <string name="diag_failed">no enviado</string>

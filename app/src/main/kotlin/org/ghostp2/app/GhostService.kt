@@ -9,7 +9,9 @@ import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
 import android.net.Network
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import androidx.annotation.VisibleForTesting
 import androidx.core.app.ServiceCompat
 import kotlinx.coroutines.CancellationException
@@ -36,17 +38,24 @@ import org.ghostp2.engine.Notice
  *   se comporta igual que [ACTION_START]. Si entonces falla el almacenamiento, se detiene y deja una
  *   notificación que pide abrir la app.
  * - [ACTION_STOP] (acción "Desconectar") o cualquier otra acción: detiene el motor y el servicio, que
- *   ya no vuelve solo (`stopSelf`: el sistema solo recrea servicios iniciados).
+ *   ya no vuelve solo (`stopSelfResult`: el sistema solo recrea servicios iniciados).
  * - Mientras existe, reenvía `engine.notices` a notificaciones sin contenido, y con el motor en `Error`
  *   la notificación fija pasa a "sin conexión" (con "Desconectar").
  *
  * No crea Tor ni repositorios: todo es del [AppContainer] (uno por proceso). Si Tor falla con el motor en
  * marcha (regla R18) el motor queda en `Error` y el servicio sigue: la pantalla ofrece "Reintentar", que
- * vuelve a enviar [ACTION_START]. No se arranca solo al encender el móvil (spec §6.9: no hay receptor de
- * `BOOT_COMPLETED`); `START_STICKY` solo cubre que el sistema mate el proceso con GhostP2 activo.
+ * vuelve a enviar [ACTION_START], y al volver la red se reinicia solo una vez (como mucho uno cada
+ * [RECOVERY_SPACING_MILLIS]). Se detiene siempre con `stopSelfResult(último startId)`. No se arranca solo
+ * al encender el móvil (spec §6.9: no hay receptor de `BOOT_COMPLETED`); `START_STICKY` solo cubre que
+ * el sistema mate el proceso con GhostP2 activo.
  */
 class GhostService : Service() {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    @VisibleForTesting
+    internal val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default + SilentExceptionHandler)
+
+    /** Reloj monótono (inyectable en pruebas). */
+    @VisibleForTesting
+    internal var elapsedRealtime: () -> Long = { android.os.SystemClock.elapsedRealtime() }
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
     /** Cambia con cada START/STOP (solo en el hilo principal): un arranque antiguo no detiene uno nuevo. */
@@ -54,6 +63,15 @@ class GhostService : Service() {
 
     /** En primer plano por un START (solo en el hilo principal). */
     private var foreground = false
+
+    /**
+     * `startId` del último `onStartCommand` (solo en el hilo principal): se detiene con
+     * `stopSelfResult(latestStartId)`, que no hace nada si el sistema ya tiene encolado un START más nuevo.
+     */
+    private var latestStartId = 0
+
+    /** Último reinicio automático por volver la red (reloj [elapsedRealtime]); solo en el hilo principal. */
+    private var lastRecoveryAt: Long? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -122,6 +140,7 @@ class GhostService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        latestStartId = startId
         when {
             intent == null -> onStart(restarted = true)
             intent.action == ACTION_START -> onStart(restarted = false)
@@ -141,7 +160,7 @@ class GhostService : Service() {
                 if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S || e !is ForegroundServiceStartNotAllowedException) throw e
                 generation++
                 runCatching { Notifications.postStopped(this) }
-                stopSelf()
+                stopSelfResult(latestStartId)
                 return
             }
         } else {
@@ -150,19 +169,42 @@ class GhostService : Service() {
         }
         foreground = true
         registerNetworkCallback()
-        val mine = ++generation
+        startEngine(++generation, notifyIfStopped = restarted)
+    }
+
+    /**
+     * Pide arrancar el motor; si el arranque no llega a hacerse (almacenamiento ilegible o no disponible)
+     * y nadie ha pedido otra cosa desde entonces ([generation] sigue siendo `mine`), se detiene el servicio
+     * (la pantalla muestra el error) y, si [notifyIfStopped], se avisa de que hay que abrir la app.
+     */
+    private fun startEngine(mine: Int, notifyIfStopped: Boolean) {
         val started = container.start()
         scope.launch {
             if (!started.await()) {
-                // Almacenamiento ilegible o no disponible: sin servicio (la pantalla muestra el error).
                 withContext(Dispatchers.Main) {
                     if (generation == mine) {
                         onStop()
-                        if (restarted) runCatching { Notifications.postStopped(this@GhostService) }
+                        if (notifyIfStopped) runCatching { Notifications.postStopped(this@GhostService) }
                     }
                 }
             }
         }
+    }
+
+    /**
+     * Regla R18 (modificada): al volver la red, si el motor quedó en `Error` (p. ej. Tor se cayó) y el
+     * usuario no ha pulsado "Desconectar", se reinicia una vez. Como mucho un reinicio por aviso de red y
+     * con al menos [RECOVERY_SPACING_MILLIS] entre dos reinicios, para no entrar en un bucle si Tor sigue
+     * fallando (entonces queda "Reintentar"). En el hilo principal, como [onStop].
+     */
+    private fun recoverOnNetworkReturn() {
+        if (!foreground || networkCallback == null) return // "Desconectar" ya pulsado
+        if (container.engine.status.value !is EngineStatus.Error) return
+        val now = elapsedRealtime()
+        val last = lastRecoveryAt
+        if (last != null && now - last < RECOVERY_SPACING_MILLIS) return
+        lastRecoveryAt = now
+        startEngine(generation, notifyIfStopped = false)
     }
 
     private fun onStop() {
@@ -171,7 +213,7 @@ class GhostService : Service() {
         container.stop()
         unregisterNetworkCallback()
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
-        stopSelf()
+        stopSelfResult(latestStartId)
     }
 
     override fun onDestroy() {
@@ -186,9 +228,14 @@ class GhostService : Service() {
         if (networkCallback != null) return
         val manager = getSystemService(ConnectivityManager::class.java) ?: return
         val engine = container.engine
+        val main = Handler(Looper.getMainLooper())
         val callback = object : ConnectivityManager.NetworkCallback() {
-            // También al registrarse (red actual): inofensivo, solo reinicia las esperas.
-            override fun onAvailable(network: Network) = engine.onNetworkChanged()
+            // También al registrarse (red actual): inofensivo, solo reinicia las esperas (y, con el motor
+            // en Error, recién pasado a primer plano no hay reinicio porque el motor aún no ha fallado).
+            override fun onAvailable(network: Network) {
+                engine.onNetworkChanged()
+                main.post { if (networkCallback === this) recoverOnNetworkReturn() }
+            }
 
             override fun onLost(network: Network) = engine.onNetworkChanged()
         }
@@ -211,5 +258,8 @@ class GhostService : Service() {
 
         fun stopIntent(context: Context): Intent =
             Intent(context, GhostService::class.java).setAction(ACTION_STOP)
+
+        /** Separación mínima entre dos reinicios automáticos del motor al volver la red (R18). */
+        const val RECOVERY_SPACING_MILLIS = 30_000L
     }
 }
