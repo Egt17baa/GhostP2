@@ -137,7 +137,8 @@ class FakeTorNetwork {
  * un servicio con claves autorizadas solo acepta a quien haya llamado a [addClientAuth] con una clave
  * privada x25519 cuya pública esté en la lista. Las .onion son direcciones v3 válidas derivadas de una
  * clave ed25519; la `privateKey` publicada son 64 bytes = semilla ed25519(32) || pública(32).
- * `connect` exige estado [TorState.Ready]; `stop` retira los servicios publicados por esta instancia.
+ * `publishService`, `addClientAuth` y `connect` exigen estado [TorState.Ready] (`IOException` si no), como
+ * el contrato de [TorTransport]; `stop` retira los servicios publicados por esta instancia.
  * Publicar una .onion que ya está publicada lanza `IOException("ya publicado")`, y `unpublishService`
  * solo retira servicios publicados por esta misma instancia.
  *
@@ -186,6 +187,7 @@ class FakeTor(
         virtualPort: Int,
         localPort: Int,
     ): PublishedService {
+        if (mutableState.value != TorState.Ready) throw IOException("Tor no está listo")
         val seed = if (privateKey == null) {
             Primitives.randomBytes(32)
         } else {
@@ -205,6 +207,7 @@ class FakeTor(
     }
 
     override suspend fun addClientAuth(onion: String, privateKey: ByteArray) {
+        if (mutableState.value != TorState.Ready) throw IOException("Tor no está listo")
         require(privateKey.size == 32) { "La clave de autorización debe tener 32 bytes" }
         clientAuth[OnionAddress.normalize(onion)] = privateKey.copyOf()
     }

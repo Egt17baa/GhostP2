@@ -4,6 +4,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.async
+import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -73,6 +75,41 @@ class TorRestartTest {
         h.contacts(0).upsert(changed)
         h.startAll()
         assertEquals(setOf(active.peerOnion), h.tor(0).clientAuthOnions())
+    }
+
+    @Test
+    fun failedClientAuthRegistrationIsBoundedAndNotified() = runBlocking<Unit> {
+        val failing = contact(ContactStatus.ACTIVE)
+        val hanging = contact(ContactStatus.ACTIVE)
+        val good = contact(ContactStatus.ACTIVE)
+        val fake = FakeTor(FakeTorNetwork())
+        val tor = object : TorTransport by fake {
+            override suspend fun addClientAuth(onion: String, privateKey: ByteArray) {
+                when (onion) {
+                    failing.peerOnion -> throw java.io.IOException("rechazada")
+                    hanging.peerOnion -> kotlinx.coroutines.awaitCancellation()
+                    else -> fake.addClientAuth(onion, privateKey)
+                }
+            }
+        }
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val engine = MessengerEngine(
+            tor, InMemoryIdentityRepository(), InMemoryContactRepository(listOf(failing, hanging, good)), scope,
+            config.copy(clientAuthRegistrationTimeoutMillis = 300),
+        )
+        try {
+            val notice = scope.async(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
+                engine.notices.filterIsInstance<Notice.ClientAuthFailed>().first()
+            }
+            withTimeout(5_000) { engine.start() } // el registro está acotado: no se queda esperando al que cuelga
+            assertEquals(EngineStatus.Online, engine.status.value)
+            assertEquals(setOf(good.peerOnion), fake.clientAuthOnions())
+            val ids = withTimeout(TIMEOUT) { notice.await() }.contactIds
+            assertEquals(listOf(failing.id, hanging.id).sorted(), ids)
+        } finally {
+            engine.stop()
+            scope.cancel()
+        }
     }
 
     @Test

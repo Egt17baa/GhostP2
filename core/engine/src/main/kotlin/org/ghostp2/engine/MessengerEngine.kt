@@ -12,6 +12,7 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -75,7 +76,8 @@ const val MAX_CONTACT_NAME_CHARS = 64
  *
  * Transiciones: `Stopped → StartingTor(p) → Online`, o `→ Error(mensaje)` si Tor falla (en ese caso se
  * liberan los recursos y se puede volver a llamar a [start]). Tor falla si informa `Error`, si vuelve a
- * `Off` durante el arranque o si no está listo en `EngineConfig.torBootstrapTimeoutMillis`. [start] y
+ * `Off` durante el arranque o si no está listo en `EngineConfig.torBootstrapTimeoutMillis`. Con el
+ * motor `Online`, si Tor pasa a `Error`/`Off` se libera todo y se pasa a `Error` (regla R18). [start] y
  * [stop] están serializados y son idempotentes; [stop] cancela un [start] en curso (que termina en
  * `Stopped` sin lanzar).
  */
@@ -219,6 +221,7 @@ class MessengerEngine(
             try {
                 boot.await()
                 mutableStatus.value = EngineStatus.Online
+                watchTor(job, engineScope)
             } catch (e: CancellationException) {
                 // Arranque cancelado por stop() (o el llamante fue cancelado). Manda la cancelación
                 // original: un fallo secundario al liberar se adjunta como suprimido.
@@ -294,18 +297,61 @@ class MessengerEngine(
 
     /**
      * Tor guarda las autorizaciones de cliente solo en memoria: tras cada arranque (con Tor ya `Ready` y
-     * antes de lanzar los bucles de conexión) se registran de nuevo las de todos los contactos `ACTIVE`.
-     * Un fallo con un contacto no impide el arranque ni el registro de los demás (ese contacto no podrá
-     * conectarse hasta el siguiente arranque).
+     * antes de lanzar los bucles de conexión) se registran de nuevo las de todos los contactos `ACTIVE`,
+     * en paralelo y como mucho durante `EngineConfig.clientAuthRegistrationTimeoutMillis` en total. Un
+     * fallo no impide el arranque: los contactos que no quedaron registrados (error o tiempo agotado) se
+     * avisan con [Notice.ClientAuthFailed] y no podrán recibir llamadas nuestras hasta el siguiente
+     * arranque (ellos sí pueden llamarnos).
      */
     private suspend fun registerClientAuth() {
-        contacts.all().filter { it.status == ContactStatus.ACTIVE }.forEach { contact ->
+        val active = contacts.all().filter { it.status == ContactStatus.ACTIVE }
+        if (active.isEmpty()) return
+        val pending: MutableSet<String> = ConcurrentHashMap.newKeySet<String>().apply { addAll(active.map { it.id }) }
+        withTimeoutOrNull(config.clientAuthRegistrationTimeoutMillis) {
+            coroutineScope {
+                active.forEach { contact ->
+                    launch {
+                        try {
+                            tor.addClientAuth(contact.peerOnion, contact.clientAuthPrivateForPeerOnion)
+                            pending.remove(contact.id)
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (_: Exception) {
+                            // Queda en `pending`: se avisa abajo.
+                        }
+                    }
+                }
+            }
+        }
+        if (pending.isNotEmpty()) mutableNotices.emit(Notice.ClientAuthFailed(pending.sorted()))
+    }
+
+    /**
+     * Regla R18: mientras el motor está `Online`, si Tor pasa a `Error` (p. ej. su proceso murió) o a `Off`
+     * sin que lo pidiéramos, el motor libera la ejecución como en [stop] (sesiones cerradas, presencia
+     * vacía: nadie `ONLINE`, Tor detenido) y queda en [EngineStatus.Error]; la app puede volver a llamar
+     * a [start]. Se elige esto (y no reiniciar solo) por ser lo más simple y previsible: la app (Task 10)
+     * decide cuándo reintentar. Un cambio de red no pasa por aquí: lo comunica la app con
+     * [onNetworkChanged].
+     */
+    private fun watchTor(job: Job, engineScope: CoroutineScope) {
+        engineScope.launch {
+            val lost = tor.state.first { it is TorState.Error || it == TorState.Off }
+            val message = (lost as? TorState.Error)?.message ?: TOR_STOPPED
+            // En el scope externo: liberar cancela y espera a engineJob, y este colector cuelga de él.
+            scope.launch { onTorLost(job, message) }
+        }
+    }
+
+    private suspend fun onTorLost(job: Job, message: String) {
+        lifecycle.withLock {
+            if (!running || engineJob !== job) return@withLock // ya parado o es otra ejecución
             try {
-                tor.addClientAuth(contact.peerOnion, contact.clientAuthPrivateForPeerOnion)
-            } catch (e: CancellationException) {
-                throw e
+                withContext(NonCancellable) { releaseResources() }
             } catch (_: Exception) {
-                // Se ignora: ver KDoc.
+                // Mejor esfuerzo: el estado final es Error igualmente.
+            } finally {
+                mutableStatus.value = EngineStatus.Error(message)
             }
         }
     }
@@ -1068,6 +1114,9 @@ private const val SESSION_EVENT_BUFFER = 1_024
 private const val MAX_CONCURRENT_ATTEMPTS = 32
 
 private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }
+
+/** Mensaje de [EngineStatus.Error] si Tor pasa a `Off` con el motor `Online` sin que se pidiera. */
+private const val TOR_STOPPED = "Tor se detuvo"
 
 /** Fallo al arrancar Tor; el mensaje es el que se muestra en [EngineStatus.Error]. */
 internal class TorStartException(message: String) : Exception(message)

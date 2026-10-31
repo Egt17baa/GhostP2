@@ -52,7 +52,8 @@ interface TorTransport {
      * solo se usa, con `privateKey == null`, para el servicio temporal de invitación.
      *
      * Requiere `Ready`: mientras Tor arranca, espera a `Ready`; si está `Off` o en `Error` (o lo pasa a
-     * estar mientras espera), lanza [java.io.IOException]. Nunca publica durante el arranque.
+     * estar mientras espera), lanza [java.io.IOException]. Nunca publica durante el arranque. Una clave
+     * mal formada (de servicio o de autorización) también es [java.io.IOException].
      *
      * La `privateKey` del [PublishedService] devuelto es **siempre un array nuevo**: nunca el array de
      * entrada, y la implementación no guarda ninguna referencia a él. El llamante es su único dueño y
@@ -65,19 +66,23 @@ interface TorTransport {
         localPort: Int,
     ): PublishedService
 
-    /** Retira el servicio; con Tor `Off`/`Error` no hace nada (un Tor parado no tiene servicios). */
+    /**
+     * Retira el servicio. Solo actúa con Tor `Ready`; en cualquier otro estado no hace nada ni espera
+     * (un Tor parado, caído o arrancando no tiene servicios: se publican a partir de `Ready`).
+     */
     suspend fun unpublishService(onion: String)
 
     /**
      * Registra, solo en memoria de Tor, la clave x25519 privada de autorización de cliente para conectar a
      * `onion`. Como [publishService], espera a `Ready` si Tor está arrancando y lanza
-     * [java.io.IOException] con Tor `Off`/`Error`. Se pierde al detener Tor (ver [stop]).
+     * [java.io.IOException] con Tor `Off`/`Error` o con una clave o dirección mal formadas. Se pierde
+     * al detener Tor (ver [stop]).
      */
     suspend fun addClientAuth(onion: String, privateKey: ByteArray)
 
     /**
-     * Quita la autorización de cliente de `onion`. Con Tor `Off`/`Error` no hace nada (un Tor parado no
-     * guarda ninguna); mientras arranca, espera a `Ready` como [addClientAuth].
+     * Quita la autorización de cliente de `onion`. Como [unpublishService], solo actúa con Tor `Ready`;
+     * en cualquier otro estado no hace nada ni espera (no hay ninguna registrada).
      */
     suspend fun removeClientAuth(onion: String)
 

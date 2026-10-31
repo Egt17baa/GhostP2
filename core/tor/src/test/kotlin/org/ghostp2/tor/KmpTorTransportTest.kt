@@ -3,6 +3,7 @@ package org.ghostp2.tor
 import android.content.Context
 import io.matthewnelson.kmp.tor.runtime.core.ctrl.HiddenServiceEntry
 import io.matthewnelson.kmp.tor.runtime.core.ctrl.Reply
+import io.matthewnelson.kmp.tor.runtime.core.ctrl.Reply.Error.Companion.toError
 import io.matthewnelson.kmp.tor.runtime.core.ctrl.TorCmd
 import io.matthewnelson.kmp.tor.runtime.core.key.ED25519_V3
 import kotlinx.coroutines.CompletableDeferred
@@ -214,6 +215,50 @@ class KmpTorTransportTest {
     }
 
     @Test
+    fun malformedKeysAreIOException() = runBlocking<Unit> {
+        startReady()
+        val auth = Primitives.generateX25519().publicKey
+        expectIOException { tor.publishService(ByteArray(10) { 1 }, listOf(auth), 7420, 5000) }
+        expectIOException { tor.publishService(null, listOf(ByteArray(31) { 1 }), 7420, 5000) }
+        expectIOException { tor.addClientAuth(DUCKDUCKGO, ByteArray(5)) }
+        assertTrue(driver.commands.isEmpty())
+    }
+
+    @Test
+    fun ambiguousAddFailureRetiresTheAddress() = runBlocking<Unit> {
+        startReady()
+        val key = ED25519_V3.PrivateKey.generate()
+        val expected = key.generatePublicKey().address()
+        driver.addFailure = IllegalStateException("conexión de control caída")
+        expectIOException { tor.publishService(key.encoded(), emptyList(), 7420, 5000) }
+        val delete = driver.commands.last() as TorCmd.Onion.Delete
+        assertEquals(expected, delete.address)
+
+        // Dirección nueva: también sabemos cuál retirar (la clave se genera aquí).
+        expectIOException { tor.publishService(null, emptyList(), 7420, 5000) }
+        assertTrue(driver.commands.last() is TorCmd.Onion.Delete)
+    }
+
+    @Test
+    fun definitiveRejectionDoesNotRetire() = runBlocking<Unit> {
+        startReady()
+        driver.addFailure = listOf(Reply.of("550", "Onion address collision")).toError("ADD_ONION")
+        expectIOException { tor.publishService(null, emptyList(), 7420, 5000) }
+        assertTrue(driver.commands.none { it is TorCmd.Onion.Delete })
+    }
+
+    @Test
+    fun removalsWhileStartingAreNoOps() = runBlocking<Unit> {
+        tor.start()
+        driver.emit(bootstrapping(40))
+        withTimeout(1_000) {
+            tor.unpublishService(DUCKDUCKGO)
+            tor.removeClientAuth(DUCKDUCKGO)
+        }
+        assertTrue(driver.commands.isEmpty())
+    }
+
+    @Test
     fun wipeStateStopsAndDeletesTheTorDirectory() = runBlocking<Unit> {
         startReady()
         File(tor.torDir, "work/data").mkdirs()
@@ -244,6 +289,7 @@ class KmpTorTransportTest {
         @Volatile var stops = 0
         @Volatile var startFailure: Exception? = null
         @Volatile var commandFailure: Exception? = null
+        @Volatile var addFailure: Exception? = null
         @Volatile var hangOnStart = false
         @Volatile var startCancelled = false
         val startEntered = CompletableDeferred<Unit>()
@@ -274,6 +320,7 @@ class KmpTorTransportTest {
             commandFailure?.let { throw it }
             return when (cmd) {
                 is TorCmd.Onion.Add -> {
+                    addFailure?.let { throw it }
                     val existing = cmd.key as ED25519_V3.PrivateKey?
                     val result = if (existing == null) {
                         val generated = ED25519_V3.PrivateKey.generate()

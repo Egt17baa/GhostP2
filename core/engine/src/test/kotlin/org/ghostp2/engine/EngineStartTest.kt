@@ -272,6 +272,44 @@ class EngineStartTest {
     }
 
     @Test
+    fun torErrorWhileOnlineStopsTheRunAndAllowsRestart() = runBlocking<Unit> {
+        // Regla R18: Tor muere con el motor Online ⇒ todo se libera, presencia sin ONLINE, estado Error.
+        val network = FakeTorNetwork()
+        val tor = ControlledTor(network).apply { autoReady = true }
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val peer = EngineHarness(1, network = network).also { harness = it }
+        try {
+            val engine = MessengerEngine(tor, InMemoryIdentityRepository(), InMemoryContactRepository(), scope,
+                EngineConfig(backoffMinMillis = 50, backoffMaxMillis = 400))
+            engine.start()
+            peer.startAll()
+            val handle = engine.createInvitation()
+            val waiting = withTimeout(10_000) { handle.state.first { it is InvitationState.Waiting } } as InvitationState.Waiting
+            assertTrue(peer.engine(0).acceptInvitation(waiting.text) is AcceptResult.Paired)
+            withTimeout(10_000) { engine.presence.first { it.values.contains(Presence.ONLINE) } }
+
+            tor.mutableState.value = TorState.Error("proceso de Tor terminado")
+            withTimeout(10_000) { engine.status.first { it is EngineStatus.Error } }
+            assertEquals(EngineStatus.Error("proceso de Tor terminado"), engine.status.value)
+            assertTrue(engine.presence.value.values.none { it == Presence.ONLINE })
+            assertTrue(tor.stopped)
+            assertNull(engine.localPort)
+            assertNull(engine.myOnion.value)
+            withTimeout(5_000) {
+                while (scope.coroutineContext[Job]!!.children.count() > 0) kotlinx.coroutines.delay(20)
+            }
+
+            engine.start()
+            assertEquals(EngineStatus.Online, engine.status.value)
+            withTimeout(10_000) { engine.presence.first { it.values.contains(Presence.ONLINE) } }
+            engine.stop()
+            assertEquals(EngineStatus.Stopped, engine.status.value)
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
     fun torGoingOffDuringStartIsAnError() = runBlocking {
         val tor = ControlledTor(FakeTorNetwork())
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)

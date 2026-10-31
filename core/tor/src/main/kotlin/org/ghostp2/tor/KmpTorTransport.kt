@@ -1,6 +1,7 @@
 package org.ghostp2.tor
 
 import android.content.Context
+import io.matthewnelson.kmp.tor.runtime.core.ctrl.Reply
 import io.matthewnelson.kmp.tor.runtime.core.ctrl.TorCmd
 import io.matthewnelson.kmp.tor.runtime.core.key.ED25519_V3
 import kotlinx.coroutines.CancellationException
@@ -125,44 +126,55 @@ class KmpTorTransport internal constructor(
         localPort: Int,
     ): PublishedService {
         val d = awaitReady()
-        val authKeys = clientAuthPublicKeys.map { TorKeys.x25519PublicKey(it) }
-        val key = privateKey?.let { TorKeys.privateKey(it) }
+        val authKeys = keysOrIOException { clientAuthPublicKeys.map { TorKeys.x25519PublicKey(it) } }
+        // La clave se genera aquí también para una dirección nueva: así siempre sabemos qué dirección
+        // retirar si la orden queda en duda, y la devolvemos sin depender de la respuesta de Tor.
+        val key = keysOrIOException { privateKey?.let { TorKeys.privateKey(it) } ?: ED25519_V3.PrivateKey.generate() }
+        val bytes: ByteArray
+        val publicKey: ED25519_V3.PublicKey
+        try {
+            bytes = TorKeys.privateKeyBytes(key) // array nuevo, nunca el de entrada
+            publicKey = key.generatePublicKey()
+        } catch (e: Exception) {
+            key.destroy()
+            throw IOException("Clave del servicio no válida")
+        }
+        val onion = TorKeys.onionString(publicKey.address())
         // La orden se completa aunque se cancele al llamante: así nunca queda un servicio publicado del
         // que nadie sabe (en particular, el de invitación sin autorización).
-        val entry = try {
-            withContext(NonCancellable) { d.command(onionAddCommand(key, authKeys, virtualPort, localPort)) }
-        } finally {
-            key?.destroy()
-        }
-        val returned = entry.privateKey
         try {
-            val onion = TorKeys.onionString(entry.publicKey.address())
-            if (!currentCoroutineContext().isActive) {
-                withContext(NonCancellable) { runCatching { d.command(TorCmd.Onion.Delete(entry.publicKey)) } }
-                throw CancellationException("Publicación cancelada")
-            }
-            val bytes = when {
-                privateKey != null -> privateKey.copyOf() // array nuevo, nunca el de entrada
-                returned is ED25519_V3.PrivateKey -> TorKeys.privateKeyBytes(returned)
-                else -> {
-                    withContext(NonCancellable) { runCatching { d.command(TorCmd.Onion.Delete(entry.publicKey)) } }
-                    throw IOException("Tor no devolvió la clave del servicio")
+            withContext(NonCancellable) {
+                try {
+                    d.command(onionAddCommand(key, authKeys, virtualPort, localPort))
+                } catch (e: AmbiguousTorException) {
+                    // Puede que Tor lo haya publicado (p. ej. respondió tarde): se retira por si acaso.
+                    runCatching { d.command(TorCmd.Onion.Delete(publicKey)) }
+                    throw e
                 }
             }
-            return PublishedService(onion, bytes)
+        } catch (e: Exception) {
+            bytes.fill(0)
+            throw e
         } finally {
-            returned?.destroy()
+            key.destroy()
         }
+        if (!currentCoroutineContext().isActive) {
+            withContext(NonCancellable) { runCatching { d.command(TorCmd.Onion.Delete(publicKey)) } }
+            bytes.fill(0)
+            throw CancellationException("Publicación cancelada")
+        }
+        return PublishedService(onion, bytes)
     }
 
     override suspend fun unpublishService(onion: String) {
-        val d = driverForRemoval() ?: return
+        val d = driverIfReady() ?: return
         d.command(TorCmd.Onion.Delete(addressOrIOException(onion)))
     }
 
     override suspend fun addClientAuth(onion: String, privateKey: ByteArray) {
         val d = awaitReady()
-        val cmd = clientAuthAddCommand(addressOrIOException(onion), TorKeys.x25519PrivateKey(privateKey))
+        val address = addressOrIOException(onion)
+        val cmd = clientAuthAddCommand(address, keysOrIOException { TorKeys.x25519PrivateKey(privateKey) })
         try {
             d.command(cmd)
         } finally {
@@ -171,7 +183,7 @@ class KmpTorTransport internal constructor(
     }
 
     override suspend fun removeClientAuth(onion: String) {
-        val d = driverForRemoval() ?: return
+        val d = driverIfReady() ?: return
         d.command(TorCmd.OnionClientAuth.Remove(addressOrIOException(onion)))
     }
 
@@ -212,18 +224,22 @@ class KmpTorTransport internal constructor(
     }
 
     /** Espera a `Ready` mientras Tor arranca; `IOException` si está o pasa a `Off`/`Error`. */
-    private suspend fun awaitReady(): TorDriver = awaitReadyOrNull() ?: throw IOException("Tor no está listo")
-
-    private suspend fun awaitReadyOrNull(): TorDriver? {
+    private suspend fun awaitReady(): TorDriver {
         val s = state.first { it !is TorState.Starting }
-        return if (s == TorState.Ready) driver else null
+        return driver.takeIf { s == TorState.Ready } ?: throw IOException("Tor no está listo")
     }
 
-    /** Driver para retirar algo; `null` (nada que hacer) con Tor parado o caído. */
-    private suspend fun driverForRemoval(): TorDriver? {
-        val s = state.value
-        if (s == TorState.Off || s is TorState.Error) return null
-        return awaitReadyOrNull()
+    /**
+     * Driver para retirar algo, solo con Tor `Ready`. En cualquier otro estado no hay nada que retirar:
+     * un Tor parado o caído no guarda servicios ni autorizaciones, y uno que está arrancando tampoco
+     * (todo se registra a partir de `Ready`). Por eso no se espera.
+     */
+    private fun driverIfReady(): TorDriver? = driver.takeIf { state.value == TorState.Ready }
+
+    private inline fun <T> keysOrIOException(block: () -> T): T = try {
+        block()
+    } catch (e: IllegalArgumentException) {
+        throw IOException("Clave no válida")
     }
 
     private fun addressOrIOException(onion: String) = try {
@@ -239,13 +255,15 @@ class KmpTorTransport internal constructor(
     private suspend fun <T : Any> TorDriver.command(cmd: TorCmd.Unprivileged<T>): T = try {
         withTimeout(COMMAND_TIMEOUT_MILLIS) { execute(cmd) }
     } catch (e: TimeoutCancellationException) {
-        throw IOException("Tor no respondió a ${cmd.keyword}")
+        throw AmbiguousTorException("Tor no respondió a ${cmd.keyword}")
     } catch (e: CancellationException) {
         // kmp-tor también cancela órdenes (p. ej. al detenerse): solo se propaga si nos cancelaron a nosotros.
         currentCoroutineContext().let { if (!it.isActive) throw e }
-        throw IOException("Orden ${cmd.keyword} interrumpida")
+        throw AmbiguousTorException("Orden ${cmd.keyword} interrumpida")
+    } catch (e: Reply.Error) {
+        throw IOException("Tor rechazó ${cmd.keyword}") // respuesta de error definitiva de Tor
     } catch (e: Exception) {
-        throw IOException("Tor rechazó ${cmd.keyword} (${e.javaClass.simpleName})")
+        throw AmbiguousTorException("Fallo en ${cmd.keyword} (${e.javaClass.simpleName})")
     }
 
     private companion object {
@@ -255,3 +273,6 @@ class KmpTorTransport internal constructor(
         const val COMMAND_TIMEOUT_MILLIS = 30_000L
     }
 }
+
+/** La orden de control falló sin respuesta definitiva de Tor (tiempo agotado, interrupción, conexión caída). */
+internal class AmbiguousTorException(message: String) : IOException(message)
