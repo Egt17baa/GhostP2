@@ -1,12 +1,19 @@
 package org.ghostp2.core.protocol
 
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
+import kotlinx.serialization.ExperimentalSerializationApi
+import kotlinx.serialization.cbor.Cbor
 import org.ghostp2.core.crypto.Base32
 import org.ghostp2.core.crypto.KeyPair25519
 import org.ghostp2.core.crypto.OnionAddress
 import org.ghostp2.core.crypto.Primitives
+import org.ghostp2.core.crypto.RatchetChannel
 import org.ghostp2.core.crypto.SafetyNumber
+import org.ghostp2.core.crypto.noise.HandshakePattern
+import org.ghostp2.core.crypto.noise.HandshakeState
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertArrayEquals
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -15,6 +22,7 @@ import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import java.security.MessageDigest
 
+@OptIn(ExperimentalSerializationApi::class)
 class PairingTest {
     private val transport = TestTransport()
 
@@ -76,32 +84,129 @@ class PairingTest {
         }
         val e1 = r1.await().exceptionOrNull()
         val e2 = r2.await().exceptionOrNull()
-        assertTrue(e1 is HandshakeFailedException, "invitador: $e1")
-        assertTrue(e2 is HandshakeFailedException, "invitado: $e2")
+        // msg3 lleva la PSK: el invitador lo detecta (AUTH); el invitado ve cerrarse la conexión
+        assertEquals(HandshakeFailedException.Reason.AUTH, (e1 as HandshakeFailedException).reason, "invitador: $e1")
+        assertEquals(HandshakeFailedException.Reason.CONNECTION, (e2 as HandshakeFailedException).reason, "invitado: $e2")
     }
 
-    @Test
-    fun pairingRejectsInvalidOnion(): Unit = runBlocking {
-        val secret = Primitives.randomBytes(16)
-        val inviter = side(onion = "esto-no-es-una-onion")
-        val invitee = side()
-        val r1 = async { runCatching { Pairing.asInviter(transport.a, inviter.identity, secret.copyOf(), inviter.offer) } }
-        val r2 = async { runCatching { Pairing.asInvitee(transport.b, invitee.identity, secret.copyOf(), invitee.offer) } }
-        r1.await()
-        val e2 = r2.await().exceptionOrNull()
-        assertTrue(e2 is ProtocolException, "el receptor debe rechazar la .onion: $e2")
+    /** Codifica una oferta tal como viaja por el cable. */
+    private fun encodeOffer(onion: String, key: ByteArray): ByteArray =
+        Cbor.encodeToByteArray(PairingPayload.serializer(), PairingPayload(onion, key))
+
+    /**
+     * Invitado hecho a mano (XXpsk3 iniciador) sobre [stream]: completa el handshake, envía
+     * [offerPlaintext] por el canal y después hace [afterOffer] (en vez del resto del protocolo).
+     */
+    private suspend fun manualInvitee(
+        stream: FrameStream, secret: ByteArray, offerPlaintext: ByteArray,
+        afterOffer: suspend (RatchetChannel) -> Unit = {},
+    ) {
+        val psk = Primitives.hkdf(ByteArray(32), secret, "GhostP2 pairing psk v1".toByteArray(), 32)
+        val hs = HandshakeState(
+            HandshakePattern.XXpsk3, true, "GhostP2 pairing v1".toByteArray(), Primitives.generateX25519(), null, psk,
+        )
+        stream.send(hs.writeMessage(ByteArray(0)))
+        hs.readMessage(stream.receive())
+        stream.send(hs.writeMessage(ByteArray(0)))
+        val ch = RatchetChannel.fromHandshake(hs, true)
+        stream.send(ch.encrypt(offerPlaintext))
+        afterOffer(ch)
     }
 
-    @Test
-    fun pairingRejectsWrongClientAuthKeyLength(): Unit = runBlocking {
+    /** El invitador frente a un invitado manual que envía [offerPlaintext]; devuelve el resultado del invitador. */
+    private fun inviterAgainstManual(
+        offerPlaintext: ByteArray, t: TestTransport = transport, afterOffer: suspend (RatchetChannel) -> Unit = {},
+    ): Result<PairingResult> = runBlocking {
         val secret = Primitives.randomBytes(16)
         val inviter = side()
-        val invitee = Side(Primitives.generateX25519(), PairingOffer(randomOnion(), ByteArray(31)))
-        val r1 = async { runCatching { Pairing.asInviter(transport.a, inviter.identity, secret.copyOf(), inviter.offer) } }
-        val r2 = async { runCatching { Pairing.asInvitee(transport.b, invitee.identity, secret.copyOf(), invitee.offer) } }
-        val e1 = r1.await().exceptionOrNull()
-        r2.await()
-        assertTrue(e1 is ProtocolException, "el invitador debe rechazar la clave de 31 bytes: $e1")
+        val r = async { runCatching { Pairing.asInviter(t.a, inviter.identity, secret.copyOf(), inviter.offer) } }
+        runCatching { manualInvitee(t.b, secret.copyOf(), offerPlaintext, afterOffer) }
+        r.await()
+    }
+
+    @Test
+    fun pairingRejectsInvalidOnion() {
+        val e = inviterAgainstManual(encodeOffer("esto-no-es-una-onion", ByteArray(32))).exceptionOrNull()
+        assertTrue(e is ProtocolException, "el receptor debe rechazar la .onion: $e")
+    }
+
+    @Test
+    fun pairingRejectsWrongClientAuthKeyLength() {
+        val e = inviterAgainstManual(encodeOffer(randomOnion(), ByteArray(31))).exceptionOrNull()
+        assertTrue(e is ProtocolException, "el invitador debe rechazar la clave de 31 bytes: $e")
+    }
+
+    /** Cualquier fallo al decodificar la oferta (no solo SerializationException) es ProtocolException. */
+    @Test
+    fun malformedOfferIsProtocolException() {
+        val cases = listOf(
+            byteArrayOf(0xbf.toByte(), 0x65), // mapa truncado
+            byteArrayOf(0x9f.toByte(), 0x01, 0xff.toByte()), // array en vez de mapa
+            byteArrayOf(0xbf.toByte(), 0x65) + "onion".toByteArray() + byteArrayOf(0x01, 0xff.toByte()), // onion entero
+            byteArrayOf(0x00), // un entero suelto
+        )
+        for (bytes in cases) {
+            TestTransport().use { t ->
+                val e = inviterAgainstManual(bytes, t).exceptionOrNull()
+                assertTrue(e is ProtocolException, "${bytes.joinToString("") { "%02x".format(it) }}: $e")
+            }
+        }
+    }
+
+    @Test
+    fun localOfferIsValidatedAtEntry(): Unit = runBlocking {
+        val secret = Primitives.randomBytes(16)
+        val id = Primitives.generateX25519()
+        val badOnion = PairingOffer("esto-no-es-una-onion", ByteArray(32))
+        val badKey = PairingOffer(randomOnion(), ByteArray(31))
+        for (offer in listOf(badOnion, badKey)) {
+            assertThrowsSuspend<IllegalArgumentException> { Pairing.asInviter(transport.a, id, secret, offer) }
+            assertThrowsSuspend<IllegalArgumentException> { Pairing.asInvitee(transport.b, id, secret, offer) }
+        }
+    }
+
+    /** El invitador solo termina bien si recibe la trama final "ok" del invitado. */
+    @Test
+    fun inviterFailsIfInviteeDropsBeforeOk() {
+        val e = inviterAgainstManual(encodeOffer(randomOnion(), ByteArray(32))) { ch ->
+            ch.decrypt(transport.b.receive()) // la oferta del invitador
+            transport.b.close() // ... y se va sin enviar "ok"
+        }.exceptionOrNull()
+        assertEquals(HandshakeFailedException.Reason.CONNECTION, (e as? HandshakeFailedException)?.reason, "invitador: $e")
+    }
+
+    @Test
+    fun inviterRejectsWrongOkText() {
+        val e = inviterAgainstManual(encodeOffer(randomOnion(), ByteArray(32))) { ch ->
+            ch.decrypt(transport.b.receive())
+            transport.b.send(ch.encrypt("GhostP2 pairing ko v1".toByteArray()))
+        }.exceptionOrNull()
+        assertEquals(HandshakeFailedException.Reason.AUTH, (e as? HandshakeFailedException)?.reason, "invitador: $e")
+    }
+
+    @Test
+    fun manualInviteeWithOkPairs() {
+        // Control positivo del arnés anterior: con la trama "ok" correcta el invitador termina bien
+        val result = inviterAgainstManual(encodeOffer(randomOnion(), ByteArray(32) { 5 })) { ch ->
+            ch.decrypt(transport.b.receive())
+            transport.b.send(ch.encrypt("GhostP2 pairing ok v1".toByteArray()))
+        }
+        assertArrayEquals(ByteArray(32) { 5 }, result.getOrThrow().clientAuthPrivateForPeerOnion)
+    }
+
+    /** La clave de autorización viaja como bstr CBOR (`@ByteString`); ejemplo de PROTOCOLO.md §6. */
+    @Test
+    fun offerWireFormatUsesByteString() {
+        val hex = encodeOffer("ab", byteArrayOf(1, 2)).joinToString("") { "%02x".format(it) }
+        assertEquals("bf656f6e696f6e626162" + "71" + "clientAuthPrivate".toByteArray().joinToString("") { "%02x".format(it) } + "420102ff", hex)
+    }
+
+    @Test
+    fun callerTimeoutIsNotSwallowed(): Unit = runBlocking {
+        val inviter = side()
+        assertThrowsSuspend<TimeoutCancellationException> {
+            withTimeout(200) { Pairing.asInviter(transport.a, inviter.identity, Primitives.randomBytes(16), inviter.offer) }
+        }
     }
 
     @Test
@@ -113,7 +218,18 @@ class PairingTest {
             Pairing.asInviter(transport.a, inviter.identity, Primitives.randomBytes(16), inviter.offer, timeoutMillis = 300)
         }
         assertTrue(System.nanoTime() - start < 10_000_000_000L, "el plazo debe desbloquear la lectura")
+        assertEquals(HandshakeFailedException.Reason.TIMEOUT, e.reason)
         assertEquals("Tiempo de emparejamiento agotado", e.message)
+    }
+
+    @Test
+    fun pairingFailsWithConnectionWhenPeerCloses(): Unit = runBlocking {
+        val inviter = side()
+        transport.b.close()
+        val e = assertThrowsSuspend<HandshakeFailedException> {
+            Pairing.asInviter(transport.a, inviter.identity, Primitives.randomBytes(16), inviter.offer)
+        }
+        assertEquals(HandshakeFailedException.Reason.CONNECTION, e.reason)
     }
 
     @Test

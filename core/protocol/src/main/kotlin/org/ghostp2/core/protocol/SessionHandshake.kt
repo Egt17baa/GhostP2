@@ -57,15 +57,26 @@ data class ContactKeys(val peerIdentity: ByteArray, val pairSecret: ByteArray) {
  * durante el handshake (dentro del mismo plazo de 30 s). La trama se consume aquí: la primera
  * trama de aplicación usa ya el contador siguiente en los dos lados.
  *
- * Errores:
- * - [HandshakeFailedException]: autenticación fallida (identidad desconocida o pairSecret
- *   distinto), estado o canal no válido, cierre o caída de la conexión y tiempo agotado (30 s).
- *   Un tiempo máximo impuesto por el llamador (p. ej. su propio `withTimeout`) NO se convierte:
- *   se propaga como cancelación.
+ * Errores ([HandshakeFailedException.reason]):
+ * - `UNKNOWN_CALLER`: (respondedor) ningún candidato autentica msg1.
+ * - `AUTH`: `AuthenticationException`/`ChannelSecurityException` (p. ej. el iniciador lee msg2
+ *   con un pairSecret distinto) o confirmación de clave no válida (respondedor).
+ * - `CONNECTION`: EOF/IOException; es lo que ve el lado que NO detectó el fallo, porque el otro
+ *   cierra el flujo.
+ * - `TIMEOUT`: venció nuestro plazo (30 s). Un tiempo máximo impuesto por el llamador (p. ej. su
+ *   propio `withTimeout`) NO se convierte: se propaga como cancelación.
+ * - `STATE`: `IllegalStateException` o handshake incompleto.
  * - [ProtocolException]: el otro lado envió datos mal formados.
+ * - `IllegalArgumentException` (error de programación, antes de tocar el flujo): candidatos con
+ *   identidades repetidas.
  *
  * Ante cualquier fallo se cierra el flujo (así el otro lado falla enseguida) y se borran los
- * estados del handshake. Los arrays de [ContactKeys] y de la identidad no se tocan.
+ * estados del handshake.
+ *
+ * Propiedad de los secretos: los arrays de [ContactKeys] y de la identidad son de quien llama y
+ * el handshake nunca los borra. El [RatchetChannel] devuelto también pasa a quien llama: si lo
+ * entrega a una [PeerSession], ella lo destruye al cerrarse; si no (p. ej. pierde el desempate
+ * de conexiones duplicadas), quien llama debe llamar a `channel.destroy()` y a `stream.close()`.
  */
 object SessionHandshake {
     internal const val TIMEOUT_MILLIS = 30_000L
@@ -83,6 +94,10 @@ object SessionHandshake {
     /**
      * Quien recibe la llamada: respondedor KKpsk2. Devuelve la instancia de [candidates] que
      * corresponde al llamante (la misma, no una copia) y el canal.
+     *
+     * [candidates] debe tener identidades (`peerIdentity`) distintas: la capa de datos guarda un
+     * único contacto por clave de identidad (al volver a emparejar con la misma identidad se
+     * sustituye el anterior). Si no, lanza `IllegalArgumentException` sin tocar el flujo.
      */
     suspend fun respond(
         stream: FrameStream, identity: KeyPair25519, candidates: List<ContactKeys>,
@@ -106,6 +121,15 @@ object SessionHandshake {
 
     internal suspend fun respond(
         stream: FrameStream, identity: KeyPair25519, candidates: List<ContactKeys>, timeoutMillis: Long,
+    ): Pair<ContactKeys, RatchetChannel> {
+        require(candidates.map { it.peerIdentity.asList() }.toSet().size == candidates.size) {
+            "Hay candidatos con la misma identidad"
+        }
+        return respondChecked(stream, identity, candidates, timeoutMillis)
+    }
+
+    private suspend fun respondChecked(
+        stream: FrameStream, identity: KeyPair25519, candidates: List<ContactKeys>, timeoutMillis: Long,
     ): Pair<ContactKeys, RatchetChannel> = withDeadline(stream, timeoutMillis) {
         guarded(stream) { track ->
             val msg1 = stream.receive()
@@ -125,7 +149,8 @@ object SessionHandshake {
                     match = candidate to hs
                     break
                 }
-                val (contact, hs) = match ?: throw HandshakeFailedException("Llamante desconocido")
+                val (contact, hs) = match
+                    ?: throw HandshakeFailedException(HandshakeFailedException.Reason.UNKNOWN_CALLER, "Llamante desconocido")
                 stream.send(hs.writeMessage(EMPTY))
                 val channel = finish(hs, initiator = false)
                 destroyOnFailure(channel) { expectConfirm(stream, channel) }
@@ -144,7 +169,7 @@ object SessionHandshake {
         )
 
     private fun finish(hs: HandshakeState, initiator: Boolean): RatchetChannel {
-        if (!hs.isComplete) throw HandshakeFailedException("Handshake de sesión incompleto")
+        if (!hs.isComplete) throw HandshakeFailedException(HandshakeFailedException.Reason.STATE, "Handshake de sesión incompleto")
         return RatchetChannel.fromHandshake(hs, initiator)
     }
 
@@ -153,7 +178,7 @@ object SessionHandshake {
         val plaintext = channel.decrypt(stream.receive())
         try {
             if (!Primitives.constantTimeEquals(plaintext, CONFIRM)) {
-                throw HandshakeFailedException("Confirmación de sesión no válida")
+                throw HandshakeFailedException(HandshakeFailedException.Reason.AUTH, "Confirmación de sesión no válida")
             }
         } finally {
             Primitives.wipe(plaintext)
@@ -185,7 +210,7 @@ object SessionHandshake {
     private suspend fun <T : Any> withDeadline(stream: FrameStream, timeoutMillis: Long, block: suspend () -> T): T =
         withTimeoutOrNull(timeoutMillis) { block() } ?: run {
             stream.close()
-            throw HandshakeFailedException("Tiempo de sesión agotado")
+            throw HandshakeFailedException(HandshakeFailedException.Reason.TIMEOUT, "Tiempo de sesión agotado")
         }
 
     /**
@@ -206,14 +231,14 @@ object SessionHandshake {
         } catch (e: ProtocolException) {
             throw e
         } catch (e: AuthenticationException) {
-            throw HandshakeFailedException("Autenticación de la sesión fallida")
+            throw HandshakeFailedException(HandshakeFailedException.Reason.AUTH, "Autenticación de la sesión fallida")
         } catch (e: ChannelSecurityException) {
-            throw HandshakeFailedException("Canal de sesión no válido")
+            throw HandshakeFailedException(HandshakeFailedException.Reason.AUTH, "Canal de sesión no válido")
         } catch (e: IllegalStateException) {
-            throw HandshakeFailedException("Estado de sesión no válido")
+            throw HandshakeFailedException(HandshakeFailedException.Reason.STATE, "Estado de sesión no válido")
         } catch (e: IOException) {
             // Incluye EOFException: el otro lado cerró o la conexión se cayó durante el handshake
-            throw HandshakeFailedException("Conexión de sesión cerrada")
+            throw HandshakeFailedException(HandshakeFailedException.Reason.CONNECTION, "Conexión de sesión cerrada")
         } finally {
             states.forEach { it.wipe() }
             if (!ok) stream.close()

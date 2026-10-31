@@ -18,8 +18,29 @@ import java.nio.ByteBuffer
 /** El otro lado envió datos mal formados (trama, carga o campos inválidos). */
 class ProtocolException(message: String) : Exception(message)
 
-/** El emparejamiento no pudo completarse (secreto distinto, autenticación fallida, cierre o tiempo agotado). */
-class HandshakeFailedException(message: String) : Exception(message)
+/**
+ * El emparejamiento ([Pairing]) o el handshake de sesión ([SessionHandshake]) no pudo
+ * completarse. [reason] permite a la app reaccionar de forma distinta (p. ej. "identidad
+ * cambiada, volved a emparejar" frente a "reintentar más tarde").
+ */
+class HandshakeFailedException(val reason: Reason, message: String) : Exception(message) {
+    enum class Reason {
+        /** Autenticación fallida: secreto o pairSecret distinto, trama de confirmación no válida o canal no auténtico. */
+        AUTH,
+
+        /** Sesión: ningún contacto de la lista de candidatos autentica msg1 (identidad desconocida o cambiada). */
+        UNKNOWN_CALLER,
+
+        /** La conexión se cerró o falló (EOF/IOException): normalmente el otro lado abortó. */
+        CONNECTION,
+
+        /** Venció NUESTRO plazo (60 s emparejamiento, 30 s sesión). */
+        TIMEOUT,
+
+        /** Estado interno no válido (handshake incompleto o usado tras un error). */
+        STATE,
+    }
+}
 
 /**
  * Tramas sobre un flujo de bytes (en la app, un socket Tor): prefijo de longitud big-endian de

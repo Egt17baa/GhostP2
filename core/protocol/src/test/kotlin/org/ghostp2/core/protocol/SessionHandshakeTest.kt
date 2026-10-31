@@ -77,9 +77,11 @@ class SessionHandshakeTest {
         val r = async { runCatching { SessionHandshake.respond(transport.b, p.bob, listOf(p.aliceAsSeenByBob)) } }
         val eR = r.await().exceptionOrNull()
         val eI = i.await().exceptionOrNull()
-        assertTrue(eR is HandshakeFailedException, "respondedor: $eR")
-        assertTrue(eI is HandshakeFailedException, "iniciador: $eI")
+        assertEquals(HandshakeFailedException.Reason.UNKNOWN_CALLER, reasonOf(eR), "respondedor: $eR")
+        assertEquals(HandshakeFailedException.Reason.CONNECTION, reasonOf(eI), "iniciador: $eI")
     }
+
+    private fun reasonOf(e: Throwable?) = (e as? HandshakeFailedException)?.reason
 
     /**
      * En KKpsk2 msg1 no depende de la PSK; la trama de confirmación hace que AMBOS lados
@@ -93,8 +95,9 @@ class SessionHandshakeTest {
         val r = async { runCatching { SessionHandshake.respond(transport.b, p.bob, listOf(p.aliceAsSeenByBob)) } }
         val eR = r.await().exceptionOrNull()
         val eI = i.await().exceptionOrNull()
-        assertTrue(eR is HandshakeFailedException, "respondedor: $eR")
-        assertTrue(eI is HandshakeFailedException, "iniciador: $eI")
+        // msg2 lleva la PSK: el iniciador lo detecta; el respondedor ve cerrarse la conexión
+        assertEquals(HandshakeFailedException.Reason.AUTH, reasonOf(eI), "iniciador: $eI")
+        assertEquals(HandshakeFailedException.Reason.CONNECTION, reasonOf(eR), "respondedor: $eR")
     }
 
     @Test
@@ -130,7 +133,7 @@ class SessionHandshakeTest {
         val r = async { runCatching { SessionHandshake.respond(transport.b, p.bob, listOf(p.aliceAsSeenByBob)) } }
         manualInitiator(p) { transport.a.close() }
         val e = r.await().exceptionOrNull()
-        assertTrue(e is HandshakeFailedException, "respondedor: $e")
+        assertEquals(HandshakeFailedException.Reason.CONNECTION, reasonOf(e), "respondedor: $e")
     }
 
     @Test
@@ -143,7 +146,7 @@ class SessionHandshakeTest {
             transport.a.send(frame)
         }
         val e = r.await().exceptionOrNull()
-        assertTrue(e is HandshakeFailedException, "respondedor: $e")
+        assertEquals(HandshakeFailedException.Reason.AUTH, reasonOf(e), "respondedor: $e")
     }
 
     @Test
@@ -152,7 +155,7 @@ class SessionHandshakeTest {
         val r = async { runCatching { SessionHandshake.respond(transport.b, p.bob, listOf(p.aliceAsSeenByBob)) } }
         manualInitiator(p) { ch -> transport.a.send(ch.encrypt("otra cosa".toByteArray())) }
         val e = r.await().exceptionOrNull()
-        assertTrue(e is HandshakeFailedException, "respondedor: $e")
+        assertEquals(HandshakeFailedException.Reason.AUTH, reasonOf(e), "respondedor: $e")
     }
 
     /** Al revés: el respondedor guarda un pairSecret distinto; fallan los dos. */
@@ -164,8 +167,8 @@ class SessionHandshakeTest {
         val r = async { runCatching { SessionHandshake.respond(transport.b, p.bob, listOf(wrongAtBob)) } }
         val eR = r.await().exceptionOrNull()
         val eI = i.await().exceptionOrNull()
-        assertTrue(eI is HandshakeFailedException, "iniciador: $eI")
-        assertTrue(eR is HandshakeFailedException, "respondedor: $eR")
+        assertEquals(HandshakeFailedException.Reason.AUTH, reasonOf(eI), "iniciador: $eI")
+        assertEquals(HandshakeFailedException.Reason.CONNECTION, reasonOf(eR), "respondedor: $eR")
     }
 
     @Test
@@ -187,8 +190,8 @@ class SessionHandshakeTest {
         val p = paired()
         val i = async { runCatching { SessionHandshake.initiate(transport.a, p.alice, p.bobAsSeenByAlice) } }
         val r = async { runCatching { SessionHandshake.respond(transport.b, p.bob, emptyList()) } }
-        assertTrue(r.await().exceptionOrNull() is HandshakeFailedException)
-        assertTrue(i.await().exceptionOrNull() is HandshakeFailedException)
+        assertEquals(HandshakeFailedException.Reason.UNKNOWN_CALLER, reasonOf(r.await().exceptionOrNull()))
+        assertEquals(HandshakeFailedException.Reason.CONNECTION, reasonOf(i.await().exceptionOrNull()))
     }
 
     @Test
@@ -212,15 +215,28 @@ class SessionHandshakeTest {
         val e = assertThrowsSuspend<HandshakeFailedException> {
             SessionHandshake.initiate(transport.a, p.alice, p.bobAsSeenByAlice, timeoutMillis = 200)
         }
+        assertEquals(HandshakeFailedException.Reason.TIMEOUT, e.reason)
         assertEquals("Tiempo de sesión agotado", e.message)
+    }
+
+    @Test
+    fun initiatorFailsWithConnectionWhenPeerCloses(): Unit = runBlocking {
+        val p = paired()
+        transport.b.close()
+        val e = assertThrowsSuspend<HandshakeFailedException> {
+            SessionHandshake.initiate(transport.a, p.alice, p.bobAsSeenByAlice)
+        }
+        assertEquals(HandshakeFailedException.Reason.CONNECTION, e.reason)
     }
 
     @Test
     fun responderTimesOutWhenPeerIsSilent(): Unit = runBlocking {
         val p = paired()
-        assertThrowsSuspend<HandshakeFailedException> {
+        val e = assertThrowsSuspend<HandshakeFailedException> {
             SessionHandshake.respond(transport.b, p.bob, listOf(p.aliceAsSeenByBob), timeoutMillis = 200)
         }
+        assertEquals(HandshakeFailedException.Reason.TIMEOUT, e.reason)
+        assertEquals("Tiempo de sesión agotado", e.message)
     }
 
     @Test
@@ -235,8 +251,19 @@ class SessionHandshakeTest {
     fun garbageFirstMessageIsRejected(): Unit = runBlocking {
         val p = paired()
         transport.a.send(Primitives.randomBytes(48))
-        assertThrowsSuspend<HandshakeFailedException> {
+        val e = assertThrowsSuspend<HandshakeFailedException> {
             SessionHandshake.respond(transport.b, p.bob, listOf(p.aliceAsSeenByBob))
+        }
+        assertEquals(HandshakeFailedException.Reason.UNKNOWN_CALLER, e.reason)
+    }
+
+    /** El respondedor exige candidatos con identidades distintas (un contacto por identidad). */
+    @Test
+    fun responderRejectsDuplicateCandidateIdentities(): Unit = runBlocking {
+        val p = paired()
+        val dup = listOf(p.aliceAsSeenByBob, ContactKeys(p.alice.publicKey.copyOf(), Primitives.randomBytes(32)))
+        assertThrowsSuspend<IllegalArgumentException> {
+            SessionHandshake.respond(transport.b, p.bob, dup, timeoutMillis = 500)
         }
     }
 
