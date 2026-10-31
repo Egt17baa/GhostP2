@@ -49,10 +49,13 @@ data class ContactKeys(val peerIdentity: ByteArray, val pairSecret: ByteArray) {
  * solo autentica el candidato cuya identidad es la del llamante. Se queda con el primero que
  * autentica (el tiempo de respuesta depende de su posición en la lista; aceptable en v1).
  *
- * Ojo: la PSK (`psk`) solo entra en msg2, así que msg1 autentica la identidad pero no el
- * pairSecret. Si los pairSecret no coinciden, quien lo detecta es el INICIADOR al leer msg2:
- * lanza [HandshakeFailedException] y cierra el flujo. El respondedor ya habrá devuelto su canal,
- * pero este nunca recibe nada válido (su primera lectura falla con EOF o error del canal).
+ * Confirmación de clave: en KKpsk2 la PSK (`psk`) solo entra en msg2, así que msg1 autentica la
+ * identidad pero NO está ligado al pairSecret; sin más, el respondedor terminaría el handshake
+ * aunque los pairSecret no coincidan. Por eso, al completar el handshake, el iniciador envía por
+ * el canal una trama cifrada con [CONFIRM] y el respondedor no devuelve su canal hasta
+ * descifrarla y compararla en tiempo constante. Así AMBOS lados rechazan un pairSecret distinto
+ * durante el handshake (dentro del mismo plazo de 30 s). La trama se consume aquí: la primera
+ * trama de aplicación usa ya el contador siguiente en los dos lados.
  *
  * Errores:
  * - [HandshakeFailedException]: autenticación fallida (identidad desconocida o pairSecret
@@ -69,6 +72,9 @@ object SessionHandshake {
 
     private val PROLOGUE = "GhostP2 session v1".toByteArray(Charsets.UTF_8)
     private val EMPTY = ByteArray(0)
+
+    /** Texto de la trama de confirmación de clave que envía el iniciador tras el handshake. */
+    private val CONFIRM = "GhostP2 session confirm v1".toByteArray(Charsets.UTF_8)
 
     /** Quien llama: iniciador KKpsk2 hacia un contacto conocido. */
     suspend fun initiate(stream: FrameStream, identity: KeyPair25519, contact: ContactKeys): RatchetChannel =
@@ -89,7 +95,12 @@ object SessionHandshake {
             val hs = track(newState(initiator = true, identity, contact))
             stream.send(hs.writeMessage(EMPTY))
             expectEmpty(hs.readMessage(stream.receive()))
-            finish(hs, initiator = true)
+            val channel = finish(hs, initiator = true)
+            destroyOnFailure(channel) {
+                // Confirmación de clave: solo devolvemos el canal si se envió bien
+                stream.send(channel.encrypt(CONFIRM))
+            }
+            channel
         }
     }
 
@@ -116,7 +127,9 @@ object SessionHandshake {
                 }
                 val (contact, hs) = match ?: throw HandshakeFailedException("Llamante desconocido")
                 stream.send(hs.writeMessage(EMPTY))
-                contact to finish(hs, initiator = false)
+                val channel = finish(hs, initiator = false)
+                destroyOnFailure(channel) { expectConfirm(stream, channel) }
+                contact to channel
             } finally {
                 Primitives.wipe(msg1)
             }
@@ -133,6 +146,28 @@ object SessionHandshake {
     private fun finish(hs: HandshakeState, initiator: Boolean): RatchetChannel {
         if (!hs.isComplete) throw HandshakeFailedException("Handshake de sesión incompleto")
         return RatchetChannel.fromHandshake(hs, initiator)
+    }
+
+    /** Recibe y verifica la trama de confirmación del iniciador (prueba que tiene el mismo pairSecret). */
+    private suspend fun expectConfirm(stream: FrameStream, channel: RatchetChannel) {
+        val plaintext = channel.decrypt(stream.receive())
+        try {
+            if (!Primitives.constantTimeEquals(plaintext, CONFIRM)) {
+                throw HandshakeFailedException("Confirmación de sesión no válida")
+            }
+        } finally {
+            Primitives.wipe(plaintext)
+        }
+    }
+
+    /** Si [block] falla (por lo que sea, también cancelación), destruye el canal antes de propagar. */
+    private suspend inline fun destroyOnFailure(channel: RatchetChannel, block: () -> Unit) {
+        try {
+            block()
+        } catch (e: Throwable) {
+            channel.destroy()
+            throw e
+        }
     }
 
     private fun expectEmpty(payload: ByteArray) {

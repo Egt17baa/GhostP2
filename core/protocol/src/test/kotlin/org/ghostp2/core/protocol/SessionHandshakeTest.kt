@@ -82,10 +82,8 @@ class SessionHandshakeTest {
     }
 
     /**
-     * En KKpsk2 la PSK solo entra en msg2 (`psk` al final), así que msg1 autentica la identidad
-     * pero no el pairSecret: quien lo detecta es el iniciador al leer msg2. Este lanza
-     * [HandshakeFailedException] y cierra el flujo, de modo que el canal del respondedor no
-     * llega a servir: su primera lectura falla.
+     * En KKpsk2 msg1 no depende de la PSK; la trama de confirmación hace que AMBOS lados
+     * rechacen un pairSecret distinto durante el handshake.
      */
     @Test
     fun sessionRejectsWrongPairSecret(): Unit = runBlocking {
@@ -93,25 +91,81 @@ class SessionHandshakeTest {
         val wrong = ContactKeys(p.bob.publicKey.copyOf(), Primitives.randomBytes(32))
         val i = async { runCatching { SessionHandshake.initiate(transport.a, p.alice, wrong) } }
         val r = async { runCatching { SessionHandshake.respond(transport.b, p.bob, listOf(p.aliceAsSeenByBob)) } }
+        val eR = r.await().exceptionOrNull()
         val eI = i.await().exceptionOrNull()
+        assertTrue(eR is HandshakeFailedException, "respondedor: $eR")
         assertTrue(eI is HandshakeFailedException, "iniciador: $eI")
-        r.await().onSuccess { (_, bobChannel) ->
-            // El respondedor no puede saberlo aún; el iniciador cerró, así que no llega nada
-            runCatching { bobChannel.decrypt(transport.b.receive()) }
-                .onSuccess { throw AssertionError("El canal del respondedor no debería funcionar") }
-        }.onFailure { assertTrue(it is HandshakeFailedException, "respondedor: $it") }
     }
 
-    /** Al revés: el respondedor guarda un pairSecret distinto; también falla el iniciador. */
     @Test
-    fun responderWithWrongPairSecretIsRejectedByInitiator(): Unit = runBlocking {
+    fun firstApplicationFrameAfterConfirmDecrypts(): Unit = runBlocking {
+        val p = paired()
+        val i = async { SessionHandshake.initiate(transport.a, p.alice, p.bobAsSeenByAlice) }
+        val r = async { SessionHandshake.respond(transport.b, p.bob, listOf(p.aliceAsSeenByBob)) }
+        val alice = i.await()
+        val (_, bob) = r.await()
+        // La confirmación ya se consumió en el handshake: los contadores siguen alineados
+        val msg = "primera trama de aplicación".toByteArray()
+        transport.a.send(alice.encrypt(msg))
+        assertArrayEquals(msg, bob.decrypt(transport.b.receive()))
+        val back = "respuesta".toByteArray()
+        transport.b.send(bob.encrypt(back))
+        assertArrayEquals(back, alice.decrypt(transport.a.receive()))
+    }
+
+    /** Iniciador manual (KKpsk2 a mano): completa msg1/msg2 y luego hace [afterMsg2] en vez de confirmar. */
+    private suspend fun manualInitiator(p: Pair2, afterMsg2: suspend (RatchetChannel) -> Unit) {
+        val hs = org.ghostp2.core.crypto.noise.HandshakeState(
+            org.ghostp2.core.crypto.noise.HandshakePattern.KKpsk2, true, "GhostP2 session v1".toByteArray(),
+            p.alice, p.bob.publicKey.copyOf(), p.pairSecret.copyOf(),
+        )
+        transport.a.send(hs.writeMessage(ByteArray(0)))
+        hs.readMessage(transport.a.receive())
+        afterMsg2(RatchetChannel.fromHandshake(hs, true))
+    }
+
+    @Test
+    fun responderRejectsMissingConfirm(): Unit = runBlocking {
+        val p = paired()
+        val r = async { runCatching { SessionHandshake.respond(transport.b, p.bob, listOf(p.aliceAsSeenByBob)) } }
+        manualInitiator(p) { transport.a.close() }
+        val e = r.await().exceptionOrNull()
+        assertTrue(e is HandshakeFailedException, "respondedor: $e")
+    }
+
+    @Test
+    fun responderRejectsTamperedConfirm(): Unit = runBlocking {
+        val p = paired()
+        val r = async { runCatching { SessionHandshake.respond(transport.b, p.bob, listOf(p.aliceAsSeenByBob)) } }
+        manualInitiator(p) { ch ->
+            val frame = ch.encrypt("GhostP2 session confirm v1".toByteArray())
+            frame[frame.size - 1] = (frame[frame.size - 1].toInt() xor 1).toByte()
+            transport.a.send(frame)
+        }
+        val e = r.await().exceptionOrNull()
+        assertTrue(e is HandshakeFailedException, "respondedor: $e")
+    }
+
+    @Test
+    fun responderRejectsWrongConfirmText(): Unit = runBlocking {
+        val p = paired()
+        val r = async { runCatching { SessionHandshake.respond(transport.b, p.bob, listOf(p.aliceAsSeenByBob)) } }
+        manualInitiator(p) { ch -> transport.a.send(ch.encrypt("otra cosa".toByteArray())) }
+        val e = r.await().exceptionOrNull()
+        assertTrue(e is HandshakeFailedException, "respondedor: $e")
+    }
+
+    /** Al revés: el respondedor guarda un pairSecret distinto; fallan los dos. */
+    @Test
+    fun responderWithWrongPairSecretIsRejectedByBoth(): Unit = runBlocking {
         val p = paired()
         val wrongAtBob = ContactKeys(p.alice.publicKey.copyOf(), Primitives.randomBytes(32))
         val i = async { runCatching { SessionHandshake.initiate(transport.a, p.alice, p.bobAsSeenByAlice) } }
         val r = async { runCatching { SessionHandshake.respond(transport.b, p.bob, listOf(wrongAtBob)) } }
+        val eR = r.await().exceptionOrNull()
         val eI = i.await().exceptionOrNull()
         assertTrue(eI is HandshakeFailedException, "iniciador: $eI")
-        r.await()
+        assertTrue(eR is HandshakeFailedException, "respondedor: $eR")
     }
 
     @Test
