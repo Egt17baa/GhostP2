@@ -93,7 +93,9 @@ sealed interface Notice {
  *
  * **Sesiones (regla R7).** Cada [PeerSession] usa un scope propio `SupervisorJob` hijo del motor sobre
  * `Dispatchers.Default`; su único recolector de larga vida se lanza antes de `start()` (arranque
- * `UNDISPATCHED` solo para que la suscripción exista en el acto; después corre en `Default`).
+ * `UNDISPATCHED` solo para que la suscripción exista en el acto; después corre en `Default`). Ese
+ * recolector entrega cada evento, en orden, primero a `onSessionEvent` (historial) y después a
+ * `sessionEvents`.
  *
  * [shutdown] para bucles y handshakes, cierra las sesiones con `Bye` y deja la presencia **vacía**.
  */
@@ -107,6 +109,12 @@ internal class Connections(
     private val presence: MutableStateFlow<Map<String, Presence>>,
     private val notices: MutableSharedFlow<Notice>,
     private val sessionEvents: MutableSharedFlow<Pair<String, SessionEvent>>,
+    /**
+     * Se llama en el recolector único de cada sesión, para cada evento y antes de publicarlo en
+     * `sessionEvents`, con la sesión que lo emitió (el historial la necesita para cerrar los envíos
+     * rechazados al ver su `Closed`; ver [Conversations]). No debe lanzar.
+     */
+    private val onSessionEvent: suspend (contactId: String, session: PeerSession, event: SessionEvent) -> Unit,
 ) {
     private val engineJob: Job = engineScope.coroutineContext[Job] ?: error("El scope del motor necesita un Job")
 
@@ -519,6 +527,7 @@ internal class Connections(
         sessionsScope.launch(start = CoroutineStart.UNDISPATCHED) {
             try {
                 peer.events.transformWhile { emit(it); it !is SessionEvent.Closed }.collect { event ->
+                    onSessionEvent(link.id, peer, event)
                     sessionEvents.emit(link.id to event)
                     if (event is SessionEvent.Closed) onSessionClosed(link, active, event.reason)
                 }

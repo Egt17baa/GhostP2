@@ -56,7 +56,8 @@ sealed interface EngineStatus {
  * Motor de mensajería P2P sobre Tor. En esta fase: arranque/parada, identidad local, escucha local,
  * publicación de la .onion permanente (ver [OnionPublisher]), invitaciones/emparejamiento
  * ([createInvitation], [acceptInvitation]) y presencia con conexión automática a los contactos
- * ([presence], [onNetworkChanged], [notices]; ver [Connections]).
+ * ([presence], [onNetworkChanged], [notices]; ver [Connections]) y conversaciones en memoria
+ * ([conversations], [sendText], [sendPhoto], [clearConversation]; ver [Conversations]).
  *
  * Todas las corrutinas del motor cuelgan de un `SupervisorJob` hijo de `scope` (regla R7: el scope
  * inyectado debe ser `SupervisorJob() + Dispatchers.Default`); [stop] las cancela y espera, de modo que
@@ -75,6 +76,8 @@ class MessengerEngine(
     private val scope: CoroutineScope,
     private val config: EngineConfig = EngineConfig(),
     private val random: java.util.Random = java.security.SecureRandom(),
+    /** Reloj de pared para las marcas de tiempo de los mensajes (inyectable en pruebas). */
+    clock: () -> Long = System::currentTimeMillis,
 ) {
     private val mutableStatus = MutableStateFlow<EngineStatus>(EngineStatus.Stopped)
     val status: StateFlow<EngineStatus> = mutableStatus.asStateFlow()
@@ -109,6 +112,16 @@ class MessengerEngine(
     internal val sessionEvents: SharedFlow<Pair<String, SessionEvent>> = mutableSessionEvents.asSharedFlow()
 
     @Volatile private var connections: Connections? = null
+
+    private val chats = Conversations(clock)
+
+    /**
+     * Conversaciones por id de contacto, en orden de llegada (como mucho
+     * [MAX_ITEMS_PER_CONVERSATION] por contacto; se descartan los más antiguos). Solo en memoria:
+     * sobreviven a cortes de conexión y se borran con [clearConversation] o al detener el motor
+     * (con el motor parado el mapa está vacío y no se guarda nada).
+     */
+    val conversations: StateFlow<Map<String, List<ChatItem>>> = chats.conversations
 
     private val lifecycle = Mutex()
 
@@ -211,10 +224,13 @@ class MessengerEngine(
         val id = identities.load() ?: createIdentity()
         identity = id
         startTor(engineScope)
+        chats.open()
         val c = Connections(
             tor, contacts, config, random, engineScope, KeyPair25519(id.identityPrivate, id.identityPublic),
             mutablePresence, mutableNotices, mutableSessionEvents,
-        )
+        ) { contactId, session, event ->
+            if (chats.onEvent(contactId, session, event)) mutableNotices.emit(Notice.MessageArrived(contactId))
+        }
         connections = c
         val l = Listener(engineScope, ::onIncoming)
         listener = l
@@ -228,6 +244,48 @@ class MessengerEngine(
     /** Corta las esperas de reintento de todos los contactos, vuelve a la espera mínima y reintenta ya. */
     fun onNetworkChanged() {
         connections?.onNetworkChanged()
+    }
+
+    /**
+     * Envía un texto (máx. [PeerSession.MAX_TEXT_CHARS] caracteres Unicode) y devuelve su id. No
+     * suspende. El elemento queda en [conversations] al volver: `Sending` si hay sesión (después
+     * `Delivered` o `Failed`), o ya `Failed(NOT_CONNECTED)` si no la hay; nunca se encola ni se reintenta.
+     * Con el motor parado no se guarda nada.
+     * @throws IllegalArgumentException si el texto es demasiado largo (como `PeerSession`; no se guarda nada).
+     */
+    fun sendText(contactId: String, text: String): String {
+        require(text.codePointCount(0, text.length) <= PeerSession.MAX_TEXT_CHARS) {
+            "El texto supera ${PeerSession.MAX_TEXT_CHARS} caracteres"
+        }
+        val peer = sessionFor(contactId)
+        return chats.addOutgoing(contactId, ChatContent.Text(text), peer?.let { p -> outbound(p) { p.sendText(text) } })
+    }
+
+    /**
+     * Envía una foto (1..[PeerSession.MAX_PHOTO_BYTES] bytes) y devuelve su id; como [sendText], con
+     * progreso `Sending(enviados, total)`. Se copia [jpeg] al entrar: el array del llamante no se
+     * envía, no se guarda ni se borra (puede reutilizarlo enseguida). La copia es la del historial.
+     * @throws IllegalArgumentException si la foto está vacía o es demasiado grande (no se guarda nada).
+     */
+    fun sendPhoto(contactId: String, jpeg: ByteArray): String {
+        require(jpeg.isNotEmpty()) { "La foto está vacía" }
+        require(jpeg.size <= PeerSession.MAX_PHOTO_BYTES) { "La foto supera ${PeerSession.MAX_PHOTO_BYTES} bytes" }
+        val copy = jpeg.copyOf()
+        val peer = sessionFor(contactId)
+        try {
+            return chats.addOutgoing(contactId, ChatContent.Photo(copy), peer?.let { p -> outbound(p) { p.sendPhoto(copy) } })
+        } catch (e: Exception) {
+            Primitives.wipe(copy)
+            throw e
+        }
+    }
+
+    private fun outbound(peer: PeerSession, send: () -> String) =
+        Conversations.Outbound(peer, { peer.isOpen.value }, send)
+
+    /** Borra la conversación con el contacto (fotos rellenadas con ceros); las demás no cambian. */
+    fun clearConversation(contactId: String) {
+        chats.clear(contactId)
     }
 
     /** Sesión abierta con el contacto, si la hay (para las tareas 6–7). */
@@ -587,7 +645,8 @@ class MessengerEngine(
         publisher = null
         pendingClientAuthKeys.clear()
         runCatching { tor.stop() }
-        // Historial en memoria: todavía no existe (tareas posteriores lo borran aquí).
+        // Sesiones y recolectores ya terminados: ningún envío lee ya las fotos.
+        chats.clearAll()
         mutableMyOnion.value = null
         identity = null
         running = false
