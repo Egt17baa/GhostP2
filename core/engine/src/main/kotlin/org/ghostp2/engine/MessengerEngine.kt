@@ -89,6 +89,8 @@ class MessengerEngine(
     /**
      * Presencia por id de contacto mientras el motor está en marcha (ver [Connections]). Con el motor
      * parado el mapa está **vacío** (no se conserva un `OFFLINE` por contacto).
+     * `ONLINE` puede aparecer un instante antes de que `sessionFor` devuelva la sesión: esta solo se
+     * expone una vez terminado su `start()`.
      */
     val presence: StateFlow<Map<String, Presence>> = mutablePresence.asStateFlow()
 
@@ -163,13 +165,26 @@ class MessengerEngine(
                 boot.await()
                 mutableStatus.value = EngineStatus.Online
             } catch (e: CancellationException) {
-                // Arranque cancelado por stop() (o el llamante fue cancelado).
-                withContext(NonCancellable) { releaseResources() }
-                mutableStatus.value = EngineStatus.Stopped
+                // Arranque cancelado por stop() (o el llamante fue cancelado). Manda la cancelación
+                // original: un fallo secundario al liberar se adjunta como suprimido.
+                try {
+                    withContext(NonCancellable) { releaseResources() }
+                } catch (secondary: Exception) {
+                    e.addSuppressed(secondary)
+                } finally {
+                    mutableStatus.value = EngineStatus.Stopped
+                }
                 if (!currentCoroutineContext().isActive) throw e
             } catch (e: Exception) {
-                withContext(NonCancellable) { releaseResources() }
-                mutableStatus.value = EngineStatus.Error(e.message ?: e.javaClass.simpleName)
+                // Un fallo de arranque nunca hace lanzar a start(): se informa en Error con la causa
+                // primaria y un fallo secundario al liberar queda como suprimido de ella.
+                try {
+                    withContext(NonCancellable) { releaseResources() }
+                } catch (secondary: Exception) {
+                    e.addSuppressed(secondary)
+                } finally {
+                    mutableStatus.value = EngineStatus.Error(e.message ?: e.javaClass.simpleName)
+                }
             }
         }
     }
@@ -183,7 +198,8 @@ class MessengerEngine(
         bootJob?.cancel()
         lifecycle.withLock {
             try {
-                if (running) releaseResources()
+                // Como en start(): un llamante cancelado no deja Tor ni `running` a medio liberar.
+                if (running) withContext(NonCancellable) { releaseResources() }
             } finally {
                 mutableStatus.value = EngineStatus.Stopped
             }

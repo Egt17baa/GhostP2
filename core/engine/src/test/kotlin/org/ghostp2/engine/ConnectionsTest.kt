@@ -140,11 +140,16 @@ class ConnectionsTest {
             h.network.setOnline(false)
             awaitPresence(h.engine(0), bInA, Presence.OFFLINE)
             awaitPresence(h.engine(1), aInB, Presence.OFFLINE)
-            h.network.setOnline(true)
+            // Las dos próximas llamadas con red (una por lado: cada bucle tiene como mucho una en curso)
+            // se esperan mutuamente: ninguna sesión puede formarse antes de que llamen los dos, así que
+            // ambos lados llaman siempre y a la vez (determinista, sin depender de tiempos).
+            h.network.gateNextConnects(2)
             val before = listOf(h.tor(0).connectAttempts.get(), h.tor(1).connectAttempts.get())
+            h.network.setOnline(true)
             // Reinicio simultáneo de los dos bucles: ambos intentan conectar a la vez.
             listOf(0, 1).map { i -> async(Dispatchers.Default) { h.engine(i).onNetworkChanged() } }.awaitAll()
             awaitSameSession(h, bInA, aInB)
+            assertEquals(0, h.network.gateOpenSlots(), "ronda $round: no llamaron los dos lados")
             for (i in 0..1) {
                 assertTrue(h.tor(i).connectAttempts.get() > before[i], "ronda $round: el motor $i no llamó")
             }

@@ -247,7 +247,9 @@ internal class Connections(
             val link = next.getOrPut(contact.id) { Link(contact.id, contact) }
             link.mutex.withLock {
                 link.contact = contact
-                if (contact.status == ContactStatus.ACTIVE && link.loop == null && !closed) {
+                // `exitIfInactive` pone `loop = null` con este mismo cerrojo; `!isActive` recupera además
+                // un bucle que terminó por una excepción inesperada.
+                if (contact.status == ContactStatus.ACTIVE && link.loop?.isActive != true && !closed) {
                     link.loop = loopsScope.launch { runLoop(link) }
                 }
                 refresh(link)
@@ -461,8 +463,24 @@ internal class Connections(
                 when (decision) {
                     is Decision.Wrap -> {
                         // start() espera al recolector (ya suscrito) y lanza el lector; siempre se completa.
-                        withContext(NonCancellable) { created!!.peer.start() }
-                        created!!.started = true
+                        val active = created!!
+                        try {
+                            withContext(NonCancellable) { active.peer.start() }
+                        } catch (e: Throwable) {
+                            // No debería pasar; si pasa, el hueco del contacto no se queda ocupado.
+                            active.job.cancel()
+                            discard(stream, channel)
+                            withContext(NonCancellable) {
+                                link.mutex.withLock {
+                                    if (link.session.value === active) {
+                                        link.session.value = null
+                                        refresh(link)
+                                    }
+                                }
+                            }
+                            throw e
+                        }
+                        active.started = true
                         return true
                     }
                     Decision.Discard -> {

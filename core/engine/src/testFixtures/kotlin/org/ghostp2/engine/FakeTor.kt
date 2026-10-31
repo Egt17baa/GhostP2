@@ -16,6 +16,8 @@ import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 /** Servicio publicado en la red falsa (para inspección en pruebas). */
@@ -60,6 +62,30 @@ class FakeTorNetwork {
             openSockets.toList().forEach { runCatching { it.close() } }
             openSockets.clear()
         }
+    }
+
+    @Volatile private var connectGate: CountDownLatch? = null
+    private val gatedConnects = AtomicInteger(0)
+
+    /**
+     * Los `n` próximos `connect` con la red disponible (de cualquier [FakeTor]) esperan a que hayan llegado los `n` y luego
+     * siguen a la vez (como mucho 10 s). Sirve para forzar llamadas simultáneas.
+     */
+    fun gateNextConnects(n: Int) {
+        require(n > 0)
+        gatedConnects.set(n)
+        connectGate = CountDownLatch(n)
+    }
+
+    /** Plazas de la puerta de [gateNextConnects] que aún no se han usado (0 = todas pasaron). */
+    fun gateOpenSlots(): Int = gatedConnects.get().coerceAtLeast(0)
+
+    /** Si hay una puerta activa y quedan plazas, se suma a ella y espera a los demás. */
+    internal suspend fun passGate() {
+        val gate = connectGate ?: return
+        if (gatedConnects.getAndDecrement() <= 0) return
+        gate.countDown()
+        withContext(Dispatchers.IO) { gate.await(10, TimeUnit.SECONDS) }
     }
 
     fun failNextConnects(n: Int) {
@@ -172,6 +198,7 @@ class FakeTor(private val network: FakeTorNetwork) : TorTransport {
         val target = OnionAddress.normalize(onion)
         if (mutableState.value != TorState.Ready) throw IOException("Tor no está listo")
         if (!network.online) throw IOException("Red sin conexión")
+        network.passGate()
         if (network.consumeFailure()) throw IOException("Fallo de conexión simulado")
         val service = network.published.value[target] ?: throw IOException("Servicio oculto no disponible")
         if (service.virtualPort != port) throw IOException("Puerto virtual incorrecto")
