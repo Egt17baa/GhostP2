@@ -85,7 +85,8 @@ sealed interface Notice {
  * suyo; uno borrado lo para y cierra su sesión.
  *
  * **Entrantes.** Cada conexión del listener hace [SessionHandshake.respond] con los contactos `ACTIVE`
- * como candidatos; cualquier fallo (llamante desconocido, conexión, plazo…) cierra en silencio.
+ * como candidatos; cualquier fallo (llamante desconocido, conexión, plazo…) cierra en silencio. Como
+ * mucho [MAX_CONCURRENT_INCOMING] handshakes a la vez; las conexiones de más se cierran al aceptarlas.
  *
  * **Desempate (PROTOCOLO §10.5).** Por contacto puede haber dos conexiones físicas autenticadas: la
  * iniciada por mí y la iniciada por él. Se conserva siempre la iniciada por el lado de `identityKey`
@@ -170,6 +171,9 @@ internal class Connections(
     /** Handshakes entrantes que todavía podrían ser la llamada preferida de un contacto. */
     private val incomingInFlight = MutableStateFlow(0)
 
+    /** Handshakes entrantes en curso (cupo [MAX_CONCURRENT_INCOMING]; como el de las invitaciones). */
+    private val incomingActive = java.util.concurrent.atomic.AtomicInteger(0)
+
     @Volatile private var closed = false
 
     private var observer: Job? = null
@@ -239,15 +243,25 @@ internal class Connections(
     private fun startedSession(contactId: String): Active? =
         links.value[contactId]?.session?.value?.takeIf { it.started }
 
-    /** Conexión entrante del listener (síncrono: lanza el handshake y vuelve enseguida). */
+    /**
+     * Conexión entrante del listener (síncrono: lanza el handshake y vuelve enseguida). Como mucho
+     * [MAX_CONCURRENT_INCOMING] handshakes a la vez: por encima, el socket se cierra en el acto (evita
+     * agotar descriptores y memoria con conexiones que nunca envían msg1).
+     */
     @OptIn(DelicateCoroutinesApi::class) // ATOMIC: el finally que cierra el socket debe ejecutarse siempre
     fun accept(socket: Socket) {
         if (closed) {
             runCatching { socket.close() }
             return
         }
+        if (incomingActive.incrementAndGet() > MAX_CONCURRENT_INCOMING) {
+            incomingActive.decrementAndGet()
+            runCatching { socket.close() }
+            return
+        }
         incomingInFlight.update { it + 1 }
-        // ATOMIC: el cuerpo (y su finally, que cierra el socket) corre aunque se cancele antes de empezar.
+        // ATOMIC: el cuerpo (y su finally, que cierra el socket y libera el cupo) corre aunque se cancele
+        // antes de empezar.
         loopsScope.launch(start = CoroutineStart.ATOMIC) {
             var counted = true
             val uncount = { if (counted) { counted = false; incomingInFlight.update { it - 1 } } }
@@ -261,6 +275,7 @@ internal class Connections(
                 runCatching { socket.close() }
             } finally {
                 uncount()
+                incomingActive.decrementAndGet()
             }
         }
     }
@@ -316,8 +331,9 @@ internal class Connections(
             link.mutex.withLock {
                 // Un enlace dado de baja conserva su contacto (cuyos secretos el motor ya pudo borrar).
                 if (!link.removed) link.contact = contact
-                // `exitIfInactive` pone `loop = null` con este mismo cerrojo; `!isActive` recupera además
-                // un bucle que terminó por una excepción inesperada.
+                // `exitIfInactive` pone `loop = null` con este mismo cerrojo; `!isActive` recupera además,
+                // en la siguiente instantánea, un bucle que terminó por una excepción inesperada (el
+                // `CoroutineExceptionHandler` del scope de la app evita que esa excepción cierre el proceso).
                 if (contact.status == ContactStatus.ACTIVE && link.loop?.isActive != true && !closed &&
                     !link.removed && !link.unpairing
                 ) {
@@ -480,10 +496,11 @@ internal class Connections(
                 }
                 Outcome.Busy -> wait = if (link.session.value != null) 0 else backoff.jitter(backoff.current)
                 Outcome.IdentityChanged -> {
-                    markIdentityChanged(link)
-                    // Si se marcó, sale (salvo que se haya vuelto a emparejar justo ahora); si no, sigue.
+                    val marked = markIdentityChanged(link)
+                    // Si se marcó, sale (salvo que se haya vuelto a emparejar justo ahora); si no, sigue:
+                    // con la espera actual si se volvió a emparejar, o creciente si no se pudo guardar.
                     if (exitIfInactive(link)) return
-                    wait = backoff.jitter(backoff.current)
+                    wait = if (marked) backoff.jitter(backoff.current) else backoff.next()
                 }
                 Outcome.Failed -> wait = backoff.next()
             }
@@ -578,22 +595,30 @@ internal class Connections(
     /**
      * `AUTH` al llamar: el contacto pasa a `IDENTITY_CHANGED` (guardado) y se avisa. Si mientras tanto
      * se volvió a emparejar (otra identidad o pairSecret guardados), no se marca: el bucle nuevo sigue.
+     * Si el almacenamiento falla al leer o guardar, tampoco se marca (devuelve false, sin aviso): el
+     * bucle sigue con la espera creciente y lo vuelve a intentar en el siguiente `AUTH`.
      */
     private suspend fun markIdentityChanged(link: Link): Boolean {
         val used = link.contact
         val marked = withContext(NonCancellable) {
             // Con `contactWrites`: un borrado en curso o ya hecho no se deshace con este upsert.
-            val changed = contactWrites.withLock {
-                if (link.removed || link.unpairing) return@withLock null
-                val stored = contacts.all().firstOrNull { it.id == link.id } ?: return@withLock null
-                if (stored.status != ContactStatus.ACTIVE ||
-                    !stored.peerIdentity.contentEquals(used.peerIdentity) ||
-                    !stored.pairSecret.contentEquals(used.pairSecret)
-                ) {
-                    return@withLock null
+            val changed = try {
+                contactWrites.withLock {
+                    if (link.removed || link.unpairing) return@withLock null
+                    val stored = contacts.all().firstOrNull { it.id == link.id } ?: return@withLock null
+                    if (stored.status != ContactStatus.ACTIVE ||
+                        !stored.peerIdentity.contentEquals(used.peerIdentity) ||
+                        !stored.pairSecret.contentEquals(used.pairSecret)
+                    ) {
+                        return@withLock null
+                    }
+                    // Primero se guarda; la presencia solo muestra IDENTITY_CHANGED una vez persistido.
+                    stored.copy(status = ContactStatus.IDENTITY_CHANGED).also { contacts.upsert(it) }
                 }
-                // Primero se guarda; la presencia solo muestra IDENTITY_CHANGED una vez persistido.
-                stored.copy(status = ContactStatus.IDENTITY_CHANGED).also { contacts.upsert(it) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                null // almacenamiento no disponible: como si no se hubiera marcado
             } ?: return@withContext false
             link.mutex.withLock {
                 // Solo si el observador no ha entregado nada más nuevo desde `used`: si ya entregó otra
@@ -813,6 +838,9 @@ internal class Connections(
         const val NANOS_PER_MILLI = 1_000_000L
     }
 }
+
+/** Máximo de handshakes entrantes simultáneos; las conexiones de más se cierran nada más aceptarlas. */
+internal const val MAX_CONCURRENT_INCOMING = 32
 
 /** Compara claves como enteros sin signo, byte a byte (la más corta va antes si es prefijo). */
 internal fun compareUnsigned(a: ByteArray, b: ByteArray): Int {

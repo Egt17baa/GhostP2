@@ -19,7 +19,7 @@ sealed interface ChatContent {
     /**
      * Foto JPEG. [jpeg] es el array VIVO del historial del motor (no una copia): se rellena con ceros
      * en cuanto el elemento sale del historial (límite de 500, [MessengerEngine.clearConversation] o
-     * [MessengerEngine.stop]). Quien lo lea (la interfaz) no debe modificarlo y, si necesita los bytes
+     * [MessengerEngine.stop]) o se descarta por el presupuesto global de fotos (pasa a [PhotoDiscarded]). Quien lo lea (la interfaz) no debe modificarlo y, si necesita los bytes
      * más allá de mostrarlos en ese momento, debe copiarlos.
      */
     class Photo(val jpeg: ByteArray) : ChatContent {
@@ -29,6 +29,14 @@ sealed interface ChatContent {
 
         override fun toString(): String = "Photo(${jpeg.size} bytes)"
     }
+
+    /**
+     * Foto descartada para respetar el presupuesto global de bytes de fotos en memoria
+     * ([EngineConfig.maxPhotoBytesInMemory]): sus bytes ya se rellenaron con ceros y solo queda su
+     * tamaño. El elemento sigue en el historial (mismo id, dirección, estado y hora) para que la
+     * interfaz muestre "foto descartada".
+     */
+    data class PhotoDiscarded(val sizeBytes: Int) : ChatContent
 }
 
 /**
@@ -59,6 +67,9 @@ data class ChatItem(
 /** Máximo de elementos por conversación; al superarlo se descartan los más antiguos. */
 internal const val MAX_ITEMS_PER_CONVERSATION = 500
 
+/** Presupuesto global por defecto de bytes de fotos en el historial (todas las conversaciones): 64 MiB. */
+const val DEFAULT_MAX_PHOTO_BYTES_IN_MEMORY: Long = 64L * 1024 * 1024
+
 /**
  * Historial en memoria del motor, por id de contacto (nunca se escribe en disco).
  *
@@ -84,6 +95,13 @@ internal const val MAX_ITEMS_PER_CONVERSATION = 500
  * historial y `PeerSession` (que lo lee mientras envía). Al quitar una foto del historial se rellena
  * con ceros, salvo si su envío sigue en curso: entonces se borra al llegar su `Delivered`/`Failed`.
  * [clearAll] (al parar el motor, con las sesiones ya cerradas) los borra todos.
+ *
+ * **Presupuesto global de fotos.** La suma de los bytes de las fotos del historial (todas las
+ * conversaciones) no pasa de `maxPhotoBytes`: tras insertar una foto (o terminar el envío de una),
+ * con el mismo cerrojo, se descartan primero las fotos más antiguas (por orden de inserción, sin
+ * mirar el contacto). Una foto descartada se rellena con ceros y su elemento se queda en el historial
+ * como [ChatContent.PhotoDiscarded]. Las fotos cuyo envío sigue en curso no se descartan (`PeerSession`
+ * aún las lee); cuentan en la suma y pasan a ser descartables al terminar su envío.
  *
  * Entre [clearAll] y el siguiente [open] no se guarda nada: los envíos devuelven un id sin llamar a
  * la sesión y las fotos (salientes o entrantes) se borran en el acto. Igual con un contacto que no
@@ -112,6 +130,7 @@ internal const val MAX_ITEMS_PER_CONVERSATION = 500
 internal class Conversations(
     private val clock: () -> Long,
     private val maxItems: Int = MAX_ITEMS_PER_CONVERSATION,
+    private val maxPhotoBytes: Long = DEFAULT_MAX_PHOTO_BYTES_IN_MEMORY,
 ) {
     /** Por dónde sale un envío: la sesión (solo su identidad), si sigue abierta y cómo enviar. */
     class Outbound(val session: Any, val isOpen: () -> Boolean, val send: () -> String)
@@ -136,6 +155,13 @@ internal class Conversations(
     private val known = HashSet<String>()
     private val tombstones = HashSet<String>()
     private val pins = HashSet<String>()
+
+    /** Fotos del historial (por identidad del array) con su número de orden de inserción. */
+    private val photoOrder = java.util.IdentityHashMap<ByteArray, Long>()
+    private var photoSeq = 0L
+
+    /** Suma de los tamaños de las fotos de [photoOrder]. */
+    private var photoBytes = 0L
 
     /** Empieza a guardar (al arrancar el motor). */
     fun open() = synchronized(lock) { accepting = true }
@@ -246,6 +272,8 @@ internal class Conversations(
         inFlightPhotos.clear()
         wipeWhenDone.clear()
         sending.clear()
+        photoOrder.clear()
+        photoBytes = 0
         state.value = emptyMap()
     }
 
@@ -264,6 +292,8 @@ internal class Conversations(
         val photo = inFlightPhotos.remove(id)
         if (wipeWhenDone.remove(id)) photo?.let { Primitives.wipe(it) }
         updateStatus(contactId, id) { current -> if (current is DeliveryStatus.Sending) status else null }
+        // Una foto que deja de enviarse pasa a ser descartable.
+        if (photo != null) enforcePhotoBudget()
     }
 
     /** Cambia el estado del saliente `id` si `next` devuelve uno (null = no cambia). */
@@ -286,12 +316,46 @@ internal class Conversations(
             list
         }
         state.value = state.value + (contactId to kept)
+        val photo = item.content as? ChatContent.Photo ?: return
+        photoOrder[photo.jpeg] = photoSeq++
+        photoBytes += photo.jpeg.size
+        enforcePhotoBudget()
     }
 
     /** Un elemento sale del historial: su foto se borra ya o, si aún se está enviando, al terminar. */
     private fun release(item: ChatItem) {
         val content = item.content as? ChatContent.Photo ?: return
+        untrack(content.jpeg)
         if (inFlightPhotos[item.id] === content.jpeg) wipeWhenDone += item.id else Primitives.wipe(content.jpeg)
+    }
+
+    private fun untrack(jpeg: ByteArray) {
+        if (photoOrder.remove(jpeg) != null) photoBytes -= jpeg.size
+    }
+
+    /** Descarta las fotos más antiguas (no en envío) hasta volver al presupuesto. Con `lock` tomado. */
+    private fun enforcePhotoBudget() {
+        while (photoBytes > maxPhotoBytes) {
+            var victim: Pair<String, Int>? = null
+            var victimSeq = Long.MAX_VALUE
+            for ((contactId, list) in state.value) {
+                list.forEachIndexed { index, item ->
+                    val jpeg = (item.content as? ChatContent.Photo)?.jpeg ?: return@forEachIndexed
+                    val seq = photoOrder[jpeg] ?: return@forEachIndexed
+                    if (inFlightPhotos[item.id] !== jpeg && seq < victimSeq) {
+                        victim = contactId to index
+                        victimSeq = seq
+                    }
+                }
+            }
+            val (contactId, index) = victim ?: return // solo quedan fotos enviándose
+            val list = state.value.getValue(contactId)
+            val jpeg = (list[index].content as ChatContent.Photo).jpeg
+            untrack(jpeg)
+            Primitives.wipe(jpeg)
+            val updated = list.toMutableList().also { it[index] = it[index].copy(content = ChatContent.PhotoDiscarded(jpeg.size)) }
+            state.value = state.value + (contactId to updated)
+        }
     }
 
     private fun wipe(content: ChatContent) {

@@ -135,7 +135,7 @@ class MessengerEngine(
      * conocidos con el motor parado. Existe ya mientras Tor arranca, a diferencia de los `links` de
      * [Connections].
      */
-    private val chats = Conversations(clock)
+    private val chats = Conversations(clock, maxPhotoBytes = config.maxPhotoBytesInMemory)
 
     /**
      * Serializa TODAS las escrituras del motor en `contacts` (emparejar, deshacer, borrar, renombrar,
@@ -144,8 +144,36 @@ class MessengerEngine(
      */
     private val contactWrites = Mutex()
 
-    /** Borrados en curso por id (local o aviso recibido): las llamadas simultáneas comparten el resultado. */
-    private val deletions = ConcurrentHashMap<String, CompletableDeferred<UnpairDelivery>>()
+    /**
+     * Borrados en curso por id (local o aviso recibido): las llamadas simultáneas comparten el resultado.
+     * Solo se modifica con su propio monitor, en el mismo paso que se publica [deleting].
+     */
+    private val deletions = HashMap<String, CompletableDeferred<UnpairDelivery>>()
+
+    private val mutableDeleting = MutableStateFlow<Set<String>>(emptySet())
+
+    /**
+     * Ids de contactos que se están borrando ahora mismo ([deleteContact] en curso, p. ej. esperando a
+     * entregar `Unpair`, o un aviso `Unpair` recibido que se está aplicando). Solo en memoria: si el
+     * proceso muere a mitad, el borrado no se reanuda (plan 3).
+     */
+    val deleting: StateFlow<Set<String>> = mutableDeleting.asStateFlow()
+
+    /** Registra `mine` como el borrado en curso de `id`; si ya había uno, lo devuelve (y no registra nada). */
+    private fun claimDeletion(id: String, mine: CompletableDeferred<UnpairDelivery>): CompletableDeferred<UnpairDelivery>? =
+        synchronized(deletions) {
+            deletions[id]?.let { return it }
+            deletions[id] = mine
+            mutableDeleting.value = deletions.keys.toSet()
+            null
+        }
+
+    private fun releaseDeletion(id: String, mine: CompletableDeferred<UnpairDelivery>) {
+        synchronized(deletions) {
+            if (deletions[id] === mine) deletions.remove(id)
+            mutableDeleting.value = deletions.keys.toSet()
+        }
+    }
 
     /**
      * Conversaciones por id de contacto, en orden de llegada (como mucho
@@ -154,6 +182,8 @@ class MessengerEngine(
      * (con el motor parado el mapa está vacío y no se guarda nada). Solo hay conversaciones de
      * contactos guardados. Las fotos ([ChatContent.Photo.jpeg]) son los arrays vivos del historial y
      * se rellenan con ceros al salir de él: la interfaz debe copiar los bytes que quiera conservar.
+     * Entre todas las conversaciones las fotos ocupan como mucho `EngineConfig.maxPhotoBytesInMemory`
+     * bytes: al superarlo, las más antiguas pasan a [ChatContent.PhotoDiscarded] (bytes con ceros).
      */
     val conversations: StateFlow<Map<String, List<ChatItem>>> = chats.conversations
 
@@ -432,7 +462,7 @@ class MessengerEngine(
      */
     suspend fun deleteContact(contactId: String): UnpairDelivery {
         val mine = CompletableDeferred<UnpairDelivery>()
-        deletions.putIfAbsent(contactId, mine)?.let { return it.await() }
+        claimDeletion(contactId, mine)?.let { return it.await() }
         try {
             return runDelete(contactId).also { mine.complete(it) }
         } catch (e: CancellationException) {
@@ -442,7 +472,7 @@ class MessengerEngine(
             mine.completeExceptionally(e)
             throw e
         } finally {
-            deletions.remove(contactId, mine)
+            releaseDeletion(contactId, mine)
         }
     }
 
@@ -470,7 +500,7 @@ class MessengerEngine(
      */
     private suspend fun onPeerUnpaired(contactId: String) {
         val mine = CompletableDeferred<UnpairDelivery>()
-        if (deletions.putIfAbsent(contactId, mine) != null) return
+        if (claimDeletion(contactId, mine) != null) return
         try {
             val contact = contacts.all().firstOrNull { it.id == contactId } ?: return
             withContext(NonCancellable) { removeLocally(contact) }
@@ -481,7 +511,7 @@ class MessengerEngine(
             // Fallo del repositorio: el contacto queda olvidado en esta ejecución; nada más que hacer.
         } finally {
             mine.complete(UnpairDelivery.NOT_DELIVERED)
-            deletions.remove(contactId, mine)
+            releaseDeletion(contactId, mine)
         }
     }
 
@@ -538,7 +568,7 @@ class MessengerEngine(
     private suspend fun syncOrRetry() {
         val ok = publication.withLock {
             val p = publisher ?: return@withLock true
-            runCatching { syncLocked(p) }.isSuccess
+            succeeded { syncLocked(p) }
         }
         if (!ok) scheduleRepublish()
     }
@@ -579,7 +609,7 @@ class MessengerEngine(
                 publicationDirty.set(false)
                 val ok = publication.withLock {
                     val p = publisher ?: return@withLock true
-                    runCatching { syncLocked(p) }.isSuccess
+                    succeeded { syncLocked(p) }
                 }
                 if (ok) {
                     failures = 0
@@ -980,12 +1010,15 @@ class MessengerEngine(
      * Guarda el contacto emparejado (reemplaza al de la misma identidad), registra la autorización
      * para su .onion y re-publica la mía con su clave (retirando a la vez `releaseKey`, la clave de
      * reserva del invitador). Devuelve el id del contacto. Es atómico para el usuario: si algo falla
-     * tras guardar, se deshace (contacto anterior, autorización y publicación) y se relanza.
-     * Los arrays de `result` pasan a ser datos guardados: no se borran.
+     * tras guardar, se deshace (ver [rollbackPairing]) y se relanza. El contacto anterior del mismo id
+     * se lee con `contactWrites` tomado, en el mismo paso que el guardado.
+     * Los arrays de `result` pasan al [Contact] que se guarda y no se rellenan con ceros aquí: el
+     * repositorio guarda sus propias copias (el real, cifradas) y estos arrays quedan para el recolector
+     * de basura (PROTOCOLO §15).
      */
     private suspend fun finishPairing(result: PairingResult, myClientAuthPublic: ByteArray, releaseKey: ByteArray?): String {
         val id = contactIdFor(result.peerIdentity)
-        val previous = contacts.all().firstOrNull { it.id == id }
+        var previous: Contact? = null
         val contact = Contact(
             id = id,
             name = "Contacto nuevo",
@@ -1000,6 +1033,7 @@ class MessengerEngine(
         try {
             // Conocido antes de guardarlo: un mensaje suyo que llegue enseguida ya se guarda.
             contactWrites.withLock {
+                previous = contacts.all().firstOrNull { it.id == id }
                 chats.addKnown(id)
                 contacts.upsert(contact)
             }
@@ -1013,23 +1047,53 @@ class MessengerEngine(
             withContext(NonCancellable) { rollbackPairing(contact, previous) }
             throw e
         }
-        if (previous != null && previous.peerOnion != result.peerOnion) {
-            runCatching { tor.removeClientAuth(previous.peerOnion) }
+        val old = previous
+        if (old != null && old.peerOnion != result.peerOnion) {
+            bestEffort { tor.removeClientAuth(old.peerOnion) }
         }
         return id
     }
 
     /**
-     * Deshace un [finishPairing] a medias; cada paso es independiente (lo que falle se ignora). Sin
-     * contacto anterior se olvida ([Conversations.forget]) antes de borrarlo del repositorio.
+     * Deshace un [finishPairing] a medias; cada paso es independiente (lo que falle se ignora). Con
+     * `contactWrites` tomado se mira qué hay guardado con ese id:
+     * - Sigue siendo `contact` (mismo `pairSecret` y .onion): se restaura `previous` (y su autorización
+     *   en Tor) o, sin anterior, se olvida ([Conversations.forget]) y se borra.
+     * - No hay nada (p. ej. el usuario lo borró mientras tanto): no se resucita `previous` ni se vuelve a
+     *   registrar su autorización; solo se olvida.
+     * - Es otro emparejamiento (más nuevo): se respeta intacto. Si comparte .onion con `contact`, se
+     *   vuelve a registrar su autorización en vez de quitarla.
      */
     private suspend fun rollbackPairing(contact: Contact, previous: Contact?) {
-        if (previous == null) chats.forget(contact.id)
+        var restored = false
+        var replacement: Contact? = null
         contactWrites.withLock {
-            runCatching { if (previous != null) contacts.upsert(previous) else contacts.delete(contact.id) }
+            bestEffort {
+                val stored = contacts.all().firstOrNull { it.id == contact.id }
+                when {
+                    stored == null -> chats.forget(contact.id)
+                    stored.pairSecret.contentEquals(contact.pairSecret) && stored.peerOnion == contact.peerOnion -> {
+                        if (previous != null) {
+                            contacts.upsert(previous)
+                            restored = true
+                        } else {
+                            chats.forget(contact.id)
+                            contacts.delete(contact.id)
+                        }
+                    }
+                    else -> replacement = stored
+                }
+            }
         }
-        runCatching { tor.removeClientAuth(contact.peerOnion) }
-        if (previous != null) runCatching { tor.addClientAuth(previous.peerOnion, previous.clientAuthPrivateForPeerOnion) }
+        val other = replacement
+        if (other != null && other.peerOnion == contact.peerOnion) {
+            bestEffort { tor.addClientAuth(other.peerOnion, other.clientAuthPrivateForPeerOnion) }
+        } else {
+            bestEffort { tor.removeClientAuth(contact.peerOnion) }
+        }
+        if (restored && previous != null) {
+            bestEffort { tor.addClientAuth(previous.peerOnion, previous.clientAuthPrivateForPeerOnion) }
+        }
         publication.withLock { pendingClientAuthKeys.remove(contact.myClientAuthPublic.toHex()) }
         syncOrRetry()
     }
@@ -1117,6 +1181,28 @@ private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }
 
 /** Mensaje de [EngineStatus.Error] si Tor pasa a `Off` con el motor `Online` sin que se pidiera. */
 private const val TOR_STOPPED = "Tor se detuvo"
+
+/** Ejecuta `block` ignorando sus fallos, salvo la cancelación (que se relanza). */
+private inline fun bestEffort(block: () -> Unit) {
+    try {
+        block()
+    } catch (e: CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        // Mejor esfuerzo: el fallo se ignora.
+    }
+}
+
+/** `true` si `block` termina sin lanzar; la cancelación se relanza (a diferencia de `runCatching`). */
+private inline fun succeeded(block: () -> Unit): Boolean =
+    try {
+        block()
+        true
+    } catch (e: CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        false
+    }
 
 /** Fallo al arrancar Tor; el mensaje es el que se muestra en [EngineStatus.Error]. */
 internal class TorStartException(message: String) : Exception(message)

@@ -153,6 +153,20 @@ class UnpairTest {
     }
 
     @Test
+    fun deletingExposesTheContactsBeingDeleted() = runBlocking<Unit> {
+        val (h, bInA, _) = pairedOnline(config.copy(unpairDeliveryWindowMillis = 1_000))
+        assertEquals(emptySet<String>(), h.engine(0).deleting.value)
+        h.engine(1).stop()
+        withTimeout(TIMEOUT) { h.engine(0).presence.first { it[bInA] == Presence.OFFLINE } }
+        val delete = observers.async { h.engine(0).deleteContact(bInA) }
+        // Mientras intenta entregar `Unpair` (sin sesión, hasta 1 s) el contacto figura como "borrando".
+        withTimeout(TIMEOUT) { h.engine(0).deleting.first { bInA in it } }
+        assertEquals(UnpairDelivery.NOT_DELIVERED, withTimeout(TIMEOUT) { delete.await() })
+        assertEquals(emptySet<String>(), h.engine(0).deleting.value)
+        assertTrue(h.contacts(0).all().isEmpty())
+    }
+
+    @Test
     fun deletingLastContactUnpublishesOnion() = runBlocking<Unit> {
         val h = EngineHarness(3, config.copy(unpairDeliveryWindowMillis = 200)).also { harness = it }
         h.startAll()

@@ -17,6 +17,12 @@ interface IdentityRepository {
 /**
  * Almacenamiento de contactos; `upsert` reemplaza por `id`. Si el almacenamiento compartido con la
  * identidad es ilegible, `wipe()` borra también la identidad.
+ *
+ * **Copias.** Una implementación puede (la real lo hace) guardar copias de los `ByteArray` que recibe en
+ * `upsert` y devolver copias nuevas en cada `all()` y en cada emisión de [contacts]. El motor no depende
+ * de la identidad de los arrays: rellena con ceros los que él mismo deja de usar cuando puede (p. ej. los
+ * del contacto borrado, o todos al borrar todo), pero muchas copias transitorias leídas del repositorio
+ * no se rellenan y quedan en memoria hasta que el recolector de basura las libera (PROTOCOLO §15).
  */
 interface ContactRepository {
     /**

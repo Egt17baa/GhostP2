@@ -11,7 +11,9 @@ import kotlinx.coroutines.sync.withLock
  *   el usuario los borre) más `extraClientAuthKeys` (p. ej. el contacto pendiente durante un
  *   emparejamiento, regla R10). **Nunca** se llama a `publishService` con la lista vacía.
  * - La primera publicación genera la dirección; su `privateKey` y `onion` se guardan en la [Identity]
- *   (repositorio) para que la dirección sea estable. Las siguientes reutilizan esa clave.
+ *   (repositorio) para que la dirección sea estable. Las siguientes reutilizan esa clave. Si llega una
+ *   identidad antigua (sin .onion) con las mismas claves, se completa con la clave conocida y también se
+ *   guarda; si el guardado falla, [sync] lanza sin cambiar la publicación.
  * - Si cambia el conjunto de claves: se retira y se vuelve a publicar con la misma clave privada.
  * - Si no queda ninguna clave: se retira el servicio, pero `onionPrivateKey`/`onion` se conservan en la
  *   identidad: la dirección queda reservada para cuando vuelva a haber contactos.
@@ -50,7 +52,14 @@ internal class OnionPublisher(
             if (current != null) retire(current)
             return@withLock identity
         }
-        if (current != null && keySet == publishedKeys) return@withLock withKnownKey(identity, current)
+        if (current != null && keySet == publishedKeys) {
+            // Identidad antigua (sin .onion) completada con la clave ya publicada: se guarda, como tras la
+            // primera publicación, para que la dirección sobreviva a un reinicio. Si no se puede guardar,
+            // falla esta llamada (la publicación sigue igual; el llamante reintenta).
+            val completed = withKnownKey(identity, current)
+            if (completed !== identity) identities.save(completed)
+            return@withLock completed
+        }
         if (current != null) retire(current)
 
         val service = tor.publishService(

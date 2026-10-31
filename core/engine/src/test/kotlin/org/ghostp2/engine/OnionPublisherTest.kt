@@ -119,6 +119,49 @@ class OnionPublisherTest {
         assertEquals(results.first().onion, repo.load()!!.onion)
     }
 
+    /** Identidades en memoria cuyo `save` puede fallar a voluntad. */
+    private class FlakySaveIdentities : IdentityRepository {
+        private val inner = InMemoryIdentityRepository()
+        @Volatile var failSaves = false
+
+        override suspend fun load(): Identity? = inner.load()
+
+        override suspend fun save(identity: Identity) {
+            if (failSaves) throw IOException("almacenamiento no disponible (simulado)")
+            inner.save(identity)
+        }
+
+        override suspend fun wipe() = inner.wipe()
+    }
+
+    @Test
+    fun staleIdentityCompletedWithTheKnownKeyIsPersisted() = runBlocking {
+        val net = FakeTorNetwork()
+        val tor = FakeTor(net).also { it.start() }
+        val repo = FlakySaveIdentities()
+        val publisher = OnionPublisher(tor, repo, virtualPort = 7420, localPort = 5555)
+        val c1 = contact()
+        val base = identity()
+        val first = publisher.sync(base, listOf(c1))
+        // Se pierde la identidad guardada con la .onion (p. ej. una escritura anterior falló).
+        repo.wipe()
+        repo.save(base)
+
+        // Mismas claves con la identidad antigua (sin .onion): se completa con la clave conocida...
+        repo.failSaves = true
+        assertThrows<IOException> { publisher.sync(base, listOf(c1)) } // sin poder guardarla, falla
+        assertNull(repo.load()!!.onion)
+        assertEquals(first.onion, publisher.publishedOnion) // la publicación sigue como estaba
+
+        // ...y en cuanto se puede guardar, queda persistida (dirección estable tras reiniciar).
+        repo.failSaves = false
+        val completed = publisher.sync(base, listOf(c1))
+        assertEquals(first.onion, completed.onion)
+        assertEquals(completed, repo.load())
+        assertArrayEquals(first.onionPrivateKey, repo.load()!!.onionPrivateKey)
+        assertEquals(setOf(first.onion), net.published.value.keys)
+    }
+
     @Test
     fun unpublishRetiresService() = runBlocking {
         val (net, publisher, _) = setup()

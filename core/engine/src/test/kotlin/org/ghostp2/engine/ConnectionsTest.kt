@@ -185,6 +185,84 @@ class ConnectionsTest {
         assertEquals(Presence.IDENTITY_CHANGED, h.engine(0).presence.value[bInA])
     }
 
+    /** Contactos cuyo `upsert` falla mientras `failUpserts` (almacenamiento no disponible). */
+    private class FlakyUpsertContacts(private val inner: InMemoryContactRepository = InMemoryContactRepository()) :
+        ContactRepository by inner {
+        @Volatile var failUpserts = false
+
+        override suspend fun upsert(contact: Contact) {
+            if (failUpserts) throw java.io.IOException("almacenamiento no disponible (simulado)")
+            inner.upsert(contact)
+        }
+    }
+
+    @Test
+    fun storageFailureWhileMarkingIdentityChangedKeepsTheLoopBackingOff() = runBlocking<Unit> {
+        val h = EngineHarness(1, config).also { harness = it }
+        val aTor = FakeTor(h.network)
+        val aContacts = FlakyUpsertContacts()
+        val aScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val a = MessengerEngine(aTor, InMemoryIdentityRepository(), aContacts, aScope, config)
+        try {
+            h.startAll()
+            a.start()
+            val handle = h.engine(0).createInvitation()
+            val waiting = withTimeout(TIMEOUT) { handle.state.first { it is InvitationState.Waiting } } as InvitationState.Waiting
+            assertTrue(a.acceptInvitation(waiting.text) is AcceptResult.Paired)
+            withTimeout(TIMEOUT) { handle.state.first { it is InvitationState.Paired } }
+            val bInA = aContacts.all().single().id
+            awaitPresence(a, bInA, Presence.ONLINE)
+            // Como en identityChangedStopsRetrying: al llamar, A recibe AUTH; pero no puede guardarlo.
+            h.tor(0).removeClientAuth(a.myOnion.value!!)
+            val stored = h.contacts(0).all().single()
+            h.contacts(0).upsert(stored.copy(pairSecret = Primitives.randomBytes(32)))
+            aContacts.failUpserts = true
+            h.network.setOnline(false)
+            awaitPresence(a, bInA, Presence.OFFLINE)
+            h.network.setOnline(true)
+            a.onNetworkChanged()
+            // El bucle no muere: sigue reintentando (con espera creciente) y el contacto sigue ACTIVE.
+            val before = aTor.connectAttempts.get()
+            withTimeout(TIMEOUT) { while (aTor.connectAttempts.get() < before + 3) delay(POLL_MILLIS) }
+            assertEquals(ContactStatus.ACTIVE, aContacts.all().single().status)
+            assertNotEquals(Presence.IDENTITY_CHANGED, a.presence.value[bInA])
+            // Cuando el almacenamiento vuelve, el siguiente AUTH sí se marca.
+            aContacts.failUpserts = false
+            awaitPresence(a, bInA, Presence.IDENTITY_CHANGED)
+            assertEquals(ContactStatus.IDENTITY_CHANGED, aContacts.all().single().status)
+        } finally {
+            a.stop()
+            aScope.cancel()
+        }
+    }
+
+    @Test
+    fun incomingHandshakesAreCappedAndExcessSocketsClosedAtOnce() = runBlocking<Unit> {
+        val h = EngineHarness(1, config).also { harness = it }
+        h.startAll()
+        val port = h.engine(0).localPort!!
+        val loopback = java.net.InetAddress.getLoopbackAddress()
+        // Conexiones que nunca envían msg1: cada una ocupa un handshake entrante hasta su plazo (30 s).
+        val idle = List(MAX_CONCURRENT_INCOMING) { java.net.Socket(loopback, port) }
+        try {
+            delay(500) // que el listener las haya aceptado todas
+            java.net.Socket(loopback, port).use { extra ->
+                extra.soTimeout = 3_000
+                assertEquals(-1, extra.getInputStream().read(), "la conexión de más se cierra nada más aceptarla")
+            }
+            idle[0].soTimeout = 300
+            org.junit.jupiter.api.assertThrows<java.net.SocketTimeoutException> { idle[0].getInputStream().read() }
+        } finally {
+            idle.forEach { it.close() }
+        }
+        // Al cerrarse, los handshakes terminan y el cupo se libera.
+        delay(500)
+        java.net.Socket(loopback, port).use { again ->
+            again.soTimeout = 500
+            org.junit.jupiter.api.assertThrows<java.net.SocketTimeoutException> { again.getInputStream().read() }
+        }
+    }
+
     @Test
     fun repairingAfterIdentityChangedRestartsTheLoop() = runBlocking<Unit> {
         val (h, bInA, aInB) = pairedHarness()

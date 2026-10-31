@@ -12,4 +12,10 @@ data class EngineConfig(
     val torBootstrapTimeoutMillis: Long = 180_000,
     /** Tiempo total máximo para volver a registrar las autorizaciones de cliente al arrancar. */
     val clientAuthRegistrationTimeoutMillis: Long = 30_000,
+    /**
+     * Presupuesto global de bytes de fotos en el historial en memoria, sumando todas las conversaciones
+     * (PROTOCOLO §14.5): al superarlo se descartan las fotos más antiguas, que quedan como
+     * [ChatContent.PhotoDiscarded].
+     */
+    val maxPhotoBytesInMemory: Long = DEFAULT_MAX_PHOTO_BYTES_IN_MEMORY,
 )

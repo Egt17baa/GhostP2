@@ -16,6 +16,8 @@ import java.net.Socket
  * a `onAccept`, que pasa a ser su dueño. Si `onAccept` lanza, se cierra el socket y se sigue aceptando.
  * `onAccept` se invoca **de forma síncrona** en el bucle de aceptación: no debe bloquear (debe lanzar
  * el handshake en otra corrutina y volver enseguida), o no se aceptarán más conexiones mientras tanto.
+ * El cupo de handshakes simultáneos lo aplica `onAccept` (`Connections.accept`, [MAX_CONCURRENT_INCOMING]):
+ * las conexiones de más se cierran nada más aceptarlas.
  * [close]/[closeAndJoin] cierran el `ServerSocket` (lo que desbloquea `accept()`) y terminan el bucle.
  */
 internal class Listener(scope: CoroutineScope, private val onAccept: (Socket) -> Unit) {

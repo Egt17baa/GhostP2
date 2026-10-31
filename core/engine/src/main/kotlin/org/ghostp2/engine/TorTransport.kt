@@ -49,7 +49,8 @@ interface TorTransport {
     /**
      * Publica un servicio oculto `virtualPort` → `127.0.0.1:localPort`. Con `privateKey == null` se genera
      * una dirección nueva; con clave se republica la misma. `clientAuthPublicKeys` vacía (sin autorización)
-     * solo se usa, con `privateKey == null`, para el servicio temporal de invitación.
+     * solo se usa, con `privateKey == null`, para el servicio temporal de invitación: con `privateKey` y
+     * sin claves de autorización lanza [java.io.IOException] sin publicar nada.
      *
      * Requiere `Ready`: mientras Tor arranca, espera a `Ready`; si está `Off` o en `Error` (o lo pasa a
      * estar mientras espera), lanza [java.io.IOException]. Nunca publica durante el arranque. Una clave

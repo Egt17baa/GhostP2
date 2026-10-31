@@ -150,10 +150,20 @@ class FakeTorTest {
         assertEquals(64, s1.privateKey.size)
         // Misma clave privada ⇒ misma dirección.
         a.unpublishService(s1.onion)
-        val again = a.publishService(s1.privateKey, emptyList(), port, server.localPort)
+        val again = a.publishService(s1.privateKey, listOf(Primitives.generateX25519().publicKey), port, server.localPort)
         assertEquals(s1.onion, again.onion)
         assertArrayEquals(s1.privateKey, again.privateKey)
         assertFalse(again.toString().contains(s1.privateKey.joinToString("") { "%02x".format(it) }))
+    }
+
+    @Test
+    fun permanentAddressWithoutClientAuthIsRefused() = runBlocking {
+        val (net, a, _) = pair()
+        val server = echoServer()
+        val svc = a.publishService(null, emptyList(), port, server.localPort) // como la invitación: permitido
+        a.unpublishService(svc.onion)
+        assertThrows<IOException> { a.publishService(svc.privateKey, emptyList(), port, server.localPort) }
+        assertTrue(net.published.value.isEmpty())
     }
 
     @Test
@@ -172,14 +182,15 @@ class FakeTorTest {
         val (net, a, b) = pair()
         val server = echoServer()
         val svc = a.publishService(null, emptyList(), port, server.localPort)
+        val auth = listOf(Primitives.generateX25519().publicKey)
         // Ni el mismo dueño ni otro FakeTor pueden publicar dos veces la misma dirección.
-        val e1 = assertThrows<IOException> { a.publishService(svc.privateKey, emptyList(), port, server.localPort) }
+        val e1 = assertThrows<IOException> { a.publishService(svc.privateKey, auth, port, server.localPort) }
         assertEquals("ya publicado", e1.message)
-        assertThrows<IOException> { b.publishService(svc.privateKey, emptyList(), port, server.localPort) }
+        assertThrows<IOException> { b.publishService(svc.privateKey, auth, port, server.localPort) }
         assertEquals(1, net.published.value.size)
         // Una vez retirada, se puede volver a publicar.
         a.unpublishService(svc.onion)
-        assertEquals(svc.onion, b.publishService(svc.privateKey, emptyList(), port, server.localPort).onion)
+        assertEquals(svc.onion, b.publishService(svc.privateKey, auth, port, server.localPort).onion)
         Unit
     }
 

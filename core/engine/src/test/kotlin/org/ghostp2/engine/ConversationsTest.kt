@@ -32,7 +32,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 
 class ConversationsTest {
-    private val config = EngineConfig(backoffMinMillis = 50, backoffMaxMillis = 400)
+    private var config = EngineConfig(backoffMinMillis = 50, backoffMaxMillis = 400)
     private var harness: EngineHarness? = null
     private val observers = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
@@ -131,6 +131,25 @@ class ConversationsTest {
         // Solo un elemento por lado.
         assertEquals(1, h.engine(0).conversations.value.getValue(bInA).size)
         assertEquals(1, h.engine(1).conversations.value.getValue(aInB).size)
+    }
+
+    @Test
+    fun receivedPhotosRespectTheGlobalBudgetFromEngineConfig() = runBlocking<Unit> {
+        config = EngineConfig(backoffMinMillis = 50, backoffMaxMillis = 400, maxPhotoBytesInMemory = 300_000)
+        val (h, bInA, aInB) = pairedOnline()
+        val first = h.engine(0).sendPhoto(bInA, Primitives.randomBytes(200_000))
+        awaitStatus(h.engine(0), bInA, first, DeliveryStatus.Delivered)
+        awaitIncoming(h.engine(1), aInB, first)
+        val second = h.engine(0).sendPhoto(bInA, Primitives.randomBytes(200_000))
+        awaitStatus(h.engine(0), bInA, second, DeliveryStatus.Delivered)
+        awaitIncoming(h.engine(1), aInB, second)
+        // En B (200 000 + 200 000 > 300 000) la primera foto queda descartada; la segunda, intacta.
+        val inB = h.engine(1).conversations.value.getValue(aInB)
+        assertEquals(ChatContent.PhotoDiscarded(200_000), inB.first { it.id == first }.content)
+        assertTrue(inB.first { it.id == second }.content is ChatContent.Photo)
+        // En A igual, una vez terminados los envíos.
+        val inA = h.engine(0).conversations.value.getValue(bInA)
+        assertEquals(ChatContent.PhotoDiscarded(200_000), inA.first { it.id == first }.content)
     }
 
     @Test
@@ -399,7 +418,8 @@ class ConversationsTest {
     private val token = Any()
 
     /** En las pruebas unitarias los contactos "c" y "d" son conocidos; cualquier otro, no. */
-    private fun open(clock: () -> Long = { 0L }, max: Int = 500) = Conversations(clock, max).also {
+    private fun open(clock: () -> Long = { 0L }, max: Int = 500, photoBudget: Long = Long.MAX_VALUE) =
+        Conversations(clock, max, photoBudget).also {
         it.open()
         it.applySnapshot(listOf("c", "d"))
     }
@@ -520,6 +540,59 @@ class ConversationsTest {
         assertArrayEquals(byteArrayOf(1, 1), sendingPhoto)
         c.onEvent("c", token, SessionEvent.Delivered("p1")) // fin del envío: ahora sí se borra
         assertTrue(sendingPhoto.all { it == 0.toByte() })
+    }
+
+    @Test
+    fun photoBudgetDiscardsOldestPhotosAcrossContacts() {
+        val c = open(photoBudget = 10)
+        val p1 = byteArrayOf(1, 1, 1, 1)
+        val p2 = byteArrayOf(2, 2, 2, 2)
+        val p3 = byteArrayOf(3, 3, 3, 3)
+        c.onEvent("c", token, SessionEvent.PhotoReceived("i1", p1))
+        c.onEvent("d", token, SessionEvent.PhotoReceived("i2", p2))
+        assertTrue(c.conversations.value.values.flatten().all { it.content is ChatContent.Photo })
+        c.onEvent("c", token, SessionEvent.PhotoReceived("i3", p3)) // 12 > 10: se descarta la más antigua (i1)
+        val inC = c.conversations.value.getValue("c")
+        assertEquals(listOf("i1", "i3"), inC.map { it.id })
+        assertEquals(ChatContent.PhotoDiscarded(4), inC[0].content)
+        assertEquals(DeliveryStatus.Received, inC[0].status)
+        assertTrue(p1.all { it == 0.toByte() })
+        assertArrayEquals(byteArrayOf(2, 2, 2, 2), p2)
+        assertArrayEquals(byteArrayOf(3, 3, 3, 3), p3)
+        // Los textos no cuentan; la siguiente foto descarta la de "d" (ahora la más antigua).
+        c.onEvent("d", token, SessionEvent.TextReceived("t1", "hola"))
+        c.onEvent("d", token, SessionEvent.PhotoReceived("i4", byteArrayOf(4, 4, 4))) // 11 > 10
+        assertEquals(ChatContent.PhotoDiscarded(4), c.conversations.value.getValue("d").first { it.id == "i2" }.content)
+        assertTrue(p2.all { it == 0.toByte() })
+        assertArrayEquals(byteArrayOf(3, 3, 3, 3), p3)
+        // Una foto que sale del historial deja de contar: borrar "c" libera i3 y caben dos más.
+        c.clear("c")
+        c.onEvent("c", token, SessionEvent.PhotoReceived("i5", ByteArray(4) { 5 }))
+        c.onEvent("c", token, SessionEvent.PhotoReceived("i6", ByteArray(4) { 6 }))
+        assertTrue(c.conversations.value.getValue("c").all { it.content is ChatContent.Photo })
+    }
+
+    @Test
+    fun photoBudgetNeverDiscardsAPhotoBeingSent() {
+        val c = open(photoBudget = 6)
+        val sendingPhoto = byteArrayOf(1, 1, 1, 1)
+        val received = byteArrayOf(2, 2, 2, 2)
+        c.addOutgoing("c", ChatContent.Photo(sendingPhoto), outbound { "p1" })
+        c.onEvent("c", token, SessionEvent.PhotoReceived("i1", received)) // 8 > 6, pero p1 se está enviando
+        val list = c.conversations.value.getValue("c")
+        assertEquals(ChatContent.Photo(byteArrayOf(1, 1, 1, 1)), list[0].content)
+        assertEquals(ChatContent.PhotoDiscarded(4), list[1].content)
+        assertArrayEquals(byteArrayOf(1, 1, 1, 1), sendingPhoto)
+        assertTrue(received.all { it == 0.toByte() })
+        // Al terminar su envío, p1 vuelve a ser descartable: con 4 + 4 > 6 cae p1 (la más antigua).
+        c.onEvent("c", token, SessionEvent.Delivered("p1"))
+        assertArrayEquals(byteArrayOf(1, 1, 1, 1), sendingPhoto) // 4 <= 6: aún cabe
+        c.onEvent("c", token, SessionEvent.PhotoReceived("i2", byteArrayOf(3, 3, 3, 3)))
+        val after = c.conversations.value.getValue("c")
+        assertEquals(DeliveryStatus.Delivered, after[0].status)
+        assertEquals(ChatContent.PhotoDiscarded(4), after[0].content)
+        assertTrue(sendingPhoto.all { it == 0.toByte() })
+        assertEquals(ChatContent.Photo(byteArrayOf(3, 3, 3, 3)), after[2].content)
     }
 
     @Test

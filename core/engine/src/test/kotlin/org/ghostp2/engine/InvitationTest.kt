@@ -394,6 +394,52 @@ class InvitationTest {
         assertEquals(setOf(h.engine(0).myOnion.value), h.network.published.value.keys)
     }
 
+    /** Tor cuyo `addClientAuth`, una vez armada la puerta, se detiene hasta abrirla y después falla. */
+    private class GatedFailingAuthTor(val inner: FakeTor) : TorTransport by inner {
+        @Volatile var gate: CompletableDeferred<Unit>? = null
+        val entered = CompletableDeferred<Unit>()
+
+        override suspend fun addClientAuth(onion: String, privateKey: ByteArray) {
+            val g = gate ?: return inner.addClientAuth(onion, privateKey)
+            entered.complete(Unit)
+            g.await()
+            throw IOException("fallo simulado de addClientAuth")
+        }
+    }
+
+    @Test
+    fun rollbackDoesNotResurrectAContactDeletedMeanwhile() = runBlocking<Unit> {
+        val h = harness(1, EngineConfig(backoffMinMillis = 50, backoffMaxMillis = 400, unpairDeliveryWindowMillis = 1_000))
+        val bFake = FakeTor(h.network)
+        val bTor = GatedFailingAuthTor(bFake)
+        val bContacts = InMemoryContactRepository()
+        val b = customEngine(h, tor = bTor, contacts = bContacts)
+        h.startAll()
+        b.start()
+        // Primer emparejamiento: es el contacto "anterior" del segundo.
+        val first = h.engine(0).createInvitation()
+        assertInstanceOf(AcceptResult.Paired::class.java, b.acceptInvitation(awaitWaiting(first).text))
+        awaitEnd(first)
+        val id = bContacts.all().single().id
+        val aOnion = h.identities(0).load()!!.onion!!
+
+        // Segundo emparejamiento con el mismo contacto: se guarda y se queda en addClientAuth...
+        bTor.gate = CompletableDeferred()
+        val second = h.engine(0).createInvitation()
+        val text = awaitWaiting(second).text
+        val accept = async(Dispatchers.Default) { b.acceptInvitation(text) }
+        withTimeout(TIMEOUT) { bTor.entered.await() }
+        // ...mientras el usuario borra el contacto (el recién guardado).
+        withTimeout(TIMEOUT) { b.deleteContact(id) }
+        assertTrue(bContacts.all().isEmpty())
+        bTor.gate!!.complete(Unit) // addClientAuth falla: se deshace el emparejamiento
+
+        assertEquals(AcceptResult.Failed("No se pudo completar el emparejamiento"), withTimeout(TIMEOUT) { accept.await() })
+        assertTrue(bContacts.all().isEmpty(), "deshacer no debe resucitar el contacto borrado")
+        assertFalse(aOnion in bFake.clientAuthOnions(), "ni volver a registrar la autorización del anterior")
+        assertNull(b.myOnion.value)
+    }
+
     @Test
     fun inviterFailureAfterPairingRollsBack() = runBlocking<Unit> {
         val h = harness(1)

@@ -189,6 +189,9 @@ class FakeTor(
         virtualPort: Int,
         localPort: Int,
     ): PublishedService {
+        if (privateKey != null && clientAuthPublicKeys.isEmpty()) {
+            throw IOException("La .onion permanente necesita autorización de cliente")
+        }
         if (mutableState.value != TorState.Ready) throw IOException("Tor no está listo")
         val seed = if (privateKey == null) {
             Primitives.randomBytes(32)
