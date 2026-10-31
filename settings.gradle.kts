@@ -1,8 +1,8 @@
 pluginManagement {
     repositories {
+        google()
         gradlePluginPortal()
         mavenCentral()
-        google()
     }
 }
 
@@ -19,4 +19,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "GhostP2"
 
-include(":core:crypto", ":core:protocol")
+include(":core:crypto", ":core:protocol", ":app")

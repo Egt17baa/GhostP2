@@ -11,4 +11,5 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
-      - run: ./gradlew test --no-daemon
+      - uses: android-actions/setup-android@v3
+      - run: ./gradlew test :app:assembleDebug --no-daemon
