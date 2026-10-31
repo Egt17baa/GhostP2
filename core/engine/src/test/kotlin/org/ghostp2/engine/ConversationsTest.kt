@@ -89,12 +89,25 @@ class ConversationsTest {
             engine.conversations.first { map -> map[contactId]?.any { it.id == id && it.direction == Direction.IN } == true }
         }.getValue(contactId).first { it.id == id && it.direction == Direction.IN }
 
-    /** Un motor arrancado sin contactos (los envíos fallan con NOT_CONNECTED). */
-    private suspend fun singleEngine(): MessengerEngine {
-        val h = EngineHarness(1, config).also { harness = it }
+    /** Empareja `invitee` con `inviter`; devuelve (id del invitado en el invitador, id del invitador en el invitado). */
+    private suspend fun pair(h: EngineHarness, inviter: Int, invitee: Int): Pair<String, String> {
+        val before = h.contacts(inviter).all().map { it.id }.toSet()
+        val handle = h.engine(inviter).createInvitation()
+        val waiting = withTimeout(TIMEOUT) { handle.state.first { it is InvitationState.Waiting } } as InvitationState.Waiting
+        assertTrue(h.engine(invitee).acceptInvitation(waiting.text) is AcceptResult.Paired)
+        withTimeout(TIMEOUT) { handle.state.first { it is InvitationState.Paired } }
+        val inviteeId = h.contacts(inviter).all().map { it.id }.single { it !in before }
+        return inviteeId to h.contacts(invitee).all().single().id
+    }
+
+    /** Motor 0 emparejado con los motores 1..n-1 y toda la red caída (contactos reales, sin conexión). */
+    private suspend fun pairedOffline(n: Int): Pair<EngineHarness, List<String>> {
+        val h = EngineHarness(n, config).also { harness = it }
         h.startAll()
-        assertEquals(EngineStatus.Online, h.engine(0).status.value)
-        return h.engine(0)
+        val ids = (1 until n).map { pair(h, 0, it).first }
+        h.network.setOnline(false)
+        ids.forEach { awaitPresence(h.engine(0), it, Presence.OFFLINE) }
+        return h to ids
     }
 
     // --- Pruebas del motor ---
@@ -202,19 +215,104 @@ class ConversationsTest {
 
     @Test
     fun clearConversationEmptiesOnlyThatContact() = runBlocking<Unit> {
-        val engine = singleEngine()
+        val h = EngineHarness(3, config).also { harness = it }
+        h.startAll()
+        val (c1, aInC1) = pair(h, 0, 1)
+        val (c2, _) = pair(h, 0, 2)
+        awaitPresence(h.engine(0), c1, Presence.ONLINE)
+        awaitPresence(h.engine(1), aInC1, Presence.ONLINE)
+        awaitSameSession(h, c1, aInC1)
+        // Una foto recibida de verdad en la conversación que se borrará.
+        val incoming = h.engine(1).sendPhoto(aInC1, Primitives.randomBytes(40_000))
+        val received = (awaitIncoming(h.engine(0), c1, incoming).content as ChatContent.Photo).jpeg
+        h.network.setOnline(false)
+        awaitPresence(h.engine(0), c1, Presence.OFFLINE)
+        awaitPresence(h.engine(0), c2, Presence.OFFLINE)
+        val engine = h.engine(0)
         val photo = byteArrayOf(9, 9, 9)
-        val p = engine.sendPhoto("c1", photo)
-        engine.sendText("c1", "a c1")
-        val t2 = engine.sendText("c2", "a c2")
-        val held = (item(engine, "c1", p)!!.content as ChatContent.Photo).jpeg
-        engine.clearConversation("c1")
-        assertNull(engine.conversations.value["c1"])
-        assertEquals(listOf(t2), engine.conversations.value.getValue("c2").map { it.id })
-        assertTrue(held.all { it == 0.toByte() }) { "la foto borrada no se rellenó con ceros" }
+        val p = engine.sendPhoto(c1, photo)
+        engine.sendText(c1, "a c1")
+        val t2 = engine.sendText(c2, "a c2")
+        val held = (item(engine, c1, p)!!.content as ChatContent.Photo).jpeg
+        engine.clearConversation(c1)
+        assertNull(engine.conversations.value[c1])
+        assertEquals(listOf(t2), engine.conversations.value.getValue(c2).map { it.id })
+        assertTrue(held.all { it == 0.toByte() }) { "la foto enviada borrada no se rellenó con ceros" }
+        assertTrue(received.all { it == 0.toByte() }) { "la foto recibida borrada no se rellenó con ceros" }
         assertArrayEquals(byteArrayOf(9, 9, 9), photo) // el array del llamante no se toca
         engine.clearConversation("desconocido") // sin efecto
-        assertEquals(setOf("c2"), engine.conversations.value.keys)
+        assertEquals(setOf(c2), engine.conversations.value.keys)
+    }
+
+    @Test
+    fun sendToUnknownContactStoresNothing() = runBlocking<Unit> {
+        val (h, ids) = pairedOffline(2)
+        val engine = h.engine(0)
+        val photo = byteArrayOf(4, 4)
+        val t = engine.sendText("desconocido", "hola")
+        val p = engine.sendPhoto("desconocido", photo)
+        assertTrue(Regex("[0-9a-f]{24}").matches(t))
+        assertTrue(Regex("[0-9a-f]{24}").matches(p))
+        assertTrue(engine.conversations.value.isEmpty()) { "conversación fantasma: ${engine.conversations.value.keys}" }
+        assertArrayEquals(byteArrayOf(4, 4), photo) // la copia es la que se borra, no el array del llamante
+        // Al contacto real sí se guarda (como fallido: no hay red).
+        val ok = engine.sendText(ids.single(), "hola")
+        assertEquals(DeliveryStatus.Failed(FailReason.NOT_CONNECTED), item(engine, ids.single(), ok)!!.status)
+        assertEquals(setOf(ids.single()), engine.conversations.value.keys)
+    }
+
+    @Test
+    fun sendWhileTorIsStartingIsRecordedAsNotConnected() = runBlocking<Unit> {
+        val network = FakeTorNetwork()
+        val tor = StuckTor(FakeTor(network))
+        val contact = Contact(
+            id = "c", name = "C", peerIdentity = ByteArray(32), peerOnion = "x".repeat(56),
+            clientAuthPrivateForPeerOnion = ByteArray(32), myClientAuthPublic = ByteArray(32),
+            pairSecret = ByteArray(32), verified = false, status = ContactStatus.ACTIVE,
+        )
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        try {
+            val engine = MessengerEngine(tor, InMemoryIdentityRepository(), InMemoryContactRepository(listOf(contact)), scope, config)
+            val starting = scope.launch { engine.start() }
+            withTimeout(TIMEOUT) { tor.state.first { it is TorState.Starting } }
+            assertTrue(engine.status.value is EngineStatus.StartingTor)
+            val id = engine.sendText("c", "pronto")
+            assertEquals(DeliveryStatus.Failed(FailReason.NOT_CONNECTED), item(engine, "c", id)!!.status)
+            engine.sendText("otro", "no") // desconocido: nada
+            assertEquals(setOf("c"), engine.conversations.value.keys)
+            engine.stop()
+            starting.join()
+            assertTrue(engine.conversations.value.isEmpty())
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun stopDuringPhotoSendWipesHistoryAndNoPartialPhotoArrives() = runBlocking<Unit> {
+        val (h, bInA, aInB) = pairedOnline()
+        val jpeg = Primitives.randomBytes(PeerSession.MAX_PHOTO_BYTES)
+        val original = jpeg.copyOf()
+        val id = h.engine(0).sendPhoto(bInA, jpeg)
+        // En pleno envío: ya salió algún trozo, pero aún no se ha entregado.
+        withTimeout(TIMEOUT) {
+            h.engine(0).conversations.first { map ->
+                val s = map[bInA]?.firstOrNull { it.id == id }?.status
+                s is DeliveryStatus.Sending && s.sentBytes > 0 || s !is DeliveryStatus.Sending
+            }
+        }
+        h.engine(0).stop()
+        assertEquals(EngineStatus.Stopped, h.engine(0).status.value)
+        assertTrue(h.engine(0).conversations.value.isEmpty())
+        assertArrayEquals(original, jpeg)
+        awaitPresence(h.engine(1), aInB, Presence.OFFLINE)
+        delay(200)
+        // B nunca muestra una foto incompleta o alterada: o no llegó, o llegó entera e idéntica.
+        h.engine(1).conversations.value[aInB].orEmpty().forEach { got ->
+            assertEquals(id, got.id)
+            assertEquals(DeliveryStatus.Received, got.status)
+            assertArrayEquals(original, (got.content as ChatContent.Photo).jpeg)
+        }
     }
 
     @Test
@@ -244,9 +342,11 @@ class ConversationsTest {
 
     @Test
     fun conversationKeepsAtMost500Items() = runBlocking<Unit> {
-        val engine = singleEngine()
-        val ids = (0 until 510).map { engine.sendText("c", "m$it") }
-        val list = engine.conversations.value.getValue("c")
+        val (h, contacts) = pairedOffline(2)
+        val engine = h.engine(0)
+        val c = contacts.single()
+        val ids = (0 until 510).map { engine.sendText(c, "m$it") }
+        val list = engine.conversations.value.getValue(c)
         assertEquals(500, list.size)
         assertEquals(ids.drop(10), list.map { it.id }) // se descartan los 10 más antiguos, en orden
     }
@@ -302,6 +402,22 @@ class ConversationsTest {
 
     private fun outbound(session: Any = token, open: Boolean = true, id: () -> String) =
         Conversations.Outbound(session, { open }, id)
+
+    /** En las pruebas unitarias todos los ids de contacto se dan por conocidos salvo que se diga. */
+    private fun Conversations.addOutgoing(contactId: String, content: ChatContent, outbound: Conversations.Outbound?) =
+        addOutgoing(contactId, content, { true }, outbound)
+
+    @Test
+    fun unknownContactStoresNothingAndNeverCallsTheSession() {
+        val c = open()
+        var called = false
+        val photo = byteArrayOf(6, 6)
+        val id = c.addOutgoing("c", ChatContent.Photo(photo), { false }, outbound { called = true; "x" })
+        assertFalse(called)
+        assertTrue(Regex("[0-9a-f]{24}").matches(id))
+        assertTrue(photo.all { it == 0.toByte() })
+        assertTrue(c.conversations.value.isEmpty())
+    }
 
     private fun Conversations.status(contactId: String, id: String): DeliveryStatus? =
         conversations.value[contactId]?.firstOrNull { it.id == id }?.status
@@ -459,6 +575,21 @@ class ConversationsTest {
         val list = c.conversations.value.getValue("c")
         assertEquals(4_000, list.size)
         assertTrue(list.filter { it.direction == Direction.OUT }.all { it.status == DeliveryStatus.Delivered })
+    }
+
+    /** Tor que se queda arrancando: `start()` solo pone `Starting(0)`; lo demás se delega. */
+    private class StuckTor(private val delegate: FakeTor) : TorTransport by delegate {
+        private val mutableState = kotlinx.coroutines.flow.MutableStateFlow<TorState>(TorState.Off)
+        override val state: kotlinx.coroutines.flow.StateFlow<TorState> = mutableState
+
+        override suspend fun start() {
+            mutableState.value = TorState.Starting(0)
+        }
+
+        override suspend fun stop() {
+            delegate.stop()
+            mutableState.value = TorState.Off
+        }
     }
 
     private companion object {

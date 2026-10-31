@@ -106,7 +106,11 @@ class MessengerEngine(
      */
     val notices: SharedFlow<Notice> = mutableNotices.asSharedFlow()
 
-    /** Todos los eventos de todas las sesiones, con el id del contacto (para pruebas y Tasks 6–7). */
+    /**
+     * Todos los eventos de todas las sesiones, con el id del contacto (para pruebas y Tasks 6–7).
+     * Los bytes de `PhotoReceived` son los mismos que guarda el historial y pueden estar ya rellenados
+     * con ceros (foto descartada, borrada o motor parado): no hay que fiarse de ellos aquí.
+     */
     private val mutableSessionEvents =
         MutableSharedFlow<Pair<String, SessionEvent>>(extraBufferCapacity = SESSION_EVENT_BUFFER)
     internal val sessionEvents: SharedFlow<Pair<String, SessionEvent>> = mutableSessionEvents.asSharedFlow()
@@ -116,10 +120,19 @@ class MessengerEngine(
     private val chats = Conversations(clock)
 
     /**
+     * Ids de los contactos guardados, legibles sin suspender (espejo de `contacts.contacts`, más el
+     * contacto recién emparejado al guardarlo). Vacío con el motor parado. Existe ya mientras Tor
+     * arranca, a diferencia de los `links` de [Connections].
+     */
+    private val knownContacts = MutableStateFlow<Set<String>>(emptySet())
+
+    /**
      * Conversaciones por id de contacto, en orden de llegada (como mucho
      * [MAX_ITEMS_PER_CONVERSATION] por contacto; se descartan los más antiguos). Solo en memoria:
      * sobreviven a cortes de conexión y se borran con [clearConversation] o al detener el motor
-     * (con el motor parado el mapa está vacío y no se guarda nada).
+     * (con el motor parado el mapa está vacío y no se guarda nada). Solo hay conversaciones de
+     * contactos guardados. Las fotos ([ChatContent.Photo.jpeg]) son los arrays vivos del historial y
+     * se rellenan con ceros al salir de él: la interfaz debe copiar los bytes que quiera conservar.
      */
     val conversations: StateFlow<Map<String, List<ChatItem>>> = chats.conversations
 
@@ -221,10 +234,15 @@ class MessengerEngine(
 
     /** Arranque completo: identidad, Tor, listener y publicación. Lanza [TorStartException] si Tor falla. */
     private suspend fun bootstrap(engineScope: CoroutineScope) {
+        // Historial activo desde el principio: un envío mientras Tor arranca queda como NOT_CONNECTED.
+        knownContacts.value = contacts.all().mapTo(HashSet()) { it.id }
+        engineScope.launch(start = CoroutineStart.UNDISPATCHED) {
+            contacts.contacts.collect { list -> knownContacts.value = list.mapTo(HashSet()) { it.id } }
+        }
+        chats.open()
         val id = identities.load() ?: createIdentity()
         identity = id
         startTor(engineScope)
-        chats.open()
         val c = Connections(
             tor, contacts, config, random, engineScope, KeyPair25519(id.identityPrivate, id.identityPublic),
             mutablePresence, mutableNotices, mutableSessionEvents,
@@ -250,7 +268,8 @@ class MessengerEngine(
      * Envía un texto (máx. [PeerSession.MAX_TEXT_CHARS] caracteres Unicode) y devuelve su id. No
      * suspende. El elemento queda en [conversations] al volver: `Sending` si hay sesión (después
      * `Delivered` o `Failed`), o ya `Failed(NOT_CONNECTED)` si no la hay; nunca se encola ni se reintenta.
-     * Con el motor parado no se guarda nada.
+     * Con el motor parado o si [contactId] no es un contacto guardado, devuelve un id y no guarda nada
+     * (regla R15).
      * @throws IllegalArgumentException si el texto es demasiado largo (como `PeerSession`; no se guarda nada).
      */
     fun sendText(contactId: String, text: String): String {
@@ -258,7 +277,7 @@ class MessengerEngine(
             "El texto supera ${PeerSession.MAX_TEXT_CHARS} caracteres"
         }
         val peer = sessionFor(contactId)
-        return chats.addOutgoing(contactId, ChatContent.Text(text), peer?.let { p -> outbound(p) { p.sendText(text) } })
+        return chats.addOutgoing(contactId, ChatContent.Text(text), known(contactId), peer?.let { p -> outbound(p) { p.sendText(text) } })
     }
 
     /**
@@ -273,12 +292,15 @@ class MessengerEngine(
         val copy = jpeg.copyOf()
         val peer = sessionFor(contactId)
         try {
-            return chats.addOutgoing(contactId, ChatContent.Photo(copy), peer?.let { p -> outbound(p) { p.sendPhoto(copy) } })
+            return chats.addOutgoing(contactId, ChatContent.Photo(copy), known(contactId), peer?.let { p -> outbound(p) { p.sendPhoto(copy) } })
         } catch (e: Exception) {
             Primitives.wipe(copy)
             throw e
         }
     }
+
+    /** Comprobación de contacto guardado; `Conversations` la evalúa con su cerrojo tomado. */
+    private fun known(contactId: String): () -> Boolean = { contactId in knownContacts.value }
 
     private fun outbound(peer: PeerSession, send: () -> String) =
         Conversations.Outbound(peer, { peer.isOpen.value }, send)
@@ -579,6 +601,7 @@ class MessengerEngine(
             status = ContactStatus.ACTIVE,
         )
         contacts.upsert(contact)
+        knownContacts.update { it + id } // sin esperar al flujo: ya se le puede escribir
         try {
             tor.addClientAuth(result.peerOnion, result.clientAuthPrivateForPeerOnion)
             publication.withLock {
@@ -599,6 +622,7 @@ class MessengerEngine(
     /** Deshace un [finishPairing] a medias; cada paso es independiente (lo que falle se ignora). */
     private suspend fun rollbackPairing(contact: Contact, previous: Contact?) {
         runCatching { if (previous != null) contacts.upsert(previous) else contacts.delete(contact.id) }
+        if (previous == null) knownContacts.update { it - contact.id }
         runCatching { tor.removeClientAuth(contact.peerOnion) }
         if (previous != null) runCatching { tor.addClientAuth(previous.peerOnion, previous.clientAuthPrivateForPeerOnion) }
         publication.withLock {
@@ -616,9 +640,20 @@ class MessengerEngine(
     /**
      * Cierra sesiones, invitaciones y listener, retira servicios, para Tor y borra el estado en memoria.
      * Si el cierre de las conexiones falla, se termina igualmente de liberar todo y después se relanza
-     * ese fallo (con el motor ya parado y la presencia vacía).
+     * ese fallo (con el motor ya parado y la presencia vacía). El historial se borra siempre, al final
+     * (con sesiones y recolectores ya terminados, ningún envío lee ya las fotos), aunque algo lance.
      */
     private suspend fun releaseResources() {
+        try {
+            releaseRun()
+        } finally {
+            // Siempre, aunque algo de lo anterior falle: el historial no sobrevive a una parada.
+            chats.clearAll()
+            knownContacts.value = emptySet()
+        }
+    }
+
+    private suspend fun releaseRun() {
         workScope = null
         // Primero esperar al arranque (ya cancelado o terminado) para que no cree nada después.
         bootJob?.cancelAndJoin()
@@ -645,8 +680,6 @@ class MessengerEngine(
         publisher = null
         pendingClientAuthKeys.clear()
         runCatching { tor.stop() }
-        // Sesiones y recolectores ya terminados: ningún envío lee ya las fotos.
-        chats.clearAll()
         mutableMyOnion.value = null
         identity = null
         running = false

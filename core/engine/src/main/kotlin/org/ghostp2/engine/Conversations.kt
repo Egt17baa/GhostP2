@@ -17,9 +17,10 @@ sealed interface ChatContent {
     }
 
     /**
-     * Foto JPEG. El array pertenece al historial del motor: se rellena con ceros al borrarse el
-     * elemento (límite de 500, [MessengerEngine.clearConversation] o [MessengerEngine.stop]).
-     * Quien lo lea (la interfaz) no debe modificarlo ni guardarlo más allá de mostrarlo.
+     * Foto JPEG. [jpeg] es el array VIVO del historial del motor (no una copia): se rellena con ceros
+     * en cuanto el elemento sale del historial (límite de 500, [MessengerEngine.clearConversation] o
+     * [MessengerEngine.stop]). Quien lo lea (la interfaz) no debe modificarlo y, si necesita los bytes
+     * más allá de mostrarlos en ese momento, debe copiarlos.
      */
     class Photo(val jpeg: ByteArray) : ChatContent {
         override fun equals(other: Any?): Boolean = other is Photo && jpeg.contentEquals(other.jpeg)
@@ -31,12 +32,17 @@ sealed interface ChatContent {
 }
 
 /**
- * Estado de entrega. Los salientes empiezan en [Sending] (`totalBytes` = tamaño de la foto; 0 en
- * los textos, que no informan de progreso) y terminan exactamente una vez en [Delivered] o
- * [Failed]; nunca retroceden. Los entrantes están siempre en [Received].
+ * Estado de entrega. Los salientes empiezan en [Sending] y terminan exactamente una vez en
+ * [Delivered] o [Failed]; nunca retroceden. Los entrantes están siempre en [Received].
  */
 sealed interface DeliveryStatus {
     data object Received : DeliveryStatus
+
+    /**
+     * Enviándose. Fotos: `totalBytes` = tamaño y `sentBytes` crece con cada trozo escrito. Textos:
+     * siempre `Sending(0, 0)` (no informan de progreso), así que `totalBytes` puede ser 0: no dividir
+     * por él sin comprobarlo.
+     */
     data class Sending(val sentBytes: Int, val totalBytes: Int) : DeliveryStatus
     data object Delivered : DeliveryStatus
     data class Failed(val reason: FailReason) : DeliveryStatus
@@ -80,7 +86,8 @@ internal const val MAX_ITEMS_PER_CONVERSATION = 500
  * [clearAll] (al parar el motor, con las sesiones ya cerradas) los borra todos.
  *
  * Entre [clearAll] y el siguiente [open] no se guarda nada: los envíos devuelven un id sin llamar a
- * la sesión y las fotos (salientes o entrantes) se borran en el acto.
+ * la sesión y las fotos (salientes o entrantes) se borran en el acto. Igual con un contacto que no
+ * existe (`known` falso, evaluado con el cerrojo tomado): nunca se crea una conversación fantasma.
  */
 internal class Conversations(
     private val clock: () -> Long,
@@ -112,9 +119,16 @@ internal class Conversations(
      * Añade un saliente y devuelve su id. Con [outbound] abierto, el id es el de `send()` (llamado con
      * el cerrojo tomado) y el estado `Sending`; sin sesión (o cerrada), un id nuevo con
      * `Failed(NOT_CONNECTED)`: nunca se encola. Si `send()` lanza, no se guarda nada y se relanza.
+     * Si no se está guardando o [known] (evaluado con el cerrojo tomado) es falso: id nuevo, nada
+     * guardado, ni se llama a la sesión, y la foto se rellena con ceros.
      */
-    fun addOutgoing(contactId: String, content: ChatContent, outbound: Outbound?): String = synchronized(lock) {
-        if (!accepting) {
+    fun addOutgoing(
+        contactId: String,
+        content: ChatContent,
+        known: () -> Boolean,
+        outbound: Outbound?,
+    ): String = synchronized(lock) {
+        if (!accepting || !known()) {
             wipe(content)
             return newId()
         }
