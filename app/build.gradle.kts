@@ -42,6 +42,13 @@ android {
         compose = true
     }
 
+    // Los binarios de tor (libtor.so y el ejecutable) deben extraerse al instalar para poder ejecutarse.
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+        }
+    }
+
     testOptions {
         unitTests.isIncludeAndroidResources = true
     }
@@ -52,6 +59,8 @@ kotlin {
 }
 
 dependencies {
+    implementation(project(":core:data"))
+    implementation(project(":core:tor"))
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.lifecycle.runtime.ktx)
@@ -61,4 +70,6 @@ dependencies {
 
     testImplementation(libs.junit4)
     testImplementation(libs.robolectric)
+    // FakeTor y repositorios en memoria del motor, inyectados mediante AppContainer.
+    testImplementation(testFixtures(project(":core:engine")))
 }

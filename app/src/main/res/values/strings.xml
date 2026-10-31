@@ -1,4 +1,76 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">GhostP2</string>
+
+    <!-- Notificaciones -->
+    <string name="channel_status_name">Estado de GhostP2</string>
+    <string name="channel_status_description">Notificación fija mientras GhostP2 está activo</string>
+    <string name="channel_messages_name">Mensajes y avisos</string>
+    <string name="channel_messages_description">Mensajes nuevos y avisos de tus contactos (sin contenido)</string>
+    <string name="notification_status_title">GhostP2 activo · cifrado</string>
+    <string name="notification_action_disconnect">Desconectar</string>
+    <string name="notification_message_title">Nuevo mensaje de %1$s</string>
+    <string name="notification_message_public">Nuevo mensaje</string>
+    <string name="notification_unpaired_title">%1$s te ha eliminado de sus contactos</string>
+    <string name="notification_identity_changed_title">La identidad de %1$s ha cambiado</string>
+    <string name="notification_identity_changed_text">Vuelve a emparejar para seguir hablando</string>
+    <string name="notification_contact_public">Aviso de un contacto</string>
+    <string name="notification_unknown_contact">un contacto</string>
+
+    <!-- Pantalla de diagnóstico (temporal, la sustituye el plan 3) -->
+    <string name="diag_title">GhostP2 · diagnóstico</string>
+    <string name="diag_activate">Activar</string>
+    <string name="diag_disconnect">Desconectar</string>
+    <string name="diag_retry">Reintentar</string>
+    <string name="diag_status_stopped">Estado: detenido</string>
+    <string name="diag_status_starting">Estado: arrancando Tor (%1$d %%)</string>
+    <string name="diag_status_online">Estado: en línea</string>
+    <string name="diag_status_error">Estado: error · %1$s</string>
+    <string name="diag_my_onion">Mi .onion: %1$s</string>
+    <string name="diag_my_onion_none">Mi .onion: sin publicar</string>
+    <string name="diag_contacts">Contactos: %1$d (en línea: %2$d)</string>
+    <string name="diag_battery_ok">Optimización de batería: desactivada para GhostP2</string>
+    <string name="diag_battery_on">Optimización de batería: activa (puede cortar la conexión)</string>
+    <string name="diag_battery_request">Permitir en segundo plano</string>
+    <string name="diag_create_invitation">Crear invitación</string>
+    <string name="diag_paste_invitation">Pegar invitación</string>
+    <string name="diag_invitation_preparing">Preparando la invitación…</string>
+    <string name="diag_invitation_waiting">Comparte este texto (caduca en 10 min):</string>
+    <string name="diag_invitation_paired">Emparejado. Número de seguridad: %1$s</string>
+    <string name="diag_invitation_expired">La invitación ha caducado</string>
+    <string name="diag_invitation_cancelled">Invitación cancelada</string>
+    <string name="diag_invitation_failed">No se pudo: %1$s</string>
+    <string name="diag_copy">Copiar</string>
+    <string name="diag_cancel">Cancelar</string>
+    <string name="diag_accept">Aceptar invitación</string>
+    <string name="diag_invitation_hint">Texto de la invitación</string>
+    <string name="diag_accepting">Emparejando…</string>
+    <string name="diag_clipboard_label">Invitación de GhostP2</string>
+    <string name="diag_presence_online">en línea</string>
+    <string name="diag_presence_connecting">conectando</string>
+    <string name="diag_presence_offline">desconectado</string>
+    <string name="diag_presence_identity_changed">identidad cambiada</string>
+    <string name="diag_chat_with">Chat con %1$s</string>
+    <string name="diag_close">Cerrar</string>
+    <string name="diag_message_hint">Mensaje</string>
+    <string name="diag_send">Enviar</string>
+    <string name="diag_photo">[foto]</string>
+    <string name="diag_sending">enviando…</string>
+    <string name="diag_delivered">entregado</string>
+    <string name="diag_failed">no enviado</string>
+    <string name="diag_send_only_online">Solo se puede enviar con GhostP2 en línea</string>
+
+    <!-- Errores del almacenamiento cifrado -->
+    <string name="store_corrupted">No se pudieron leer tus datos cifrados</string>
+    <string name="store_corrupted_detail">Tu identidad y tus contactos no se pueden recuperar en este dispositivo.</string>
+    <string name="store_unavailable">No se pudo acceder a tus datos cifrados</string>
+    <string name="store_unavailable_detail">Puede ser un fallo pasajero. Tus datos siguen intactos.</string>
+    <string name="store_unavailable_persistent">El fallo se repite. Si no se soluciona, puedes empezar de cero (se borra todo).</string>
+    <string name="store_reset">Empezar de cero</string>
+    <string name="store_reset_confirm_title">¿Empezar de cero?</string>
+    <string name="store_reset_confirm_text">Se borrarán tu identidad y todos tus contactos. No se puede deshacer.</string>
+    <string name="store_reset_confirm_again_title">¿Seguro? Última confirmación</string>
+    <string name="store_reset_confirm_again_text">Tus contactos tendrán que volver a emparejarse contigo.</string>
+    <string name="store_reset_confirm">Borrar todo</string>
+    <string name="store_reset_failed">No se pudo borrar: inténtalo de nuevo</string>
 </resources>

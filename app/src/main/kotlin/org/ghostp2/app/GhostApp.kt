@@ -1,0 +1,232 @@
+package org.ghostp2.app
+
+import android.app.Application
+import android.content.Context
+import android.content.Intent
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import org.ghostp2.data.StoreCorruptedException
+import org.ghostp2.data.StoreUnavailableException
+import org.ghostp2.data.StoredRepositories
+import org.ghostp2.data.createRepositories
+import org.ghostp2.engine.ContactRepository
+import org.ghostp2.engine.IdentityRepository
+import org.ghostp2.engine.MessengerEngine
+import org.ghostp2.engine.TorTransport
+import org.ghostp2.tor.KmpTorTransport
+
+/** Aplicación: crea los canales de notificación y es la única dueña del [AppContainer]. */
+open class GhostApp : Application() {
+    /** Contenedor único del proceso (se crea en el primer acceso). */
+    val container: AppContainer by lazy { createContainer() }
+
+    /** Punto de inyección para las pruebas (FakeTor y almacenamiento en memoria). */
+    protected open fun createContainer(): AppContainer = AppContainer(this)
+
+    override fun onCreate() {
+        super.onCreate()
+        Notifications.createChannels(this)
+    }
+}
+
+/** El contenedor del proceso a partir de cualquier `Context`. */
+val Context.container: AppContainer get() = (applicationContext as GhostApp).container
+
+/** Almacenamiento de identidad y contactos, con el borrado forzado para cuando "Reintentar" no sirve. */
+interface AppStorage {
+    val identities: IdentityRepository
+    val contacts: ContactRepository
+
+    /**
+     * Lee el almacenamiento sin conservar nada. Lanza [StoreCorruptedException] o
+     * [StoreUnavailableException] si no se puede leer; nunca borra ni sustituye nada.
+     */
+    suspend fun probe()
+
+    /** Ver [StoredRepositories.forceReset]: borra archivo y claves sin condiciones. */
+    suspend fun forceReset()
+}
+
+private class StoredAppStorage(private val repositories: StoredRepositories) : AppStorage {
+    override val identities: IdentityRepository get() = repositories.identities
+    override val contacts: ContactRepository get() = repositories.contacts
+
+    override suspend fun probe() {
+        // `load()` devuelve copias recién descifradas: se rellenan con ceros enseguida.
+        repositories.identities.load()?.let { id ->
+            id.identityPrivate.fill(0)
+            id.onionPrivateKey?.fill(0)
+        }
+    }
+
+    override suspend fun forceReset() = repositories.forceReset()
+}
+
+/** Estado del almacenamiento cifrado visto por la interfaz. */
+sealed interface StorageState {
+    /** Todavía no se ha comprobado. */
+    data object Unknown : StorageState
+
+    data object Ok : StorageState
+
+    /** Datos ilegibles e irrecuperables: solo cabe "Empezar de cero" ([AppContainer.wipeCorrupted]). */
+    data object Corrupted : StorageState
+
+    /**
+     * Fallo pasajero ("Reintentar"), `failures` veces seguidas. A partir de [FAILURES_BEFORE_RESET] se
+     * ofrece además "Empezar de cero" con doble confirmación ([AppContainer.forceReset]).
+     */
+    data class Unavailable(val failures: Int) : StorageState {
+        val canForceReset: Boolean get() = failures >= FAILURES_BEFORE_RESET
+    }
+
+    companion object {
+        const val FAILURES_BEFORE_RESET = 3
+    }
+}
+
+/**
+ * Inyección de dependencias manual: el único [TorTransport] y el único almacenamiento del proceso y el
+ * [MessengerEngine] que los usa, creado una sola vez con `SupervisorJob() + Dispatchers.Default` (R7).
+ * El servicio y la interfaz piden arrancar y detener a través de [start] y [stop], que se ordenan entre
+ * sí: un `stop` cancela un `start` en curso y un `start` posterior espera a que termine el `stop`.
+ * Nunca se arranca el motor si el almacenamiento falla (se informa en [storage]; regla R16: nada en claro).
+ */
+class AppContainer internal constructor(
+    context: Context,
+    val tor: TorTransport,
+    private val store: AppStorage,
+) {
+    /** Producción: Tor con kmp-tor y `ghostp2.bin` cifrado con Android Keystore. */
+    constructor(context: Context) : this(
+        context,
+        KmpTorTransport(context.applicationContext),
+        StoredAppStorage(createRepositories(context.applicationContext)),
+    )
+
+    private val appContext: Context = context.applicationContext
+
+    /** Scope del proceso (vive lo que la aplicación). */
+    val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
+    val engine = MessengerEngine(tor, store.identities, store.contacts, scope)
+
+    /** Contactos guardados (para nombres y la pantalla de diagnóstico). */
+    val contacts: ContactRepository get() = store.contacts
+
+    private val mutableStorage = MutableStateFlow<StorageState>(StorageState.Unknown)
+    val storage: StateFlow<StorageState> = mutableStorage.asStateFlow()
+
+    /** Un arranque pedido con [start]: su corrutina y su resultado. */
+    private class StartRun(val job: Job, val result: Deferred<Boolean>)
+
+    // Protegidos por `control`.
+    private val control = Any()
+    private var startRun: StartRun? = null
+    private var stopJob: Job? = null
+
+    /** Serializa las comprobaciones y los borrados del almacenamiento. */
+    private val storageLock = Mutex()
+
+    /** Comprueba que el almacenamiento se puede leer ([AppStorage.probe]) y actualiza [storage]. */
+    suspend fun checkStorage(): StorageState = storageLock.withLock { probeLocked() }
+
+    private suspend fun probeLocked(): StorageState {
+        val result = try {
+            store.probe()
+            StorageState.Ok
+        } catch (_: StoreCorruptedException) {
+            StorageState.Corrupted
+        } catch (_: StoreUnavailableException) {
+            val previous = mutableStorage.value as? StorageState.Unavailable
+            StorageState.Unavailable((previous?.failures ?: 0) + 1)
+        }
+        mutableStorage.value = result
+        return result
+    }
+
+    /**
+     * Comprueba el almacenamiento y, si está bien, arranca el motor. El resultado es `false` si el
+     * almacenamiento falla (el motor no se arranca) o si un [stop] cancela el arranque. Mientras hay un
+     * arranque en curso devuelve el mismo resultado.
+     */
+    fun start(): Deferred<Boolean> = synchronized(control) {
+        startRun?.takeIf { it.job.isActive }?.let { return it.result }
+        val previousStop = stopJob
+        val result = CompletableDeferred<Boolean>()
+        val job = scope.launch {
+            previousStop?.join()
+            if (checkStorage() == StorageState.Ok) {
+                engine.start()
+                result.complete(true)
+            }
+        }
+        // Cancelado o con el almacenamiento fallando: false.
+        job.invokeOnCompletion { result.complete(false) }
+        startRun = StartRun(job, result)
+        result
+    }
+
+    /** Detiene el motor; antes cancela (y espera) un arranque en curso. */
+    fun stop(): Job = synchronized(control) {
+        val run = startRun
+        startRun = null
+        val previousStop = stopJob
+        scope.launch {
+            run?.job?.cancelAndJoin()
+            previousStop?.join()
+            engine.stop()
+        }.also { stopJob = it }
+    }
+
+    /**
+     * "Empezar de cero" con datos ilegibles ([StorageState.Corrupted]): detiene el servicio y el motor
+     * y ejecuta [MessengerEngine.wipeAll] (borra identidad, contactos y estado de Tor).
+     */
+    suspend fun wipeCorrupted() {
+        stopEverything()
+        storageLock.withLock {
+            try {
+                engine.wipeAll()
+            } finally {
+                mutableStorage.update { StorageState.Unknown }
+                probeLocked()
+            }
+        }
+    }
+
+    /**
+     * "Empezar de cero" tras fallos pasajeros repetidos (doble confirmación en la interfaz): detiene todo,
+     * borra archivo y claves sin condiciones ([StoredRepositories.forceReset]) y el estado de Tor.
+     */
+    suspend fun forceReset() {
+        stopEverything()
+        storageLock.withLock {
+            try {
+                store.forceReset()
+                runCatching { tor.wipeState() }
+            } finally {
+                mutableStorage.update { StorageState.Unknown }
+                probeLocked()
+            }
+        }
+    }
+
+    private suspend fun stopEverything() {
+        // Sin servicio no hay notificación fija "activo"; si no estaba en marcha no hace nada.
+        appContext.stopService(Intent(appContext, GhostService::class.java))
+        stop().join()
+    }
+}
