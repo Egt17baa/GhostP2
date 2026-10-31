@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -79,10 +80,20 @@ internal data class SessionTimings(
  * enviado termina exactamente en un `Delivered` o un `Failed`. Una foto llega entera o no llega.
  *
  * Eventos: [events] es un SharedFlow sin reproducción y con búfer ilimitado, así que `tryEmit`
- * nunca falla ni se bloquea y un recolector lento no pierde nada. Contrato: hay que suscribirse
- * ANTES de llamar a [start] o a cualquier envío (los eventos emitidos sin suscriptores se
- * pierden) y mantener la suscripción mientras dure la sesión. Tras `Closed` solo pueden llegar
- * `Failed(NOT_CONNECTED)` de envíos posteriores.
+ * nunca falla ni se bloquea y un recolector lento no pierde nada. Los eventos emitidos sin
+ * suscriptores se perderían, por eso [start] SUSPENDE hasta que haya al menos un suscriptor.
+ * Contrato: un único recolector de larga vida propiedad de quien posee la sesión (un repositorio
+ * o servicio, NO la interfaz, que va y viene), suscrito antes de [start] y mientras dure la
+ * sesión. Tras `Closed` solo pueden llegar `Failed(NOT_CONNECTED)` de envíos posteriores.
+ * - El recolector NO debe usar `Dispatchers.Unconfined`: los eventos se emiten con un cerrojo
+ *   interno tomado y un recolector no confinado se ejecutaría dentro de él.
+ * - Como el búfer no tiene límite, si el recolector se atasca se acumulan eventos en memoria,
+ *   incluidas fotos recibidas completas (hasta 3 MiB cada una).
+ *
+ * Cancelación: el trabajo de [sendText]/[sendPhoto] se ejecuta en [scope], no en la corrutina
+ * de quien llama. Si esta se cancela (p. ej. el usuario sale del chat), el envío en curso sigue
+ * hasta el final y su id recibe igualmente su evento terminal; así nunca queda una foto a medias
+ * en el cable. Solo si se cancela [scope] se interrumpe el envío, y entonces la sesión se cierra.
  *
  * Concurrencia:
  * - Un único bucle de lectura (lanzado en [start]).
@@ -148,8 +159,12 @@ class PeerSession internal constructor(
         var nextIndex = 0
     }
 
-    /** Arranca el lector, el latido, el vigilante de inactividad y el emisor de acuses. Idempotente. */
-    fun start() {
+    /**
+     * Espera a que haya al menos un suscriptor de [events] y arranca el lector, el latido, el
+     * vigilante de inactividad y el emisor de acuses. Idempotente.
+     */
+    suspend fun start() {
+        _events.subscriptionCount.first { it > 0 }
         val reader: Job
         synchronized(lock) {
             if (started || closed) return
@@ -173,7 +188,7 @@ class PeerSession internal constructor(
         }
         val id = newId()
         if (!register(id, awaitingAck = true)) return id
-        if (sendFrame(AppMessage.Text(id, text))) armAckTimer(id)
+        detached { if (sendFrame(AppMessage.Text(id, text))) armAckTimer(id) }
         return id
     }
 
@@ -187,10 +202,15 @@ class PeerSession internal constructor(
         require(jpeg.size <= MAX_PHOTO_BYTES) { "La foto supera $MAX_PHOTO_BYTES bytes" }
         val id = newId()
         if (!register(id, awaitingAck = false)) return id
+        detached { sendPhotoFrames(id, jpeg) }
+        return id
+    }
+
+    private suspend fun sendPhotoFrames(id: String, jpeg: ByteArray) {
         val total = jpeg.size
         val count = chunkCountFor(total)
         photoMutex.withLock {
-            if (!sendFrame(AppMessage.PhotoStart(id, total, count))) return id
+            if (!sendFrame(AppMessage.PhotoStart(id, total, count))) return
             for (index in 0 until count) {
                 val from = index * CHUNK_BYTES
                 val to = minOf(total, from + CHUNK_BYTES)
@@ -200,21 +220,33 @@ class PeerSession internal constructor(
                 } finally {
                     Primitives.wipe(data)
                 }
-                if (!ok) return id
+                if (!ok) return
                 synchronized(lock) {
                     if (!closed && pending.containsKey(id)) _events.tryEmit(SessionEvent.PhotoProgress(id, to, total))
                 }
             }
             synchronized(lock) { pending[id]?.awaitingAck = true }
-            if (!sendFrame(AppMessage.PhotoEnd(id))) return id
+            if (!sendFrame(AppMessage.PhotoEnd(id))) return
         }
         armAckTimer(id)
-        return id
+    }
+
+    /**
+     * Ejecuta un envío ya registrado en [scope] y espera a que termine. Si quien llama se cancela,
+     * la espera se interrumpe pero el envío sigue (no se corta una secuencia de tramas). Si el
+     * envío no termina normalmente (se canceló [scope]), la sesión se cierra y el id pendiente
+     * recibe `Failed(CONNECTION_LOST)`.
+     */
+    private suspend fun detached(block: suspend () -> Unit) {
+        val job = scope.launch { block() }
+        job.invokeOnCompletion { cause -> if (cause != null) fail(CloseReason.LOCAL) }
+        job.join()
     }
 
     /** Avisa al contacto de que se deshace el emparejamiento y cierra la sesión (`LOCAL`). */
     suspend fun sendUnpair() {
         if (!closeReason.compareAndSet(null, CloseReason.LOCAL)) return
+        _isOpen.value = false
         sayGoodbye(AppMessage.Unpair)
         teardown()
     }
@@ -222,6 +254,7 @@ class PeerSession internal constructor(
     /** Cierra la sesión enviando antes `Bye` si se puede. Idempotente. */
     suspend fun close(reason: CloseReason = CloseReason.LOCAL) {
         if (!closeReason.compareAndSet(null, reason)) return
+        _isOpen.value = false
         sayGoodbye(AppMessage.Bye)
         teardown()
     }
@@ -344,8 +377,13 @@ class PeerSession internal constructor(
 
     /** Procesa un mensaje recibido; devuelve false si la sesión termina. Lanza [ProtocolException]. */
     private fun handle(message: AppMessage): Boolean {
-        // Cerrando: solo se aprovechan los acuses; lo demás se descarta (no se mostrará ni acusará)
-        if (closeReason.get() != null && message !is AppMessage.Ack) return true
+        // Cerrando: se descartan textos y fotos (no se mostrarán ni acusarán). Acuses, Bye y Unpair
+        // se procesan siempre: un Unpair perdido dejaría a un lado emparejado y al otro no.
+        if (closeReason.get() != null && (message is AppMessage.Text || message is AppMessage.PhotoStart ||
+                message is AppMessage.PhotoChunk || message is AppMessage.PhotoEnd)
+        ) {
+            return true
+        }
         when (message) {
             is AppMessage.Text -> {
                 checkId(message.id)
@@ -379,9 +417,9 @@ class PeerSession internal constructor(
                 return false
             }
             AppMessage.Unpair -> {
-                if (closeReason.compareAndSet(null, CloseReason.PEER_UNPAIRED)) {
-                    synchronized(lock) { if (!closed) _events.tryEmit(SessionEvent.PeerUnpaired) }
-                }
+                // Aunque ya nos estemos cerrando (otro motivo registrado) se avisa del desemparejamiento
+                closeReason.compareAndSet(null, CloseReason.PEER_UNPAIRED)
+                synchronized(lock) { if (!closed) _events.tryEmit(SessionEvent.PeerUnpaired) }
                 teardown()
                 return false
             }

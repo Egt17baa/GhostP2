@@ -1,5 +1,6 @@
 package org.ghostp2.core.protocol
 
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
@@ -184,6 +185,87 @@ class PeerSessionTest {
         assertFalse(p.logB.all.any { it is SessionEvent.PhotoReceived })
         assertFalse(p.logA.all.any { it is SessionEvent.Delivered })
         assertFalse(p.a.isOpen.value || p.b.isOpen.value)
+    }
+
+    @Test
+    fun cancelledPhotoSendStillCompletesAndSessionStaysUsable(): Unit = runBlocking {
+        val gate = GateOutputStream(transport.rawA.getOutputStream())
+        val streamA = FrameStream(transport.rawA.getInputStream(), gate, transport.rawA)
+        val p = peers(streamA = streamA)
+        gate.allow(3) // PhotoStart + 2 trozos; el tercero se queda bloqueado
+        p.a.start(); p.b.start()
+        val jpeg = Primitives.randomBytes(200_000)
+        val caller = scope.launch { p.a.sendPhoto(jpeg) }
+        try {
+            assertTrue(gate.blocked.await(5, TimeUnit.SECONDS))
+            caller.cancel() // p. ej. el usuario sale del chat a mitad de la subida
+            caller.join()
+        } finally {
+            gate.open()
+        }
+        val id = (p.logA.await { it is SessionEvent.PhotoProgress } as SessionEvent.PhotoProgress).id
+        p.logA.await { it == SessionEvent.Delivered(id) }
+        val received = p.logB.await { it is SessionEvent.PhotoReceived } as SessionEvent.PhotoReceived
+        assertArrayEquals(jpeg, received.jpeg)
+        // La sesión sigue sirviendo: otra foto llega entera
+        val second = Primitives.randomBytes(50_000)
+        val id2 = p.a.sendPhoto(second)
+        p.logA.await { it == SessionEvent.Delivered(id2) }
+        assertArrayEquals(second, (p.logB.await { it is SessionEvent.PhotoReceived && it.id == id2 } as SessionEvent.PhotoReceived).jpeg)
+        val terminal = p.logA.all.filter {
+            (it is SessionEvent.Delivered && it.id == id) || (it is SessionEvent.Failed && it.id == id)
+        }
+        assertEquals(1, terminal.size)
+        assertTrue(p.a.isOpen.value && p.b.isOpen.value)
+    }
+
+    @Test
+    fun startWaitsForSubscriberSoNoEventIsLost(): Unit = runBlocking {
+        TestTransport().use { t ->
+            val (ca, cb) = pairedChannels(t.a, t.b)
+            val a = PeerSession(t.a, ca, scope, TimeSource.Monotonic, calm)
+            val b = PeerSession(t.b, cb, scope, TimeSource.Monotonic, calm)
+            EventLog(b, scope)
+            b.start()
+            val starting = scope.async { a.start() }
+            delay(200)
+            assertFalse(starting.isCompleted) // sin suscriptor, start() no vuelve
+            val delivered = CompletableDeferred<SessionEvent>()
+            // Recolector lanzado de forma normal (no UNDISPATCHED) y después start()
+            scope.launch { a.events.collect { if (it is SessionEvent.Delivered) delivered.complete(it) } }
+            withTimeout(5_000) { starting.await() }
+            val id = a.sendText("hola")
+            assertEquals(SessionEvent.Delivered(id), withTimeout(5_000) { delivered.await() })
+        }
+    }
+
+    @Test
+    fun unpairReceivedDuringCloseLingerIsReported(): Unit = runBlocking {
+        TestTransport().use { t ->
+            val (ca, cb) = pairedChannels(t.a, t.b)
+            val b = PeerSession(t.b, cb, scope, TimeSource.Monotonic, calm.copy(linger = 3.seconds))
+            val log = EventLog(b, scope)
+            b.start()
+            val closing = scope.launch { b.close() }
+            assertEquals(AppMessage.Bye, AppCodec.decode(ca.decrypt(t.a.receive())))
+            assertFalse(b.isOpen.value) // isOpen cae en cuanto empieza el cierre, no tras la espera
+            t.a.send(ca.msg(AppMessage.Unpair)) // B está esperando a que A cierre
+            log.await { it is SessionEvent.Closed }
+            assertEquals(listOf(SessionEvent.PeerUnpaired, SessionEvent.Closed(CloseReason.LOCAL)), log.all)
+            withTimeout(1_000) { closing.join() }
+        }
+    }
+
+    @Test
+    fun simultaneousClosesDoNotWaitForLinger(): Unit = runBlocking {
+        val slow = calm.copy(linger = 2.seconds)
+        val p = peers(timingsA = slow, timingsB = slow)
+        p.a.start(); p.b.start()
+        val t0 = TimeSource.Monotonic.markNow()
+        listOf(scope.async { p.a.close() }, scope.async { p.b.close() }).awaitAll()
+        assertTrue(t0.elapsedNow() < 1.5.seconds, "tardó ${t0.elapsedNow()}")
+        p.logA.await { it is SessionEvent.Closed }
+        p.logB.await { it is SessionEvent.Closed }
     }
 
     @Test
