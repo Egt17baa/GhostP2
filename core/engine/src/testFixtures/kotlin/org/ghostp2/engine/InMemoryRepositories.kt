@@ -1,7 +1,8 @@
 package org.ghostp2.engine
 
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 
 /** Repositorio de identidad en memoria para pruebas. */
@@ -20,26 +21,40 @@ class InMemoryIdentityRepository(initial: Identity? = null) : IdentityRepository
     }
 }
 
-/** Repositorio de contactos en memoria para pruebas; conserva el orden de inserción. */
+/**
+ * Repositorio de contactos en memoria para pruebas; conserva el orden de inserción.
+ *
+ * Como el repositorio real (`DataStoreRepositories`: `distinctUntilChanged { old, new -> old === new }`),
+ * [contacts] puede saltarse estados intermedios (conflación) pero emite siempre cada escritura nueva,
+ * aunque la lista sea IGUAL (por contenido) a la última que vio un recolector. Un `StateFlow<List<Contact>>`
+ * directo no lo haría: con `A` → `IDENTITY_CHANGED` → `A` otra vez, un recolector que llegue tarde al
+ * estado intermedio no recibe la vuelta a `A` (igual a la última que vio) y el motor no se entera.
+ */
 class InMemoryContactRepository(initial: List<Contact> = emptyList()) : ContactRepository {
-    private val state = MutableStateFlow(initial)
+    /** Sin `equals`: cada escritura es un valor nuevo para el `StateFlow`. */
+    private class Snapshot(val list: List<Contact>)
 
-    override val contacts: StateFlow<List<Contact>> = state
+    private val state = MutableStateFlow(Snapshot(initial))
 
-    override suspend fun all(): List<Contact> = state.value
+    override val contacts: Flow<List<Contact>> = state.map { it.list }
+
+    override suspend fun all(): List<Contact> = state.value.list
 
     override suspend fun upsert(contact: Contact) {
-        state.update { list ->
-            if (list.any { it.id == contact.id }) list.map { if (it.id == contact.id) contact else it }
-            else list + contact
+        state.update { s ->
+            val list = s.list
+            Snapshot(
+                if (list.any { it.id == contact.id }) list.map { if (it.id == contact.id) contact else it }
+                else list + contact,
+            )
         }
     }
 
     override suspend fun delete(id: String) {
-        state.update { list -> list.filterNot { it.id == id } }
+        state.update { s -> Snapshot(s.list.filterNot { it.id == id }) }
     }
 
     override suspend fun wipe() {
-        state.value = emptyList()
+        state.value = Snapshot(emptyList())
     }
 }

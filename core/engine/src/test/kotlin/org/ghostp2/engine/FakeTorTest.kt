@@ -1,5 +1,6 @@
 package org.ghostp2.engine
 
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.ghostp2.core.crypto.OnionAddress
 import org.ghostp2.core.crypto.Primitives
@@ -246,7 +247,7 @@ class FakeTorTest {
         repo.upsert(c)
         repo.upsert(c.copy(name = "Ana B"))
         assertEquals(listOf(c.copy(name = "Ana B")), repo.all())
-        assertEquals(repo.all(), repo.contacts.value)
+        assertEquals(repo.all(), repo.contacts.first())
         repo.delete("a")
         assertTrue(repo.all().isEmpty())
         repo.upsert(c)

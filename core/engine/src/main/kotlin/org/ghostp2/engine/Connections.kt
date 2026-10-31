@@ -596,7 +596,11 @@ internal class Connections(
                 stored.copy(status = ContactStatus.IDENTITY_CHANGED).also { contacts.upsert(it) }
             } ?: return@withContext false
             link.mutex.withLock {
-                link.contact = changed
+                // Solo si el observador no ha entregado nada más nuevo desde `used`: si ya entregó otra
+                // instantánea (p. ej. el contacto vuelto a `ACTIVE` al volver a emparejar justo ahora),
+                // esa manda y no se pisa con esta copia vieja (el bucle saldría y nadie lo relanzaría).
+                // La propia instantánea `IDENTITY_CHANGED` le llega igualmente por `contacts.contacts`.
+                if (link.contact === used) link.contact = changed
                 refresh(link)
             }
             true

@@ -277,8 +277,15 @@ class PeerSessionTest {
             gate.allow(0) // los acuses de A se quedan bloqueados en la escritura
             a.start()
             for (i in 1..300) {
-                t.b.send(cb.encrypt(AppCodec.encode(AppMessage.Text("%024x".format(i), "hola $i"))))
                 if (!a.isOpen.value) break
+                // A cierra el socket al desbordarse la cola (antes de poner isOpen a false) con datos
+                // sin leer: el kernel responde con RST y la siguiente escritura de B falla («Broken
+                // pipe» / «Connection reset»). Es el final esperado del envío; el motivo se comprueba abajo.
+                try {
+                    t.b.send(cb.encrypt(AppCodec.encode(AppMessage.Text("%024x".format(i), "hola $i"))))
+                } catch (e: java.io.IOException) {
+                    break
+                }
             }
             assertEquals(SessionEvent.Closed(CloseReason.SECURITY), log.await { it is SessionEvent.Closed })
             assertTrue(log.all.count { it is SessionEvent.TextReceived } >= 256)

@@ -19,6 +19,11 @@ interface IdentityRepository {
  * identidad es ilegible, `wipe()` borra también la identidad.
  */
 interface ContactRepository {
+    /**
+     * Lista actual y sus cambios. Puede saltarse estados intermedios, pero debe emitir cada escritura
+     * nueva aunque la lista sea igual (por contenido) a una anterior: el motor escribe él mismo algunos
+     * cambios (p. ej. `IDENTITY_CHANGED`) y depende de ver la vuelta atrás (no deduplicar con `equals`).
+     */
     val contacts: Flow<List<Contact>>
 
     suspend fun all(): List<Contact>
