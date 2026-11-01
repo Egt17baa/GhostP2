@@ -25,7 +25,6 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
-import org.junit.Assert.fail
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -127,20 +126,13 @@ class ChatViewModelTest {
             val vm = viewModel(id)
             eventually(TIMEOUT) { vm.state.value?.presence == Presence.ONLINE }
 
-            // `ONLINE` puede verse un instante antes de que exista la sesión: hasta tenerla, el envío se
-            // descarta. Se reintenta (borrando lo descartado) hasta que uno se entrega.
-            val deadline = System.currentTimeMillis() + TIMEOUT
-            while (true) {
-                vm.draft = "hola"
-                assertTrue(vm.send())
-                assertEquals("", vm.draft)
-                eventually(TIMEOUT) { vm.state.value?.items?.lastOrNull()?.status.let { it == DeliveryStatus.Delivered || it is DeliveryStatus.Failed } }
-                if (vm.state.value!!.items.last().status == DeliveryStatus.Delivered) break
-                if (System.currentTimeMillis() > deadline) fail("Nunca se entregó")
-                vm.clear()
-                Thread.sleep(100)
-            }
-            val sent = vm.state.value!!.items.last()
+            // `ONLINE` solo con la sesión ya arrancada: el primer envío se entrega.
+            vm.draft = "hola"
+            assertTrue(vm.send())
+            assertEquals("", vm.draft)
+            eventually(TIMEOUT) { vm.state.value?.items?.singleOrNull()?.status.let { it == DeliveryStatus.Delivered || it is DeliveryStatus.Failed } }
+            val sent = vm.state.value!!.items.single()
+            assertEquals(DeliveryStatus.Delivered, sent.status)
             assertEquals(Direction.OUT, sent.direction)
             assertEquals(ChatContent.Text("hola"), sent.content)
 

@@ -533,7 +533,8 @@ valores por defecto están en `EngineConfig`.
   servicio) **o abrir la app** (cada `onResume` de la actividad, con el motor `Online`) corta las
   esperas, vuelve a la mínima y reintenta enseguida.
 - Presencia: `OFFLINE`, `CONNECTING`, `ONLINE` o `IDENTITY_CHANGED`. Con el motor parado no hay
-  presencia (mapa vacío). `ONLINE` puede verse un instante antes de que la sesión acepte envíos.
+  presencia (mapa vacío). `ONLINE` solo con la sesión ya arrancada (acepta envíos); mientras arranca
+  (también al sustituir una sesión duplicada) el contacto está `CONNECTING`.
 - Conexiones entrantes: handshake de respondedor (§7) con los contactos `ACTIVE` como candidatos.
   Cualquier fallo (llamante desconocido, conexión, plazo…) cierra en silencio, sin cambiar el
   estado de nadie. Como mucho 32 handshakes entrantes a la vez: las conexiones de más se cierran

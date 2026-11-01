@@ -54,7 +54,7 @@ class ConnectionsTest {
 
     /**
      * Espera a que ambos lados estén `ONLINE` sobre la misma conexión (iniciada por uno solo de los dos).
-     * Una sustitución de sesión no cambia la presencia (`ONLINE` → `ONLINE`), así que se sondea el estado.
+     * Una sustitución de sesión solo pasa un instante por `CONNECTING` (hasta arrancar la nueva), así que se sondea el estado.
      */
     private suspend fun awaitSameSession(h: EngineHarness, bInA: String, aInB: String) {
         val settled = withTimeoutOrNull(TIMEOUT) {
@@ -102,6 +102,44 @@ class ConnectionsTest {
         assertTrue(h.engine(0).sessionFor(bInA)!!.isOpen.value)
         assertTrue(h.engine(1).sessionFor(aInB)!!.isOpen.value)
         exchangeText(h, bInA, aInB, "hola")
+    }
+
+    /**
+     * `ONLINE` solo con la sesión ya arrancada: quien lo vea puede enviar ya (`sessionFor` no es nulo).
+     * Con `Unconfined` cada cambio de presencia se comprueba en el hilo que lo hace, antes de que siga.
+     */
+    @Test
+    fun onlineOnlyOnceTheSessionHasStarted() = runBlocking<Unit> {
+        val h = EngineHarness(2, config).also { harness = it }
+        val early = Collections.synchronizedList(mutableListOf<String>())
+        for (i in 0..1) {
+            val engine = h.engine(i)
+            observers.launch(Dispatchers.Unconfined) {
+                engine.presence.collect { map ->
+                    for ((id, p) in map) {
+                        if (p == Presence.ONLINE && engine.sessionFor(id) == null && engine.presence.value[id] == Presence.ONLINE) {
+                            early += "$i:$id"
+                        }
+                    }
+                }
+            }
+        }
+        h.startAll()
+        val handle = h.engine(0).createInvitation()
+        val waiting = withTimeout(TIMEOUT) { handle.state.first { it is InvitationState.Waiting } } as InvitationState.Waiting
+        assertTrue(h.engine(1).acceptInvitation(waiting.text) is AcceptResult.Paired)
+        val bInA = h.contacts(0).all().single().id
+        val aInB = h.contacts(1).all().single().id
+        awaitSameSession(h, bInA, aInB)
+        // Otra vez tras perder la red.
+        h.network.setOnline(false)
+        awaitPresence(h.engine(0), bInA, Presence.OFFLINE)
+        awaitPresence(h.engine(1), aInB, Presence.OFFLINE)
+        h.network.setOnline(true)
+        h.engine(0).onNetworkChanged()
+        h.engine(1).onNetworkChanged()
+        awaitSameSession(h, bInA, aInB)
+        assertTrue(early.isEmpty()) { "ONLINE sin sesión arrancada: $early" }
     }
 
     @Test

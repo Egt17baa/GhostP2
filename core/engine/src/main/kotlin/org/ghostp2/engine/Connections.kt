@@ -698,7 +698,13 @@ internal class Connections(
                             }
                             throw e
                         }
-                        active.started = true
+                        // ONLINE solo ahora: quien lo vea ya puede enviar por esta sesión.
+                        withContext(NonCancellable) {
+                            link.mutex.withLock {
+                                active.started = true
+                                if (link.session.value === active) refresh(link)
+                            }
+                        }
                         return true
                     }
                     Decision.Discard -> {
@@ -787,11 +793,16 @@ internal class Connections(
         stream.close()
     }
 
-    /** Recalcula la presencia del contacto. Con `link.mutex` tomado. */
+    /**
+     * Recalcula la presencia del contacto. Con `link.mutex` tomado. `ONLINE` solo con la sesión ya
+     * arrancada (la que da `sessionFor`); envuelta pero aún sin arrancar cuenta como `CONNECTING`.
+     */
     private fun refresh(link: Link) {
         if (link.removed || closed) return
+        val session = link.session.value
         val p = when {
-            link.session.value != null -> Presence.ONLINE
+            session != null && session.started -> Presence.ONLINE
+            session != null -> Presence.CONNECTING
             link.contact.status == ContactStatus.IDENTITY_CHANGED -> Presence.IDENTITY_CHANGED
             link.outgoing != null -> Presence.CONNECTING
             else -> Presence.OFFLINE

@@ -114,8 +114,7 @@ class MessengerEngine(
     /**
      * Presencia por id de contacto mientras el motor está en marcha (ver [Connections]). Con el motor
      * parado el mapa está **vacío** (no se conserva un `OFFLINE` por contacto).
-     * `ONLINE` puede aparecer un instante antes de que `sessionFor` devuelva la sesión: esta solo se
-     * expone una vez terminado su `start()`.
+     * `ONLINE` solo una vez terminado el `start()` de la sesión: entonces `sessionFor` ya la devuelve.
      */
     val presence: StateFlow<Map<String, Presence>> = mutablePresence.asStateFlow()
 
