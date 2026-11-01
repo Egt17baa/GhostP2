@@ -20,7 +20,7 @@
 - `FLAG_SECURE` en la ventana de la actividad; diálogos y menús con la `SecureFlagPolicy.Inherit` por defecto (no cambiarla).
 - Un único `TorTransport`, un único almacenamiento y un único `MessengerEngine` por proceso, los del `AppContainer`; ningún `ViewModel`, receptor ni servicio crea los suyos.
 - La interfaz solo envía con el motor `Online` y a contactos guardados (R15). Sin sesión, el envío se hace igual y queda descartado (spec §6.7); nunca hay cola de entrega diferida.
-- Fotos: Photo Picker del sistema (`PickVisualMedia`, solo imágenes, sin permiso de galería); recodificación JPEG (sin EXIF), lado mayor por defecto 2048 px (ajustes: 1280, 2048, 3072), máximo `PeerSession.MAX_PHOTO_BYTES` = 3 145 728 bytes; una sola foto en vuelo y como mucho 3 esperando.
+- Fotos: Photo Picker del sistema (`PickVisualMedia`, solo imágenes, sin permiso de galería); recodificación JPEG (sin EXIF), lado mayor por defecto 2048 px (ajustes: 1280, 2048, 3072), máximo `PeerSession.MAX_PHOTO_BYTES` = 3 145 728 bytes; una sola foto en vuelo y como mucho 3 fotos en la cola en total, contando la que está en vuelo (R25).
 - Notificaciones sin contenido; con "Ocultar el nombre" ni siquiera el nombre.
 - Pruebas de módulos Android: JUnit4 + Robolectric (`sdk=35`, R11), Compose con `createComposeRule()` y `@Config(application = TestGhostApp::class)`; bitmaps reales con `@GraphicsMode(GraphicsMode.Mode.NATIVE)`.
 - Textos fijados por la spec: "Conectando a la red Tor…", "enviando…", "✓ entregado", "No entregado: tu contacto no está conectado. Descartado", "No entregado. Descartado", "GhostP2 activo · cifrado", "Nuevo mensaje de <nombre>", "<nombre> te ha eliminado de sus contactos".
@@ -423,3 +423,21 @@ Aplazados también de la spec §8: detekt y ktlint (el código actual no tiene b
 - [ ] **Step 3:** `docs/PROTOCOLO.md`: borrados pendientes persistidos (§14.6), R20 (§14.8), R21 y el arranque de Tor tras borrar su estado (§14.9), R22 y R23 (§15).
 - [ ] **Step 4:** `./gradlew test :app:assembleDebug` → PASA.
 - [ ] **Step 5:** Commit `docs: interfaz definitiva, prueba manual y reglas R20–R23`.
+
+## Decisiones durante la ejecución
+
+Reglas acordadas mientras se ejecutaba el plan (el detalle está en `docs/PROTOCOLO.md` §14 y §15):
+
+- **R20**: "Activar GhostP2 al encender el móvil", desactivada por defecto; con ella, un receptor de `BOOT_COMPLETED` arranca el servicio si la bienvenida está hecha (modifica R19).
+- **R21**: `ghostp2.bin` pasa al formato 2 (ajustes y borrados pendientes, con el byte de formato en los datos asociados); se siguen leyendo archivos de formato 1.
+- **R22**: el bloqueo de la app es una puerta de la interfaz (`BiometricPrompt` con huella o credencial del dispositivo); la clave de Keystore no exige autenticación.
+- **R23**: sin cámara para fotos (`TakePicture` escribe en un archivo y `TakePicturePreview` solo da una miniatura); la cámara solo escanea el QR.
+- **R24**: el texto de la invitación no se puede seleccionar; solo se copia con "Copiar" (marcado como sensible).
+- **R25**: la cola de fotos salientes admite como mucho 3 fotos en total, contando la que está en vuelo.
+- **R26**: la decodificación previa a recodificar una foto se limita a unos 24 Mpx (con fuentes de 100 Mpx o más, el lado mayor puede quedar algo por debajo del ajuste).
+- **R27**: "Guardar" quita los segmentos APPn (conserva el APP0 de JFIF) y COM y comprueba SOI y EOI: las fotos recibidas se guardan sin metadatos.
+- **R28**: en API 26–27 el bloqueo solo usa la credencial del dispositivo (PIN, patrón o contraseña): `FingerprintManagerCompat` de androidx.core 1.18 no detecta hardware ahí.
+
+### Pendiente
+
+(Ninguno por ahora; lo completa la revisión final.)

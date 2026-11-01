@@ -459,6 +459,9 @@ valores por defecto están en `EngineConfig`.
 | Historial en memoria | 500 elementos por contacto (se descartan los más antiguos) |
 | Fotos en el historial, sumando todas las conversaciones | 64 MiB (`maxPhotoBytesInMemory`; se descartan las más antiguas) |
 | Handshakes de sesión entrantes simultáneos | 32 (las conexiones de más se cierran al aceptarlas) |
+| Fotos salientes en la cola de la interfaz | 3 en total, contando la que está en vuelo (R25, §14.10) |
+| Lado mayor de una foto enviada | 2048 px por defecto (ajustes: 1280, 2048 o 3072) |
+| Decodificación de una foto antes de recodificarla | ≈ 24 Mpx como mucho (R26); archivo de origen de hasta 64 MiB |
 
 ### 14.1 Publicación de la .onion permanente
 
@@ -563,7 +566,7 @@ valores por defecto están en `EngineConfig`.
 ### 14.5 Historial en memoria y envío
 
 - Las conversaciones viven en la memoria del motor, por contacto (hasta 500 elementos), no
-  ligadas a la sesión: **sobreviven a los cortes de conexión**. Se borran al pulsar "Borrar"
+  ligadas a la sesión: **sobreviven a los cortes de conexión**. Se borran con "Borrar chat"
   (`clearConversation`), al borrar el contacto (al empezar el borrado), al detener el motor
   ("Desconectar"), cuando el motor pasa a `Error` (también se libera todo) y, por supuesto, si
   muere el proceso. Nunca se escriben en disco. Las fotos se rellenan con ceros al salir del
@@ -573,10 +576,13 @@ valores por defecto están en `EngineConfig`.
   como mucho 64 MiB (`EngineConfig.maxPhotoBytesInMemory`; cada foto puede tener hasta 3 MiB, §10.1).
   Al superarlo, tras guardar una foto nueva (enviada o recibida), se descartan primero las **más
   antiguas**, de cualquier contacto: sus bytes se rellenan con ceros y el mensaje sigue en el
-  historial (mismo id, estado y hora) como "foto descartada" (`ChatContent.PhotoDiscarded`, solo con
-  su tamaño). Una foto que se está enviando no se descarta hasta que termina su envío.
+  historial (mismo id, estado y hora) como foto descartada (`ChatContent.PhotoDiscarded`, solo con
+  su tamaño; la interfaz muestra "Foto descartada para liberar memoria"). Una foto que se está
+  enviando no se descarta hasta que termina su envío.
 - Enviar sin sesión abierta ⇒ el elemento queda en el historial como `Failed(NOT_CONNECTED)` al
-  momento ("no enviado"). No hay cola ni reintentos (§10.3).
+  momento (la interfaz lo tacha con "No entregado: tu contacto no está conectado. Descartado"). No
+  hay cola ni reintentos (§10.3); la interfaz deja enviar igual y avisa antes "Tu contacto no está
+  conectado: lo que envíes se descartará".
 - **R15**: `sendText`/`sendPhoto` con el motor parado, o hacia un id que no es un contacto
   guardado (o que se está borrando), devuelven un id y **no guardan nada**: un motor parado no
   tiene mensajes ni conversaciones fantasma. La interfaz solo debe enviar con el motor en línea y
@@ -596,12 +602,26 @@ valores por defecto están en `EngineConfig`.
 
 Si mientras tanto se volvió a emparejar con el mismo contacto, el emparejamiento nuevo se
 conserva. Al **recibir** `Unpair` se hace el mismo borrado local y se avisa "<nombre> te ha
-eliminado de sus contactos" (con el nombre que tenía). "Borrar todo" envía `Unpair` en paralelo
-a las sesiones abiertas (2,5 s en total, mejor esfuerzo), detiene el motor y borra identidad,
-contactos, autorizaciones y el estado de Tor en disco. La pantalla de diagnóstico del plan 2
-ofrece "Borrar" contacto (con confirmación; muestra si el aviso se entregó) y "Borrar chat", pero
-todavía no "Borrar todo" (plan 3). Mientras dura un borrado, el motor expone su id en `deleting` (solo en
-memoria: si el proceso muere a mitad, el borrado no se reanuda; plan 3).
+eliminado de sus contactos" (con el nombre que tenía).
+
+**Borrados pendientes persistidos.** Mientras dura un borrado, el motor expone su id en `deleting`
+(la interfaz muestra "Borrando…" y no deja abrir el contacto) y, además, lo apunta en un diario
+(`DeletionJournal`) que se guarda en `ghostp2.bin` (campo `pendingDeletions`, solo ids; formato 2,
+R21). La entrada se apunta tras el paso 1 (si no se puede guardar, el borrado sigue solo en
+memoria) y se quita tras el paso 3; si el borrado del paso 3 falla, se queda. Si el proceso muere a mitad,
+en el siguiente arranque del motor (justo después de arrancar los bucles de conexión) cada id del
+diario que sigue siendo un contacto guardado **se vuelve a borrar** desde el principio, con una
+ventana nueva de 2 min para entregar `Unpair`; los ids que ya no son contactos se quitan del
+diario. Si el diario no se puede leer, no se reanuda ninguno. Volver a emparejar con ese contacto
+quita su entrada, y "Borrar todo" vacía el diario.
+
+**"Borrar todo"** (Ajustes › Datos, con doble confirmación) envía `Unpair` en paralelo a las
+sesiones abiertas (2,5 s en total, mejor esfuerzo), detiene el motor y borra identidad, contactos,
+autorizaciones, borrados pendientes y el estado de Tor en disco. Después la app vuelve los ajustes a
+los de por defecto (con ellos, a la bienvenida), detiene el servicio, quita todas sus
+notificaciones y vacía el portapapeles si contiene una invitación de GhostP2. El detalle del
+contacto ofrece "Borrar contacto" (con confirmación; al terminar dice si el aviso se entregó) y
+"Borrar chat".
 
 ### 14.7 Ciclo de vida del motor y Tor (reglas R13 y R18)
 
@@ -624,7 +644,7 @@ memoria: si el proceso muere a mitad, el borrado no se reanuda; plan 3).
 - Una excepción inesperada en una corrutina del proceso (motor, sesiones, servicio) no cierra la
   app: los scopes llevan un `CoroutineExceptionHandler` que la descarta sin registrarla.
 
-### 14.8 Servicio en primer plano (regla R19)
+### 14.8 Servicio en primer plano (reglas R19 y R20)
 
 - "Activar" inicia un servicio en primer plano de tipo `specialUse` con la notificación fija
   "GhostP2 activo · cifrado" y la acción "Desconectar". En Android 13+ se pide antes el permiso
@@ -635,16 +655,30 @@ memoria: si el proceso muere a mitad, el borrado no se reanuda; plan 3).
   todo sin la exención de batería): entonces se detiene y deja la notificación "GhostP2 se ha
   detenido · Abre la app para volver a activarlo". Lo mismo si al reiniciarse el almacenamiento
   falla.
-- "Desconectar" (en la pantalla o en la notificación) detiene motor y servicio **para siempre**:
-  el sistema no vuelve a crearlo. No hay receptor de `BOOT_COMPLETED`: nada arranca GhostP2 al
-  encender el móvil.
-- Exención de la optimización de batería: la pantalla la muestra y ofrece "Permitir en segundo
-  plano" (diálogo del sistema). No se pide sola.
+- "Desconectar" (en la lista de contactos, en el aviso del estado o en la notificación) detiene
+  motor y servicio **para siempre**: el sistema no vuelve a crearlo.
+- **R20 (modifica R19)**: opción "Activar GhostP2 al encender el móvil" (Ajustes › Segundo plano),
+  **desactivada por defecto**. Un receptor de `BOOT_COMPLETED` (difusión protegida: solo la envía el
+  sistema) comprueba el almacenamiento y lee los ajustes en como mucho 8 s; solo si la opción está
+  activada y la bienvenida terminada, arranca el servicio en primer plano como el reinicio
+  `START_STICKY`. Si el almacenamiento o la lectura fallan, no hace nada (GhostP2 queda apagado). Si
+  el sistema no deja pasar a primer plano, deja la notificación "GhostP2 se ha detenido · Abre la
+  app para volver a activarlo". Sin la opción, nada arranca GhostP2 al encender el móvil.
+- Exención de la optimización de batería: la bienvenida la pide ("Quitar el ahorro de batería") y
+  Ajustes la muestra con "Permitir en segundo plano" (diálogo del sistema; si el fabricante lo
+  quitó, la lista del sistema). Las dos muestran la ruta del ahorro propio del fabricante (Xiaomi,
+  Samsung, Huawei/Honor, OnePlus/OPPO/realme o un texto genérico), que la exención de Android no
+  desactiva.
 - Notificaciones de contacto (canal "Mensajes y avisos", visibilidad privada): "Nuevo mensaje de
   <nombre>" **sin contenido**; su versión pública (pantalla de bloqueo con el contenido sensible
-  oculto) es "Nuevo mensaje", sin nombre. Los avisos de diagnóstico no se notifican.
+  oculto) es "Nuevo mensaje", sin nombre. Con "Ocultar el nombre del contacto" (leído en cada aviso;
+  si no se puede leer, se oculta) tampoco la privada lleva nombre: "Nuevo mensaje", "Un contacto te
+  ha eliminado de sus contactos", "La identidad de un contacto ha cambiado"; al activarlo se quitan
+  las notificaciones de contacto ya publicadas. No se notifican los mensajes del chat que está
+  abierto en primer plano. Los avisos de diagnóstico no se notifican: el último se ve en Ajustes ›
+  Acerca de.
 
-### 14.9 Almacenamiento (reglas R16 y R17)
+### 14.9 Almacenamiento (reglas R16, R17 y R21)
 
 - En disco solo `noBackupFilesDir/ghostp2.bin` (identidad, clave de la .onion permanente y
   contactos con sus claves, `pairSecret` y nombres, en un objeto CBOR) cifrado con un keyset Tink
@@ -659,9 +693,67 @@ memoria: si el proceso muere a mitad, el borrado no se reanuda; plan 3).
 - Compatibilidad hacia delante: los campos CBOR desconocidos (escritos por una versión más nueva)
   se ignoran al leer; un valor desconocido de un enum o un campo obligatorio ausente siguen siendo
   "datos ilegibles".
+- **R21**: `ghostp2.bin` pasa al formato 2. El primer byte del archivo es la versión de formato y
+  va en los datos asociados del AEAD (byte ‖ etiqueta `ghostp2-store-v1`, que no cambia). Se leen
+  los formatos 1 y 2 y se escribe siempre el 2, así que un archivo de formato 1 pasa al 2 en la
+  primera escritura; cualquier otro primer byte es "datos ilegibles" sin intentar descifrar. El
+  formato 2 añade, con valor por defecto, los ajustes de la app (bienvenida hecha, bloqueo y
+  "Bloquear tras", ocultar nombres, lado mayor de las fotos, activar al encender; sin secretos ni
+  contenido) y los borrados pendientes (§14.6). Un archivo de formato 1 se lee con ajustes por
+  defecto y sin borrados pendientes.
 - Estado de Tor en `noBackupFilesDir/tor` (consenso, guardas, cookie de control); sin claves de
   servicios ni de autorización.
+- **Tor vuelve a arrancar tras borrar su estado** ("Borrar todo", "Empezar de cero"):
+  `KmpTorTransport.wipeState()` detiene Tor, suelta su driver y borra el directorio; el siguiente
+  `start()` crea un driver nuevo. kmp-tor 2.6.0 (comprobado en su bytecode) guarda en caché para
+  todo el proceso, sin expulsión, el `Environment` por directorio y el `TorRuntime` de cada
+  `Environment`, así que el driver nuevo recibe el mismo runtime. Por eso los observadores de
+  `ERROR` y `STATE` se suscriben **una sola vez por runtime** (suscribir otra vez los duplicaría:
+  se comparan por identidad) y cada driver nuevo solo cambia el destino de esos avisos. En cada
+  `startDaemon` kmp-tor vuelve a extraer los recursos que falten (geoip, geoip6), genera la
+  configuración de nuevo (por la entrada estándar) y crea los directorios con permisos 700; el
+  binario de Tor sale del directorio de bibliotecas nativas, que el borrado no toca. No hace falta
+  ninguna API de reinstalación.
 - Sin copias de seguridad: `allowBackup="false"` y reglas de extracción que excluyen todo.
+
+### 14.10 Interfaz (reglas R22–R28)
+
+- **Sin estado guardable con contenido**: ni mensajes, ni fotos, ni borradores, ni la invitación,
+  ni el texto pegado van en el `Bundle` que Android escribe en disco (`rememberSaveable`,
+  `SavedStateHandle` y `rememberTextFieldState` están prohibidos); las rutas de navegación solo
+  llevan ids. Todos los campos de texto piden al teclado no aprender
+  (`IME_FLAG_NO_PERSONALIZED_LEARNING`) y no autocorregir. `FLAG_SECURE` en la ventana.
+- **R24**: el texto de la invitación no se puede seleccionar; solo se copia con "Copiar", que lo
+  marca como sensible (`EXTRA_IS_SENSITIVE`, Android 13+). "Compartir" lo envía a otra app con el
+  selector del sistema. "Borrar todo" vacía el portapapeles si tiene una invitación de GhostP2.
+- **Fotos salientes**: selector de fotos del sistema (`PickVisualMedia`, solo imágenes, sin
+  permiso de galería) y recodificación a JPEG sin metadatos (orientación aplicada, sRGB,
+  transparencia sobre blanco), con el lado mayor del ajuste "Tamaño máximo" (nunca se amplía) y
+  como mucho `PeerSession.MAX_PHOTO_BYTES` (3 MiB): si no cabe, se baja la calidad y después el
+  tamaño; si aun así no cabe, "La foto es demasiado grande para enviarla". Nada toca el disco.
+  - **R25**: la cola de fotos salientes admite **como mucho 3 fotos en total**, contando la que
+    está en vuelo (codificándose, enviándose o esperando su acuse) y las que esperan; con 3, la
+    siguiente se rechaza ("Espera a que terminen de enviarse las fotos"). Una sola foto en vuelo.
+  - **R26**: la decodificación previa se submuestrea (`inSampleSize`) para no pasar de unos
+    24 Mpx; con fuentes de 100 Mpx o más y "3072 px", el lado mayor puede quedar algo por debajo
+    del ajuste.
+- **Fotos recibidas**: la interfaz decodifica cada foto una vez a su propio bitmap (miniatura y
+  visor, fuera del hilo principal) y tolera que el presupuesto de 64 MiB (§14.5) ponga sus bytes a
+  cero en cualquier momento: entonces muestra "Foto descartada para liberar memoria", nunca una
+  imagen corrupta.
+  - **R27**: "Guardar" del visor (destino elegido por el usuario con el selector de documentos del
+    sistema) es la única vía por la que una foto llega al disco. Quita los segmentos APP1–APP15 y
+    COM (conserva el APP0 de JFIF) y comprueba las marcas SOI y EOI, así que el EXIF de una foto
+    recibida nunca llega al disco. Si la foto ya está a cero o no tiene la estructura esperada, no
+    se guarda y se borra el documento creado.
+- **Bloqueo** ("Bloqueo con huella o PIN", "Bloquear tras": inmediatamente, 1, 5 o 15 min; 1 min
+  por defecto): ver R22 en §15. Se bloquea al arrancar en frío y al volver tras el tiempo elegido
+  (reloj `elapsedRealtime`; girar el móvil no cuenta). Hasta leer los ajustes la raíz no muestra
+  nada sensible (falla cerrado). Activarlo exige bloqueo de pantalla en el móvil; si el usuario lo
+  quita después, al volver GhostP2 se desbloquea, desactiva su bloqueo y lo avisa.
+  - **R28**: en Android 8.0–8.1 (API 26–27) el bloqueo solo ofrece la credencial del dispositivo
+    (PIN, patrón o contraseña): `FingerprintManagerCompat` de androidx.core 1.18 no detecta hardware
+    ahí, y androidx.biometric 1.1.0 pasa directamente a la credencial.
 
 ## 15. Limitaciones del nivel de aplicación
 
@@ -680,12 +772,22 @@ Complementan las del núcleo (§13). GhostP2 no promete más de lo que hay aquí
   internas de la JVM, BouncyCastle o Tink (§13). No hay garantía de borrado en memoria.
 - **Mensajes solo en memoria**: se descartan si el destinatario no está conectado (no hay cola) y
   el historial se pierde al desconectar, si Tor falla, si el sistema mata la app o al reiniciar
-  el móvil. "Entregado" significa recibido por su app, no leído. Con muchas fotos, las más antiguas
-  se descartan de la memoria (64 MiB en total, §14.5).
+  el móvil. "✓ entregado" significa recibido por su app, no leído. Con muchas fotos, las más
+  antiguas se descartan de la memoria (64 MiB en total, §14.5).
 - **Android Keystore obligatorio** (R16): en dispositivos con Keystore roto la app no funciona.
   La protección en reposo es la de Keystore: con el móvil desbloqueado (o con root), quien
   ejecute código como la app puede descifrar `ghostp2.bin`. La clave maestra no exige
-  autenticación del usuario y no hay bloqueo propio de la app todavía (plan 3).
+  autenticación del usuario.
+- **R22: el bloqueo de la app es una puerta de la interfaz**: `BiometricPrompt` con huella (clase
+  débil) o credencial del dispositivo, sin botón negativo; mientras está bloqueada solo se compone
+  la pantalla "GhostP2 está bloqueado". No cifra nada: la clave de Keystore no exige autenticación,
+  así que no protege `ghostp2.bin` frente a quien ejecute código como la app, y el motor sigue
+  funcionando (recibe y notifica) con la app bloqueada. Es un bloqueo en memoria del proceso; el
+  arranque en frío vuelve a bloquear. En Android 8.0–8.1 solo hay credencial, no huella (R28).
+- **R23: sin cámara para fotos**: `TakePicture` exige que la cámara escriba la foto en un archivo
+  (en disco) y `TakePicturePreview` solo devuelve una miniatura; por eso solo se envían fotos
+  elegidas con el selector del sistema. La cámara (CameraX, opcional en el manifiesto) solo se usa
+  para escanear el QR de la invitación, y los fotogramas no se guardan.
 - **Estado de Tor en disco**: guardas y caché de consenso revelan, a quien lea el
   almacenamiento de la app, que se ha usado Tor (no con quién).
 - **Metadatos visibles**: la red local y la operadora ven que usas Tor (sin puentes, puede estar
@@ -699,9 +801,13 @@ Complementan las del núcleo (§13). GhostP2 no promete más de lo que hay aquí
   registrada la autorización para ella) para comprobar si ese contacto está en línea.
 - **Dispositivo comprometido**: malware con root, un depurador o una captura de la memoria
   quedan fuera de alcance. Las notificaciones muestran el nombre del contacto con el móvil
-  desbloqueado.
-- **Sin arranque tras reiniciar el móvil** y, sin la exención de batería, Android puede cortar la
-  conexión con Tor o no recrear el servicio (R19). No hay ayuda específica para el ahorro de
-  energía de cada fabricante.
+  desbloqueado, salvo con "Ocultar el nombre del contacto".
+- **Fotos guardadas**: lo que el usuario guarda con "Guardar" queda en el disco, fuera del control
+  de GhostP2 (sin metadatos, R27).
+- **Segundo plano**: "Activar GhostP2 al encender el móvil" está desactivado por defecto (R20) y,
+  aun activado, el sistema puede no dejarlo arrancar. Sin la exención de batería, Android puede
+  cortar la conexión con Tor o no recrear el servicio (R19). Para el ahorro de energía propio de
+  cada fabricante solo hay una ayuda con la ruta de sus ajustes (Xiaomi, Samsung, Huawei/Honor,
+  OnePlus/OPPO/realme); GhostP2 no puede desactivarlo.
 - **Reinstalación** (R14): no se avisa; el contacto antiguo queda desconectado y hay que volver a
   emparejar.

@@ -139,8 +139,8 @@ object Notifications {
 
     /**
      * Notificación para un aviso del motor, o `null` si el aviso es solo de diagnóstico
-     * (`PublicationFailed`, `ClientAuthFailed`: no se notifican; el último se ve en la pantalla de
-     * diagnóstico, ver [AppContainer.lastDiagnostic]).
+     * (`PublicationFailed`, `ClientAuthFailed`: no se notifican; el último se ve en Ajustes › Acerca
+     * de, ver [AppContainer.lastDiagnostic]).
      * `contactName` es el nombre guardado del contacto (o `null` si ya no se conoce). Con [hideNames]
      * ("Ocultar el nombre del contacto") no aparece ningún nombre, ni siquiera en la versión privada:
      * "Nuevo mensaje", "Un contacto te ha eliminado de sus contactos", "La identidad de un contacto ha
