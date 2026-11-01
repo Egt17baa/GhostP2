@@ -3,6 +3,7 @@ package org.ghostp2.app
 import android.content.ComponentName
 import android.os.Looper
 import androidx.activity.ComponentActivity
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -122,7 +123,11 @@ class InMemorySettingsRepository(initial: AppSettings = AppSettings()) : Setting
     /** Hace fallar la lectura del flujo [settings] (como un archivo que no se puede leer). */
     @Volatile var failure: Exception? = null
 
+    /** Si no es nulo, el flujo [settings] no emite nada hasta que se complete (ajustes aún leyéndose). */
+    @Volatile var emitGate: CompletableDeferred<Unit>? = null
+
     override val settings: Flow<AppSettings> = flow {
+        emitGate?.await()
         failure?.let { throw it }
         emitAll(state)
     }

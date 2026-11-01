@@ -8,11 +8,14 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -38,6 +41,7 @@ import kotlinx.coroutines.launch
 import org.ghostp2.app.AppContainer
 import org.ghostp2.app.R
 import org.ghostp2.app.StorageState
+import org.ghostp2.app.lock.LockScreen
 import org.ghostp2.app.ui.chat.ChatScreen
 import org.ghostp2.app.ui.chat.ChatViewModel
 import org.ghostp2.app.ui.chat.PhotoContent
@@ -66,8 +70,9 @@ class ActivityActions(
 
 /**
  * Raíz de la interfaz. Sin comprobar el almacenamiento: lo comprueba y muestra la carga; si falla:
- * [StorageErrorScreen]; con los ajustes aún sin leer: solo la carga; mientras `onboardingDone` sea falso:
- * la bienvenida; después, el `NavHost` (inicio en [Routes.CONTACTS]).
+ * [StorageErrorScreen]; con los ajustes aún sin leer: solo la carga; con la app bloqueada: solo
+ * [LockScreen] (ni la bienvenida ni el `NavHost` llegan a componerse); mientras `onboardingDone` sea
+ * falso: la bienvenida; después, el `NavHost` (inicio en [Routes.CONTACTS]).
  */
 @Composable
 fun GhostRoot(container: AppContainer, actions: ActivityActions) {
@@ -118,6 +123,11 @@ private fun ReadyRoot(container: AppContainer, actions: ActivityActions) {
             }
     }
     val settings by settingsFlow.collectAsStateWithLifecycle(initialValue = null as AppSettings?)
+    val locked by container.lock.locked.collectAsStateWithLifecycle()
+    val missingDeviceLockNotice by container.lock.missingDeviceLockNotice.collectAsStateWithLifecycle()
+    // Fuera del bloqueo: al desbloquear, el NavHost vuelve con la misma pila (y sus ViewModel) en vez de
+    // dejar la anterior huérfana en memoria.
+    val navController = rememberNavController()
     if (exhausted) {
         Box(Modifier.safeDrawingPadding()) {
             StorageErrorScreen(container, StorageState.Failed(exhaustedRounds), onRetry = {
@@ -133,6 +143,30 @@ private fun ReadyRoot(container: AppContainer, actions: ActivityActions) {
     if (current == null) {
         Loading()
         return
+    }
+    if (locked) {
+        if (current.lockEnabled) {
+            LockScreen(
+                onUnlocked = container.lock::unlock,
+                onNoDeviceLock = container::disableLockForMissingDeviceLock,
+                deviceLockAvailable = container.deviceLockAvailable,
+            )
+        } else {
+            // El bloqueo aún no ha leído los ajustes (falla cerrado) y está desactivado: solo la carga.
+            Loading()
+        }
+        return
+    }
+    if (missingDeviceLockNotice) {
+        AlertDialog(
+            onDismissRequest = container.lock::missingDeviceLockNoticeShown,
+            text = { Text(stringResource(R.string.lock_disabled_no_device_lock)) },
+            confirmButton = {
+                TextButton(onClick = container.lock::missingDeviceLockNoticeShown) {
+                    Text(stringResource(R.string.action_ok))
+                }
+            },
+        )
     }
     if (!current.onboardingDone) {
         OnboardingRoute(actions, saveFailed = onboardingSaveFailed, onFinish = {
@@ -151,7 +185,6 @@ private fun ReadyRoot(container: AppContainer, actions: ActivityActions) {
         return
     }
 
-    val navController = rememberNavController()
     NavHost(navController = navController, startDestination = Routes.CONTACTS) {
         composable(Routes.CONTACTS) {
             val vm = ghostViewModel(container) { ContactsViewModel(it) }

@@ -14,14 +14,18 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.retryWhen
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import org.ghostp2.app.lock.AppLock
+import org.ghostp2.app.lock.DeviceLock
 import org.ghostp2.app.photo.PhotoEncoder
 import org.ghostp2.app.photo.PhotoQueue
 import org.ghostp2.data.AppSettings
@@ -191,6 +195,15 @@ class AppContainer internal constructor(
     val settings: SettingsRepository get() = store.settings
 
     /**
+     * Bloqueo de la app (R22), alimentado desde [settings] en [scope]. La actividad le pasa sus
+     * `onStart`/`onStop` y la raíz de la interfaz solo muestra la pantalla de bloqueo mientras dure.
+     */
+    val lock = AppLock()
+
+    /** Si el móvil tiene bloqueo de pantalla ([DeviceLock.available]); las pruebas lo sustituyen. */
+    internal var deviceLockAvailable: (Context) -> Boolean = DeviceLock::available
+
+    /**
      * Cola de fotos salientes: una en vuelo y como mucho 3 en total, contando la que está en vuelo (R25).
      * Solo envía con el motor `Online` (si no, `NOT_ACTIVE`); pasa a la siguiente cuando la anterior deja
      * de estar en `Sending` o sale del historial ([awaitPhotoFinished]). [stop] la vacía.
@@ -231,6 +244,16 @@ class AppContainer internal constructor(
     val lastDiagnostic: StateFlow<Notice?> = mutableLastDiagnostic.asStateFlow()
 
     init {
+        // Si los ajustes no se pueden leer, se reintenta con esperas crecientes; mientras, el bloqueo
+        // sigue sin configurar (cerrado) y la raíz muestra la carga o el error del almacenamiento.
+        scope.launch {
+            settings.settings
+                .retryWhen { _, attempt ->
+                    delay(LOCK_RETRY_MILLIS shl attempt.coerceAtMost(4L).toInt())
+                    true
+                }
+                .collect { lock.configure(it.lockEnabled, it.lockAfterMinutes) }
+        }
         // Suscrito desde ya (UNDISPATCHED): los avisos no se reproducen.
         scope.launch(start = CoroutineStart.UNDISPATCHED) {
             engine.notices.collect { notice ->
@@ -377,6 +400,23 @@ class AppContainer internal constructor(
         if (engine.status.value == EngineStatus.Online) engine.onNetworkChanged()
     }
 
+    /**
+     * El móvil ya no tiene bloqueo de pantalla: desbloquea y avisa ([AppLock.disableForMissingDeviceLock])
+     * y guarda `lockEnabled = false`. Si no se puede guardar, el siguiente arranque lo vuelve a detectar.
+     */
+    fun disableLockForMissingDeviceLock() {
+        lock.disableForMissingDeviceLock()
+        scope.launch {
+            try {
+                settings.update { it.copy(lockEnabled = false) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // El almacenamiento falla: la raíz lo muestra; el bloqueo ya está abierto.
+            }
+        }
+    }
+
     private suspend fun stopEverything() {
         photos.clear()
         // Sin servicio no hay notificación fija "activo"; si no estaba en marcha no hace nada.
@@ -384,3 +424,6 @@ class AppContainer internal constructor(
         stop().join()
     }
 }
+
+/** Primera espera antes de volver a leer los ajustes para el bloqueo (después 2, 4, 8 y 16 s). */
+private const val LOCK_RETRY_MILLIS = 1_000L

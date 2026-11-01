@@ -175,4 +175,9 @@
     <string name="battery_hint_huawei">En Huawei y Honor: Ajustes › Batería › Inicio de aplicaciones › GhostP2: desactiva «Gestionar automáticamente» y permite la ejecución en segundo plano.</string>
     <string name="battery_hint_oppo">En OnePlus, OPPO y realme: Ajustes › Aplicaciones › GhostP2 › Uso de batería: permite la actividad en segundo plano y desactiva la optimización.</string>
     <string name="battery_hint_generic">Si tu móvil tiene su propio ahorro de energía, búscalo en Ajustes › Batería y deja GhostP2 sin restricciones.</string>
+    <!-- Bloqueo de la app (R22) -->
+    <string name="lock_title">GhostP2 está bloqueado</string>
+    <string name="lock_unlock">Desbloquear</string>
+    <string name="lock_prompt_title">Desbloquear GhostP2</string>
+    <string name="lock_disabled_no_device_lock">Tu móvil ya no tiene bloqueo de pantalla; se ha desactivado el bloqueo de GhostP2</string>
 </resources>

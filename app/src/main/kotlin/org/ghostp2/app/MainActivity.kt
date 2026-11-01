@@ -5,15 +5,16 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.view.WindowManager.LayoutParams.FLAG_SECURE
-import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
+import androidx.fragment.app.FragmentActivity
 import org.ghostp2.app.ui.ActivityActions
 import org.ghostp2.app.ui.GhostRoot
 import org.ghostp2.app.ui.theme.GhostTheme
 
-class MainActivity : ComponentActivity() {
+/** Única actividad. Es una [FragmentActivity] porque `BiometricPrompt` (bloqueo de la app, R22) la necesita. */
+class MainActivity : FragmentActivity() {
     /** Al pulsar Activar en API 33+ se pide el permiso; se conceda o no, el servicio arranca. */
     private val notificationPermissionThenStart =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { startGhostService() }
@@ -41,6 +42,18 @@ class MainActivity : ComponentActivity() {
             requestNotifications = ::requestNotifications,
         )
         setContent { GhostTheme { GhostRoot(container, actions) } }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        // Vuelve de segundo plano: bloquea si pasó el tiempo de "Bloquear tras".
+        container.lock.onStart()
+    }
+
+    override fun onStop() {
+        super.onStop()
+        // Girar el móvil recrea la actividad, pero no es salir de la app.
+        container.lock.onStop(isChangingConfigurations)
     }
 
     override fun onResume() {
