@@ -453,8 +453,10 @@ class PeerSessionTest {
     @Test
     fun silentPeerTimesOut(): Unit = runBlocking {
         val p = peers(timingsA = calm.copy(heartbeat = 100.milliseconds, idleTimeout = 500.milliseconds))
-        p.a.start() // B no arranca: no envía latidos
+        // t0 antes de start(): el plazo de inactividad cuenta desde dentro de start(); medirlo
+        // después podía dar algo menos de 500 ms en una máquina lenta (falso fallo en CI).
         val t0 = TimeSource.Monotonic.markNow()
+        p.a.start() // B no arranca: no envía latidos
         assertEquals(SessionEvent.Closed(CloseReason.TIMEOUT), p.logA.await { it is SessionEvent.Closed })
         assertTrue(t0.elapsedNow() >= 500.milliseconds)
         assertFalse(p.a.isOpen.value)
