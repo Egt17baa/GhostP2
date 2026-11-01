@@ -194,9 +194,14 @@ class ContactDetailViewModelTest {
         runBlocking { app.storage.contacts.upsert(contact("c1")) }
         val vm = viewModel("c1")
         eventually(TIMEOUT) { vm.state.value != null }
+        // El borrado no termina hasta salir: si terminase antes, el detalle aún abierto mostraría el
+        // resultado (y lo daría por visto) y la lista ya no tendría nada que enseñar.
+        val gate = CompletableDeferred<Unit>()
+        app.storage.deletionRemoveGate = gate
         vm.delete()
         // Salir enseguida (el ViewModel se destruye): el borrado sigue en el scope del contenedor.
         store.clear()
+        gate.complete(Unit)
         eventually(TIMEOUT) { runBlocking { app.storage.contacts.all() }.isEmpty() }
         // Sin detalle que lo muestre, el resultado queda para la lista.
         assertEquals(
@@ -220,14 +225,20 @@ class ContactDetailViewModelTest {
             val name = stored(id).name
             val vm = viewModel(id)
             eventually(TIMEOUT) { vm.state.value?.presence == Presence.ONLINE }
+            // Como arriba: el resultado no puede llegar con el detalle aún abierto.
+            val gate = CompletableDeferred<Unit>()
+            app.storage.deletionRemoveGate = gate
             vm.delete()
             // Se sale antes de que llegue el resultado: el aviso Unpair llega igualmente al otro lado.
             store.clear()
+            gate.complete(Unit)
             assertEquals(mineInPeer, runBlocking { withTimeout(TIMEOUT) { notice.await() } }.contactId)
             runBlocking { withTimeout(TIMEOUT) { peer.contacts(0).contacts.first { it.isEmpty() } } }
-            assertTrue(runBlocking { app.storage.contacts.all() }.isEmpty())
+            // El borrado local va después de entregar el Unpair (el otro lado puede haberlo procesado
+            // antes): se espera al resultado, que se apunta al terminar el borrado local.
             val outcome = runBlocking { withTimeout(TIMEOUT) { app.container.unseenDeleteOutcomes.first { it.isNotEmpty() } } }
             assertEquals(listOf(DeleteOutcome(id, name, UnpairDelivery.DELIVERED)), outcome)
+            assertTrue(runBlocking { app.storage.contacts.all() }.isEmpty())
         }
     }
 
