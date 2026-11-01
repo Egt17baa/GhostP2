@@ -198,6 +198,24 @@ object Notifications {
             category = NotificationCompat.CATEGORY_STATUS,
         )
 
+    /**
+     * Quita las notificaciones de contactos ya publicadas (mensaje, te ha eliminado, identidad cambiada),
+     * que pueden llevar el nombre: al activar "Ocultar el nombre del contacto". La fija y la de
+     * "se ha detenido" se quedan. Mejor esfuerzo.
+     */
+    fun cancelContactNotifications(context: Context) {
+        try {
+            val manager = context.getSystemService(NotificationManager::class.java) ?: return
+            for (active in manager.activeNotifications) {
+                if (active.id in CONTACT_IDS) manager.cancel(active.tag, active.id)
+            }
+        } catch (_: Exception) {
+            // Sin gestor de notificaciones: nada que quitar.
+        }
+    }
+
+    private val CONTACT_IDS = setOf(MESSAGE_ID, UNPAIRED_ID, IDENTITY_CHANGED_ID)
+
     /** Publica [posted] si el usuario permite notificaciones (en API 33+ hace falta `POST_NOTIFICATIONS`). */
     fun post(context: Context, posted: Posted) {
         notifyIfAllowed(context, posted.tag, posted.id, posted.notification)

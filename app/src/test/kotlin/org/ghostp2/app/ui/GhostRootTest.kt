@@ -16,6 +16,11 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.LifecycleRegistry
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -305,6 +310,35 @@ class GhostRootTest {
         // La pila de navegación se vació: se vuelve a la lista, no a los ajustes.
         waitForText("Aún no tienes contactos")
         compose.onAllNodesWithText("Borrar todo").assertCountEquals(0)
+    }
+
+    @Test
+    fun pausingTheChatClearsTheForegroundChat() {
+        runBlocking { app.storage.contacts.upsert(active("c1", "Ana")) }
+        val owner = object : LifecycleOwner {
+            val registry = LifecycleRegistry(this)
+            override val lifecycle: Lifecycle get() = registry
+        }
+        compose.runOnUiThread { owner.registry.currentState = Lifecycle.State.RESUMED }
+        compose.setContent {
+            CompositionLocalProvider(LocalLifecycleOwner provides owner) { GhostRoot(container, actions) }
+        }
+        waitForText("Ana")
+        assertEquals(null, container.foregroundChatId)
+        compose.onNodeWithText("Ana").performClick()
+        waitForText("Activa GhostP2 para enviar")
+        compose.waitUntil(TIMEOUT) { container.foregroundChatId == "c1" }
+
+        // ON_PAUSE (la actividad pasa a segundo plano o se apaga la pantalla): ya no se ve.
+        compose.runOnUiThread { owner.registry.currentState = Lifecycle.State.STARTED }
+        compose.waitUntil(TIMEOUT) { container.foregroundChatId == null }
+        compose.runOnUiThread { owner.registry.currentState = Lifecycle.State.RESUMED }
+        compose.waitUntil(TIMEOUT) { container.foregroundChatId == "c1" }
+
+        // Salir del chat también lo quita.
+        compose.onNodeWithContentDescription("Volver").performClick()
+        waitForText("Ana")
+        compose.waitUntil(TIMEOUT) { container.foregroundChatId == null }
     }
 
     @Test

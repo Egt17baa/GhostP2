@@ -74,9 +74,23 @@ class TestStorage : AppStorage {
         }
 
         override suspend fun wipe() {
+            identityWipeReached?.complete(Unit)
+            identityWipeGate?.await()
             memoryIdentities.wipe()
         }
     }
+
+    /** Si no es nulo, el borrado de la identidad espera a que se complete (p. ej. a mitad de "Borrar todo"). */
+    @Volatile var identityWipeGate: CompletableDeferred<Unit>? = null
+
+    /** Se completa al empezar el borrado de la identidad. */
+    @Volatile var identityWipeReached: CompletableDeferred<Unit>? = null
+
+    /** Si no es nulo, [probe] espera a que se complete. */
+    @Volatile var probeGate: CompletableDeferred<Unit>? = null
+
+    /** Se completa al empezar cada [probe]. */
+    @Volatile var probeReached: CompletableDeferred<Unit>? = null
 
     @Volatile var contactsFailure: Exception? = null
 
@@ -103,6 +117,8 @@ class TestStorage : AppStorage {
     override val deletions = InMemoryDeletionJournal()
 
     override suspend fun probe() {
+        probeReached?.complete(Unit)
+        probeGate?.await()
         identities.load()
     }
 

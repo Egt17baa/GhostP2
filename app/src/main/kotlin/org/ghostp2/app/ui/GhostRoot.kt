@@ -398,7 +398,13 @@ private fun SettingsRoute(container: AppContainer, actions: ActivityActions, onB
 /** `versionName` del paquete; vacío si no se puede leer. */
 private fun appVersion(context: Context): String =
     try {
-        context.packageManager.getPackageInfo(context.packageName, 0).versionName.orEmpty()
+        val info = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            context.packageManager.getPackageInfo(context.packageName, PackageManager.PackageInfoFlags.of(0))
+        } else {
+            @Suppress("DEPRECATION")
+            context.packageManager.getPackageInfo(context.packageName, 0)
+        }
+        info.versionName.orEmpty()
     } catch (_: PackageManager.NameNotFoundException) {
         ""
     }

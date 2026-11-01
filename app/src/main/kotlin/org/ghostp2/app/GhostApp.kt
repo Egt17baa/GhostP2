@@ -3,6 +3,7 @@ package org.ghostp2.app
 import android.app.Application
 import android.content.Context
 import android.content.Intent
+import androidx.core.app.NotificationManagerCompat
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineExceptionHandler
@@ -30,6 +31,7 @@ import org.ghostp2.app.lock.AppLock
 import org.ghostp2.app.lock.DeviceLock
 import org.ghostp2.app.photo.PhotoEncoder
 import org.ghostp2.app.photo.PhotoQueue
+import org.ghostp2.app.ui.clearOwnClip
 import org.ghostp2.data.AppSettings
 import org.ghostp2.data.SettingsRepository
 import org.ghostp2.data.StoreCorruptedException
@@ -305,6 +307,9 @@ class AppContainer internal constructor(
     private var startRun: StartRun? = null
     private var stopJob: Job? = null
 
+    /** Cambia al empezar y al terminar cada [wipeAll] (con el cerrojo tomado). */
+    private var wipeGeneration = 0L
+
     /** Serializa las comprobaciones y los borrados del almacenamiento. */
     private val storageLock = Mutex()
 
@@ -342,10 +347,12 @@ class AppContainer internal constructor(
         val previousStop = stopJob
         val result = CompletableDeferred<Boolean>()
         mutableStartFailed.value = false
+        val generation = wipeGeneration
         val job = scope.launch {
             previousStop?.join()
             try {
-                if (checkStorage() == StorageState.Ok) {
+                // Pedido durante "Borrar todo" (generación cambiada): no arranca, o crearía una identidad nueva.
+                if (checkStorage() == StorageState.Ok && synchronized(control) { wipeGeneration == generation }) {
                     // Ejecución nueva: el aviso de diagnóstico anterior ya no vale (los de este arranque sí).
                     mutableLastDiagnostic.value = null
                     engine.start()
@@ -423,14 +430,17 @@ class AppContainer internal constructor(
      * cerrojo del almacenamiento tomado: [MessengerEngine.wipeAll] (avisa a los contactos conectados,
      * detiene el motor y borra identidad, contactos, claves, borrados pendientes y el estado de Tor),
      * [SettingsRepository.wipe] (ajustes por defecto: `onboardingDone == false`, la raíz vuelve a la
-     * bienvenida), detiene el servicio y vuelve a comprobar el almacenamiento.
+     * bienvenida), detiene el servicio, quita todas las notificaciones, vacía el portapapeles si tiene
+     * una invitación de GhostP2 y vuelve a comprobar el almacenamiento.
      *
      * El motor se borra antes de detener el servicio: [stop] cerraría las sesiones y los contactos no
      * recibirían el aviso. Detener todo con el cerrojo aún tomado cancela un arranque pedido entretanto
-     * (espera el cerrojo en [checkStorage]), que si no crearía una identidad nueva tras el borrado.
+     * (espera el cerrojo en [checkStorage]); uno pedido después de detener y antes de soltar el cerrojo
+     * lo descarta [wipeGeneration]. Si no, crearía una identidad nueva tras el borrado.
      * Lanza si falla el borrado del almacenamiento; aun así queda todo detenido.
      */
     suspend fun wipeAll() {
+        synchronized(control) { wipeGeneration++ }
         photos.clear()
         storageLock.withLock {
             try {
@@ -439,10 +449,19 @@ class AppContainer internal constructor(
             } finally {
                 withContext(NonCancellable) {
                     stopEverything()
-                    foregroundChatId = null
+                    // También las publicadas durante el aviso a los contactos (nombres de contactos borrados).
+                    try {
+                        NotificationManagerCompat.from(appContext).cancelAll()
+                    } catch (_: Exception) {
+                        // Sin gestor de notificaciones: no queda nada que quitar.
+                    }
+                    clearOwnClip(appContext)
+                    synchronized(control) { foregroundChatId = null }
                     mutableLastDiagnostic.value = null
                     mutableStorage.update { StorageState.Unknown }
                     probeLocked()
+                    // Aún con el cerrojo: un start() pedido durante el borrado ve otra generación y no arranca.
+                    synchronized(control) { wipeGeneration++ }
                 }
             }
         }

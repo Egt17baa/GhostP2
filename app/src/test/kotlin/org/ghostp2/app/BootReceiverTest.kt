@@ -3,6 +3,7 @@ package org.ghostp2.app
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.os.Build
 import kotlinx.coroutines.runBlocking
 import org.ghostp2.data.StoreUnavailableException
 import org.junit.Assert.assertEquals
@@ -80,10 +81,22 @@ class BootReceiverTest {
 
     @Test
     fun receiverIsDeclaredForBootCompleted() {
-        val found = app.packageManager.queryBroadcastReceivers(Intent(Intent.ACTION_BOOT_COMPLETED).setPackage(app.packageName), 0)
+        val boot = Intent(Intent.ACTION_BOOT_COMPLETED).setPackage(app.packageName)
+        val found = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            app.packageManager.queryBroadcastReceivers(boot, PackageManager.ResolveInfoFlags.of(0))
+        } else {
+            @Suppress("DEPRECATION")
+            app.packageManager.queryBroadcastReceivers(boot, 0)
+        }
         assertEquals(listOf(BootReceiver::class.java.name), found.map { it.activityInfo.name })
         assertTrue(found.single().activityInfo.exported)
-        val requested = app.packageManager.getPackageInfo(app.packageName, PackageManager.GET_PERMISSIONS).requestedPermissions
+        val info = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            app.packageManager.getPackageInfo(app.packageName, PackageManager.PackageInfoFlags.of(PackageManager.GET_PERMISSIONS.toLong()))
+        } else {
+            @Suppress("DEPRECATION")
+            app.packageManager.getPackageInfo(app.packageName, PackageManager.GET_PERMISSIONS)
+        }
+        val requested = info.requestedPermissions
         assertTrue(Manifest.permission.RECEIVE_BOOT_COMPLETED in requested.orEmpty())
     }
 }

@@ -425,11 +425,33 @@ class GhostServiceTest {
         startService()
         eventually { engine.status.value == EngineStatus.Online }
 
-        receiveMessage(name = "Ana", openChat = true)
+        receiveMessage(name = "Ana", beforeSend = { app.container.chatShown(it) }) { peer, mineInPeer ->
+            // Un aviso posterior del mismo flujo: cuando se ve su notificación, el del mensaje ya se trató.
+            peer.engine(0).deleteContact(mineInPeer)
+        }
 
-        Thread.sleep(300)
-        shadowOf(Looper.getMainLooper()).idle()
-        assertTrue(messageNotifications().isEmpty())
+        val titles = { notificationManager().allNotifications.map { it.extras.getCharSequence(Notification.EXTRA_TITLE)?.toString() } }
+        eventually { "Ana te ha eliminado de sus contactos" in titles() }
+        // Las dos van al canal de mensajes: se distinguen por el título.
+        assertFalse(titles().toString(), titles().any { it.orEmpty().startsWith("Nuevo mensaje") })
+    }
+
+    @Test
+    fun notificationsResumeAfterTheChatIsHidden() {
+        shadowOf(app).grantPermissions(Manifest.permission.POST_NOTIFICATIONS)
+        startService()
+        eventually { engine.status.value == EngineStatus.Online }
+
+        receiveMessage(name = "Ana", beforeSend = { id ->
+            app.container.chatShown(id)
+            app.container.chatHidden("otro") // ocultar otro chat no cambia el abierto
+            assertEquals(id, app.container.foregroundChatId)
+            app.container.chatHidden(id)
+            assertNull(app.container.foregroundChatId)
+        })
+
+        eventually { messageNotifications().isNotEmpty() }
+        assertEquals("Nuevo mensaje de Ana", messageNotifications().single().extras.getCharSequence(Notification.EXTRA_TITLE).toString())
     }
 
     @Test
@@ -482,14 +504,21 @@ class GhostServiceTest {
         assertTrue(titles.toString(), "GhostP2 se ha detenido" in titles)
     }
 
-    /** Empareja con un contacto llamado [name] y espera a recibir un mensaje suyo (con su chat abierto si [openChat]). */
-    private fun receiveMessage(name: String, openChat: Boolean = false) {
+    /**
+     * Empareja con un contacto llamado [name], llama a [beforeSend] con su id y espera a recibir un mensaje
+     * suyo; después, [afterReceived] con el otro lado aún en marcha.
+     */
+    private fun receiveMessage(
+        name: String,
+        beforeSend: (String) -> Unit = {},
+        afterReceived: suspend (EngineHarness, String) -> Unit = { _, _ -> },
+    ) {
         EngineHarness(1, network = app.network).use { peer ->
             runBlocking {
                 peer.startAll()
                 val (peerInMine, mineInPeer) = pairWithPeer(app, peer, TIMEOUT)
                 engine.renameContact(peerInMine, name)
-                if (openChat) app.container.chatShown(peerInMine)
+                beforeSend(peerInMine)
                 withTimeout(TIMEOUT) {
                     while (engine.conversations.value[peerInMine].isNullOrEmpty()) {
                         if (peer.engine(0).presence.value[mineInPeer] == Presence.ONLINE) {
@@ -498,11 +527,7 @@ class GhostServiceTest {
                         delay(100)
                     }
                 }
-                if (openChat) {
-                    // Cerrado el chat, los mensajes siguientes vuelven a notificarse.
-                    app.container.chatHidden(peerInMine)
-                    assertNull(app.container.foregroundChatId)
-                }
+                afterReceived(peer, mineInPeer)
             }
         }
     }

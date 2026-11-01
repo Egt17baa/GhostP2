@@ -14,6 +14,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.ghostp2.app.AppContainer
+import org.ghostp2.app.Notifications
 import org.ghostp2.data.AppSettings
 
 /**
@@ -66,7 +67,11 @@ class SettingsViewModel(private val container: AppContainer) : ViewModel() {
         if (minutes in AppSettings.LOCK_MINUTES) save { it.copy(lockAfterMinutes = minutes) }
     }
 
-    fun setHideNames(hide: Boolean) = save { it.copy(hideNotificationNames = hide) }
+    /** Al activarlo se quitan también las notificaciones de contactos ya publicadas (con nombre). */
+    fun setHideNames(hide: Boolean) {
+        if (hide) Notifications.cancelContactNotifications(container.appContext)
+        save { it.copy(hideNotificationNames = hide) }
+    }
 
     /** "Tamaño máximo" de las fotos: uno de [AppSettings.PHOTO_SIDES]; otro valor se ignora. */
     fun setMaxPhotoSide(px: Int) {
