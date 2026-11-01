@@ -367,6 +367,15 @@ private fun ReadyRoot(container: AppContainer, actions: ActivityActions, navCont
             SettingsRoute(container, actions, onBack = dropUnlessResumed { navController.popBackStack() })
         }
     }
+    // Tras "Desconectar al salir de la app" (R29), la lista con "Activar", como tras "Desconectar": el
+    // chat o la foto que se veía ya no está en memoria. Tras el NavHost: su pila ya está restaurada.
+    val returnHome by container.autoDisconnect.returnHome.collectAsStateWithLifecycle()
+    if (returnHome) {
+        LaunchedEffect(Unit) {
+            if (navController.currentBackStackEntry != null) navController.popBackStack(Routes.CONTACTS, inclusive = false)
+            container.autoDisconnect.returnedHome()
+        }
+    }
 }
 
 @Composable

@@ -36,7 +36,8 @@ import org.ghostp2.engine.Notice
  *   `engine.onNetworkChanged()`.
  * - Intent `null`: el sistema recrea el servicio tras matar el proceso (`START_STICKY`, regla R19);
  *   se comporta igual que [ACTION_START]. Si entonces falla el almacenamiento, se detiene y deja una
- *   notificación que pide abrir la app.
+ *   notificación que pide abrir la app. Si el plazo de "Desconectar al salir de la app" (R29) guardado
+ *   ya venció, se detiene sin arrancar nada ni notificar; si no, se vuelve a armar por lo que queda.
  * - [ACTION_START] con [EXTRA_FROM_BOOT] (lo envía [BootReceiver] al encender el móvil, R20): como el
  *   reinicio `START_STICKY`, sin nadie mirando la pantalla; si no puede pasar a primer plano o falla el
  *   almacenamiento, se detiene y deja la notificación que pide abrir la app.
@@ -162,10 +163,19 @@ class GhostService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         latestStartId = startId
         when {
-            intent == null -> onStart(restarted = true)
+            // "Desconectar al salir de la app" (R29) venció con el proceso muerto: ni motor ni notificación.
+            intent == null -> if (container.autoDisconnect.resumeAfterRestart()) stopExpired() else onStart(restarted = true)
             // Al encender el móvil nadie mira la pantalla: igual que el reinicio STICKY.
-            intent.action == ACTION_START -> onStart(restarted = intent.getBooleanExtra(EXTRA_FROM_BOOT, false))
-            else -> onStop() // ACTION_STOP (o un intent desconocido): nunca quedarse en marcha sin pedirlo.
+            intent.action == ACTION_START -> {
+                val fromBoot = intent.getBooleanExtra(EXTRA_FROM_BOOT, false)
+                if (fromBoot) container.autoDisconnect.onBootStart()
+                onStart(restarted = fromBoot)
+            }
+            else -> {
+                // ACTION_STOP (o un intent desconocido): nunca quedarse en marcha sin pedirlo.
+                container.autoDisconnect.cancel()
+                onStop()
+            }
         }
         return START_STICKY
     }
@@ -235,6 +245,13 @@ class GhostService : Service() {
         container.stop()
         unregisterNetworkCallback()
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+        stopSelfResult(latestStartId)
+    }
+
+    /** Reinicio STICKY con el plazo de R29 ya vencido: se detiene sin pasar a primer plano ni arrancar. */
+    private fun stopExpired() {
+        generation++
+        container.stop()
         stopSelfResult(latestStartId)
     }
 

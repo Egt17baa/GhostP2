@@ -8,6 +8,8 @@ import android.app.Service
 import android.content.Intent
 import android.net.ConnectivityManager
 import android.os.Looper
+import android.os.SystemClock
+import android.provider.Settings
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -18,6 +20,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import org.ghostp2.app.lock.Armed
+import org.ghostp2.app.lock.ArmedFile
 import org.ghostp2.data.StoreCorruptedException
 import org.ghostp2.data.StoreUnavailableException
 import org.ghostp2.engine.EngineHarness
@@ -40,6 +44,7 @@ import org.robolectric.android.controller.ServiceController
 import org.robolectric.annotation.Config
 import org.robolectric.shadows.ShadowNetwork
 import org.robolectric.shadows.ShadowSystemClock
+import java.io.File
 import java.io.IOException
 import java.time.Duration
 
@@ -541,6 +546,132 @@ class GhostServiceTest {
     }
 
     /**
+     * I1: Android mató el proceso con «Desconectar al salir» (R29) armado y el plazo venció antes del
+     * reinicio `START_STICKY`: el servicio se detiene sin pasar a primer plano, sin motor ni Tor y sin
+     * ninguna notificación.
+     */
+    @Test
+    fun stickyRestartWithExpiredDeadlineStopsWithoutStarting() {
+        shadowOf(app).grantPermissions(Manifest.permission.POST_NOTIFICATIONS)
+        withStoredDeadline()
+        armedFile().save(Armed(BOOT, SystemClock.elapsedRealtime() - 1, 2))
+        val controller = Robolectric.buildService(GhostService::class.java).create()
+        val service = controller.get()
+
+        service.onStartCommand(null, 0, 1)
+
+        assertTrue(shadowOf(service).isStoppedBySelf)
+        assertFalse(service.inForeground)
+        assertNull(shadowOf(service).lastForegroundNotification)
+        assertTrue(networkCallbacks().isEmpty())
+        assertNull(armedFile().load())
+        assertTrue(app.container.autoDisconnect.returnHome.value)
+        controller.destroy()
+        Thread.sleep(300)
+        shadowOf(Looper.getMainLooper()).idle()
+        assertEquals(EngineStatus.Stopped, engine.status.value)
+        assertEquals(TorState.Off, app.tor.state.value)
+        assertTrue(notificationManager().allNotifications.isEmpty())
+    }
+
+    /**
+     * I1: reinicio `START_STICKY` con el plazo aún por vencer: arranca como siempre y el temporizador,
+     * vuelto a armar por lo que queda, corta solo (servicio y motor) sin que nadie abra la app.
+     */
+    @Test
+    fun stickyRestartWithFutureDeadlineRearmsAndCuts() {
+        withStoredDeadline()
+        app.container.autoDisconnect.pollMillis = 20
+        armedFile().save(Armed(BOOT, SystemClock.elapsedRealtime() + 60_000, 2))
+        val controller = Robolectric.buildService(GhostService::class.java).create()
+        val service = controller.get()
+
+        service.onStartCommand(null, 0, 1)
+
+        eventually { engine.status.value == EngineStatus.Online }
+        assertTrue(service.inForeground)
+        Thread.sleep(200)
+        assertNull(shadowOf(app).nextStoppedService)
+        assertNotNull(armedFile().load())
+
+        ShadowSystemClock.advanceBy(Duration.ofMinutes(1))
+        assertEquals(GhostService::class.java.name, nextStoppedService()?.component?.className)
+        controller.destroy()
+        eventually { engine.status.value == EngineStatus.Stopped && app.tor.state.value == TorState.Off }
+        assertNull(armedFile().load())
+    }
+
+    /** Un plazo guardado en otro arranque del móvil (`elapsedRealtime` empezó de cero) no se usa. */
+    @Test
+    fun stickyRestartIgnoresDeadlineFromAnotherBoot() {
+        withStoredDeadline()
+        armedFile().save(Armed(BOOT - 1, SystemClock.elapsedRealtime() - 1, 2))
+        val service = Robolectric.buildService(GhostService::class.java).create().get()
+
+        service.onStartCommand(null, 0, 1)
+
+        eventually { engine.status.value == EngineStatus.Online }
+        assertTrue(service.inForeground)
+        assertFalse(shadowOf(service).isStoppedBySelf)
+        assertNull(shadowOf(app).nextStoppedService)
+        assertNull(armedFile().load())
+    }
+
+    /** El arranque al encender (R20) nunca actúa sobre un plazo guardado: es de antes del reinicio. */
+    @Test
+    fun bootStartIgnoresStoredDeadline() {
+        withStoredDeadline()
+        armedFile().save(Armed(BOOT, SystemClock.elapsedRealtime() - 1, 2))
+        val service = Robolectric.buildService(GhostService::class.java).create().get()
+
+        service.onStartCommand(GhostService.startIntent(app, fromBoot = true), 0, 1)
+
+        eventually { engine.status.value == EngineStatus.Online }
+        assertTrue(service.inForeground)
+        assertFalse(shadowOf(service).isStoppedBySelf)
+        assertNull(armedFile().load())
+        // Tampoco un reinicio STICKY posterior.
+        service.onStartCommand(null, 0, 2)
+        Thread.sleep(200)
+        assertEquals(EngineStatus.Online, engine.status.value)
+        assertTrue(service.inForeground)
+    }
+
+    /** «Desconectar» de la notificación con el plazo armado: ya no queda nada que retomar. */
+    @Test
+    fun notificationDisconnectClearsStoredDeadline() {
+        bootCount(BOOT)
+        runBlocking { app.storage.settings.update { it.copy(disconnectAfterMinutes = 2) } }
+        val auto = app.container.autoDisconnect
+        eventually { auto.minutes == 2 }
+        val controller = startService()
+        eventually { engine.status.value == EngineStatus.Online }
+        auto.onStop(changingConfigurations = false)
+        assertNotNull(armedFile().load())
+
+        controller.get().onStartCommand(GhostService.stopIntent(app), 0, 2)
+
+        assertNull(armedFile().load())
+        assertFalse(auto.resumeAfterRestart())
+    }
+
+    private fun armedFile() = ArmedFile(File(app.noBackupFilesDir, ArmedFile.NAME))
+
+    /**
+     * Como en un móvil con «A los 2 minutos»: el plazo solo se guarda con un valor distinto de «Nunca»
+     * (que lo borraría al leer los ajustes) y con el número de arranque [BOOT].
+     */
+    private fun withStoredDeadline() {
+        runBlocking { app.storage.settings.update { it.copy(disconnectAfterMinutes = 2) } }
+        bootCount(BOOT)
+        eventually { app.container.autoDisconnect.minutes == 2 }
+    }
+
+    private fun bootCount(n: Int) {
+        Settings.Global.putInt(app.contentResolver, Settings.Global.BOOT_COUNT, n)
+    }
+
+    /**
      * Con «A los 2 minutos», motor en línea y una conversación: sale de la app y vuelve cuando ya pasaron
      * 2 minutos (el temporizador no llega a dispararse). Comprueba que se pidió parar el servicio y lo
      * destruye, como haría el sistema.
@@ -558,8 +689,9 @@ class GhostServiceTest {
         ShadowSystemClock.advanceBy(Duration.ofMinutes(2))
         auto.onStart()
 
-        val stopped = shadowOf(app).nextStoppedService
-        assertEquals(GhostService::class.java.name, stopped?.component?.className)
+        // El reloj adelantado también despierta el temporizador, que puede cortar en otro hilo justo
+        // antes de onStart: se espera a la parada venga de donde venga.
+        assertEquals(GhostService::class.java.name, nextStoppedService()?.component?.className)
         controller.destroy()
         eventually { engine.status.value == EngineStatus.Stopped && app.tor.state.value == TorState.Off }
         return controller
@@ -610,6 +742,7 @@ class GhostServiceTest {
 
     private companion object {
         const val TIMEOUT = 20_000L
+        const val BOOT = 5
         const val SECRET = "hola, esto es secreto"
     }
 }

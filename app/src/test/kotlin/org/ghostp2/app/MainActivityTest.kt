@@ -1,6 +1,9 @@
 package org.ghostp2.app
 
 import android.Manifest
+import android.app.Activity
+import android.app.Application
+import android.os.Bundle
 import android.os.Looper
 import android.view.WindowManager.LayoutParams.FLAG_SECURE
 import androidx.appcompat.app.AlertDialog
@@ -13,6 +16,7 @@ import androidx.fragment.app.FragmentActivity
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.ghostp2.engine.EngineStatus
+import org.ghostp2.engine.TorState
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -132,17 +136,39 @@ class MainActivityTest {
         runBlocking { app.storage.settings.update { it.copy(onboardingDone = true, lockEnabled = false, disconnectAfterMinutes = 2) } }
         val controller = Robolectric.buildActivity(MainActivity::class.java).setup()
         eventually { app.container.autoDisconnect.minutes == 2 }
+        assertTrue(runBlocking { app.container.start().await() })
+        assertEquals(EngineStatus.Online, app.container.engine.status.value)
 
-        // Girar el móvil, o salir y volver enseguida, no corta nada.
+        // Girar el móvil no corta nada, aunque entre el onStop de la actividad vieja y el onStart de la
+        // nueva pasara más del plazo: el cambio de configuración no arma el temporizador.
+        val slowRotation = object : Application.ActivityLifecycleCallbacks {
+            override fun onActivityPostStopped(activity: Activity) {
+                if (activity.isChangingConfigurations) ShadowSystemClock.advanceBy(Duration.ofMinutes(3))
+            }
+
+            override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) = Unit
+            override fun onActivityStarted(activity: Activity) = Unit
+            override fun onActivityResumed(activity: Activity) = Unit
+            override fun onActivityPaused(activity: Activity) = Unit
+            override fun onActivityStopped(activity: Activity) = Unit
+            override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
+            override fun onActivityDestroyed(activity: Activity) = Unit
+        }
+        app.registerActivityLifecycleCallbacks(slowRotation)
         controller.recreate()
+        app.unregisterActivityLifecycleCallbacks(slowRotation)
+        // Salir y volver enseguida tampoco.
         controller.pause().stop().restart().resume()
         assertNull(shadowOf(app).nextStoppedService)
+        assertEquals(EngineStatus.Online, app.container.engine.status.value)
 
-        // Fuera más del plazo: al volver se para el servicio antes de nada.
+        // Fuera más del plazo: al volver se paran el servicio y el motor antes de nada.
         controller.pause().stop()
         ShadowSystemClock.advanceBy(Duration.ofMinutes(3))
         controller.restart()
-        assertEquals(GhostService::class.java.name, shadowOf(app).nextStoppedService?.component?.className)
+        assertEquals(GhostService::class.java.name, nextStoppedService()?.component?.className)
+        eventually { app.container.engine.status.value == EngineStatus.Stopped }
+        assertEquals(TorState.Off, app.tor.state.value)
         controller.resume().pause().stop().destroy()
     }
 

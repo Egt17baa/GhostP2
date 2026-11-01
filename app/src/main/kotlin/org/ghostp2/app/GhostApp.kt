@@ -3,6 +3,7 @@ package org.ghostp2.app
 import android.app.Application
 import android.content.Context
 import android.content.Intent
+import android.provider.Settings
 import androidx.core.app.NotificationManagerCompat
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -30,6 +31,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.ghostp2.app.lock.AppLock
+import org.ghostp2.app.lock.ArmedFile
 import org.ghostp2.app.lock.AutoDisconnect
 import org.ghostp2.app.lock.DeviceLock
 import org.ghostp2.app.photo.PhotoEncoder
@@ -52,6 +54,7 @@ import org.ghostp2.engine.Notice
 import org.ghostp2.engine.TorTransport
 import org.ghostp2.engine.UnpairDelivery
 import org.ghostp2.tor.KmpTorTransport
+import java.io.File
 
 /** Aplicación: crea los canales de notificación y es la única dueña del [AppContainer]. */
 open class GhostApp : Application() {
@@ -214,9 +217,15 @@ class AppContainer internal constructor(
      * "Desconectar al salir de la app" (R29), alimentado desde [settings] junto a [lock] y con los mismos
      * `onStart`/`onStop` de la actividad. Desconecta por el mismo camino que "Desconectar": para el
      * servicio (sin él no queda la notificación fija) y el motor ([stop]: cierra Tor y las sesiones,
-     * borra las conversaciones de memoria y vacía la cola de fotos).
+     * borra las conversaciones de memoria y vacía la cola de fotos). El plazo armado se guarda en
+     * `noBackupFilesDir` ([ArmedFile]) con `Settings.Global.BOOT_COUNT`, para retomarlo si Android mata
+     * el proceso y lo recrea con `START_STICKY`.
      */
-    val autoDisconnect = AutoDisconnect(scope) {
+    val autoDisconnect = AutoDisconnect(
+        scope,
+        boot = { bootCount(appContext) },
+        store = ArmedFile(File(appContext.noBackupFilesDir, ArmedFile.NAME)),
+    ) {
         // Si el servicio no está en marcha no hace nada; su onDestroy también detiene el motor.
         appContext.stopService(GhostService.stopIntent(appContext))
         stop()
@@ -587,6 +596,13 @@ class AppContainer internal constructor(
         appContext.stopService(Intent(appContext, GhostService::class.java))
         stop().join()
     }
+}
+
+/** Número de arranque del móvil (`Settings.Global.BOOT_COUNT`), o `null` si no se puede leer. */
+private fun bootCount(context: Context): Int? = try {
+    Settings.Global.getInt(context.contentResolver, Settings.Global.BOOT_COUNT, -1).takeIf { it >= 0 }
+} catch (_: Exception) {
+    null
 }
 
 /** Valor por defecto de [AppContainer.lockRetryMillis]. */

@@ -50,6 +50,8 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
+import org.robolectric.shadows.ShadowSystemClock
+import java.time.Duration
 import java.io.IOException
 import java.util.concurrent.CopyOnWriteArrayList
 
@@ -358,6 +360,41 @@ class GhostRootTest {
             assertEquals(1, nav.distinct().size)
             assertEquals(listOf(Routes.CONTACTS), screens(nav.last()))
         }
+    }
+
+    /**
+     * M1: tras el corte de «Desconectar al salir» (R29) desde un chat, al volver se ve la lista con
+     * «Activar», no el chat vacío.
+     */
+    @Test
+    fun autoDisconnectReturnsToTheListWithActivate() {
+        runBlocking {
+            app.storage.contacts.upsert(active("c1", "Ana"))
+            app.storage.settings.update { it.copy(disconnectAfterMinutes = 2) }
+        }
+        val auto = container.autoDisconnect
+        val nav = mutableListOf<NavHostController>()
+        compose.setContent {
+            val controller = rememberNavController()
+            nav += controller
+            GhostRoot(container, actions, controller)
+        }
+        compose.waitUntil(TIMEOUT) { auto.minutes == 2 }
+        assertTrue(runBlocking { container.start().await() })
+        waitForText("Ana")
+        compose.onNodeWithText("Ana").performClick()
+        waitForText("Tu contacto no está conectado: lo que envíes se descartará")
+
+        // Sale de la app y vuelve pasado el plazo.
+        compose.runOnUiThread { auto.onStop(changingConfigurations = false) }
+        ShadowSystemClock.advanceBy(Duration.ofMinutes(3))
+        compose.runOnUiThread { auto.onStart() }
+
+        waitForText("GhostP2 está desactivado")
+        compose.onNodeWithText("Activar").assertExists()
+        compose.waitUntil(TIMEOUT) { compose.runOnUiThread { screens(nav.last()) } == listOf(Routes.CONTACTS) }
+        compose.waitUntil(TIMEOUT) { !auto.returnHome.value }
+        assertEquals(EngineStatus.Stopped, container.engine.status.value)
     }
 
     @Test

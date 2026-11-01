@@ -669,16 +669,25 @@ contacto ofrece "Borrar contacto" (con confirmación; al terminar dice si el avi
 - **R29**: opción "Desconectar al salir de la app" (Ajustes › Segundo plano): "Nunca" (por
   defecto), "A los 2 minutos", "A los 5 minutos" o "A los 15 minutos"; cualquier otro valor guardado
   se lee como "Nunca". Al pasar la actividad a segundo plano (`onStop` sin cambio de
-  configuración: girar el móvil no cuenta) se arma un temporizador en el scope del proceso; al
-  volver (`onStart`) se cancela. Si vence, o si al volver ya pasó el plazo según `elapsedRealtime`
-  (Android puede retrasar el temporizador con el móvil dormido; entonces se desconecta antes de
-  nada), se hace lo mismo que "Desconectar": se para el servicio (se quita la notificación fija) y
-  el motor (cierra sesiones y Tor, borra las conversaciones de la memoria y vacía la cola de
-  fotos). Como mucho una vez por salida; al volver, la pantalla ofrece "Activar". Solo cuenta si
-  el usuario abrió la app en esta ejecución: tras un arranque al encender (R20) o un reinicio
-  `START_STICKY` sin abrir la app no hay `onStop` y no se arma. Volver antes del plazo (también
-  desde el selector de fotos, el de "Guardar" o los diálogos del sistema) no corta nada. No toca
-  contactos ni identidad.
+  configuración: girar el móvil no cuenta) se arma un temporizador en el scope del proceso, con el
+  plazo elegido en ese momento; al volver (`onStart`) se cancela. El temporizador espera en tramos
+  de 10 s y en cada despertar mira `elapsedRealtime`, que cuenta el tiempo dormido: con el móvil
+  dormido corta en el primer despertar tras el plazo. Si vence, o si al volver ya pasó el plazo
+  (entonces se desconecta antes de nada), se hace lo mismo que "Desconectar": se para el servicio
+  (se quita la notificación fija) y el motor (cierra sesiones y Tor, borra las conversaciones de la
+  memoria y vacía la cola de fotos). Como mucho una vez por salida; al volver, la lista de contactos
+  con "Activar" (aunque se saliera desde un chat o una foto). El plazo armado se guarda (§14.9) con
+  `Settings.Global.BOOT_COUNT`: si Android mata el proceso y lo recrea con `START_STICKY`, el
+  servicio, si el plazo ya venció, se detiene sin arrancar el motor ni dejar notificación y, si no,
+  lo vuelve a armar por lo que queda. Se borra al volver a la app, al cortar, con "Desconectar" y
+  al pasar a "Nunca"; un plazo de otro arranque del móvil no vale, y el arranque al encender (R20)
+  nunca lo usa. Sin `BOOT_COUNT` no se guarda (y un reinicio STICKY no lo retoma). Volver antes del
+  plazo (también desde el selector de fotos, el de "Guardar" o los diálogos del sistema) no corta
+  nada. No toca contactos ni identidad.
+- Aceptado en R29: un selector del sistema (fotos, "Guardar") abierto más que el plazo corta al
+  volver y se pierde lo elegido. Aceptado en R29: si el temporizador vence justo al volver a la app,
+  el corte puede llegar unos milisegundos después de `onStart`. Aceptado en R29: hasta leer los
+  ajustes, o si no se pueden leer, no se arma (falla abierto, al contrario que el bloqueo).
 - Exención de la optimización de batería: la bienvenida la pide ("Quitar el ahorro de batería") y
   Ajustes la muestra con "Permitir en segundo plano" (diálogo del sistema; si el fabricante lo
   quitó, la lista del sistema). Las dos muestran la ruta del ahorro propio del fabricante (Xiaomi,
@@ -719,6 +728,9 @@ contacto ofrece "Borrar contacto" (con confirmación; al terminar dice si el avi
   de R29 (sin ese campo) se lee con "Nunca".
 - Estado de Tor en `noBackupFilesDir/tor` (consenso, guardas, cookie de control); sin claves de
   servicios ni de autorización.
+- **R29**: mientras "Desconectar al salir de la app" está armado, `noBackupFilesDir/auto-disconnect`
+  (20 bytes, sin cifrar: versión, `BOOT_COUNT`, plazo en `elapsedRealtime` y minutos; sin secretos
+  ni contenido). Se borra al volver a la app, al cortar, con "Desconectar" y al pasar a "Nunca".
 - **Tor vuelve a arrancar tras borrar su estado** ("Borrar todo", "Empezar de cero"):
   `KmpTorTransport.wipeState()` detiene Tor, suelta su driver y borra el directorio; el siguiente
   `start()` crea un driver nuevo. kmp-tor 2.6.0 (comprobado en su bytecode) guarda en caché para
@@ -846,8 +858,9 @@ Complementan las del núcleo (§13). GhostP2 no promete más de lo que hay aquí
   cortar la conexión con Tor o no recrear el servicio (R19). Para el ahorro de energía propio de
   cada fabricante solo hay una ayuda con la ruta de sus ajustes (Xiaomi, Samsung, Huawei/Honor,
   OnePlus/OPPO/realme); GhostP2 no puede desactivarlo. "Desconectar al salir de la app" (R29) usa
-  un temporizador del proceso, no una alarma del sistema: con el móvil dormido puede cortar más
-  tarde del plazo, como muy tarde al volver a la app; si Android mata el proceso antes, no queda
-  nada en marcha que cortar.
+  un temporizador del proceso, no una alarma del sistema: con el móvil dormido corta en el primer
+  despertar tras el plazo (como muy tarde al volver a la app). Si Android mata el proceso y lo
+  recrea con `START_STICKY`, el plazo guardado se retoma; si no lo recrea, no queda nada en marcha
+  que cortar.
 - **Reinstalación** (R14): no se avisa; el contacto antiguo queda desconectado y hay que volver a
   emparejar.

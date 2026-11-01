@@ -1,6 +1,7 @@
 package org.ghostp2.app
 
 import android.content.ComponentName
+import android.content.Intent
 import android.os.Looper
 import androidx.activity.ComponentActivity
 import kotlinx.coroutines.CompletableDeferred
@@ -32,6 +33,7 @@ import org.ghostp2.engine.InMemoryDeletionJournal
 import org.ghostp2.engine.InMemoryIdentityRepository
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
+import org.robolectric.RuntimeEnvironment
 import org.robolectric.Shadows.shadowOf
 import java.io.IOException
 import java.util.concurrent.atomic.AtomicInteger
@@ -240,6 +242,17 @@ fun eventually(timeoutMillis: Long = 10_000, condition: () -> Boolean) {
         if (System.currentTimeMillis() > deadline) fail("La condición no se cumplió en $timeoutMillis ms")
         Thread.sleep(20)
     }
+}
+
+/** Espera a que se pida parar un servicio (quizá desde otro hilo) y devuelve ese intent. */
+fun nextStoppedService(timeoutMillis: Long = 10_000): Intent? {
+    val app = RuntimeEnvironment.getApplication()
+    var stopped: Intent? = null
+    eventually(timeoutMillis) {
+        stopped = stopped ?: shadowOf(app).nextStoppedService
+        stopped != null
+    }
+    return stopped
 }
 
 /**

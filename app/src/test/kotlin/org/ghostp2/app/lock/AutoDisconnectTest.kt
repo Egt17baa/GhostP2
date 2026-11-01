@@ -5,6 +5,9 @@ import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -16,8 +19,18 @@ class AutoDisconnectTest {
 
     private var calls = 0
 
-    /** El reloj sigue al planificador de pruebas más el tiempo [asleep]. */
-    private val auto = AutoDisconnect(scope, clock = { 1_000_000L + scope.testScheduler.currentTime + asleep }) { calls++ }
+    /** Reloj `elapsedRealtime`: sigue al planificador de pruebas más el tiempo [asleep]. */
+    private fun now() = 1_000_000L + scope.testScheduler.currentTime + asleep
+
+    /** Plazo armado guardado fuera del proceso (en producción, un archivo en `noBackupFilesDir`). */
+    private val store = MemoryStore()
+
+    /** Número de arranque del móvil (`Settings.Global.BOOT_COUNT`); `null` si no se puede leer. */
+    private var boot: Int? = BOOT
+
+    private fun autoDisconnect() = AutoDisconnect(scope, clock = ::now, boot = { boot }, store = store) { calls++ }
+
+    private val auto = autoDisconnect()
 
     private fun minutes(n: Int) = n * 60_000L
 
@@ -79,7 +92,7 @@ class AutoDisconnectTest {
         auto.onStart()
         assertEquals(0, calls)
         // Sin configurar es «Nunca».
-        val fresh = AutoDisconnect(scope, clock = { scope.testScheduler.currentTime }) { calls++ }
+        val fresh = AutoDisconnect(scope, clock = ::now) { calls++ }
         fresh.onStop(changingConfigurations = false)
         advance(minutes(60))
         fresh.onStart()
@@ -120,5 +133,185 @@ class AutoDisconnectTest {
         asleep += minutes(30)
         auto.onStart()
         assertEquals(0, calls)
+    }
+
+    /** I2: el temporizador cuenta el tiempo dormido; corta en el primer despertar tras el plazo. */
+    @Test
+    fun countsTimeAsleep() {
+        auto.configure(2)
+        auto.onStop(changingConfigurations = false)
+        advance(1)
+        // El móvil duerme 3 minutos: el planificador (tiempo despierto) apenas avanza.
+        asleep += minutes(3)
+        scope.runCurrent()
+        assertEquals(0, calls)
+        // Al siguiente despertar (como mucho 10 s de tiempo despierto) se corta sin volver a la app.
+        advance(10_000)
+        assertEquals(1, calls)
+        assertTrue(auto.returnHome.value)
+        advance(minutes(30))
+        assertEquals(1, calls)
+    }
+
+    /** M5: al volver cuenta el plazo con el que se armó, no el actual. */
+    @Test
+    fun returnUsesTheTimeoutArmedWith() {
+        auto.configure(2)
+        auto.onStop(changingConfigurations = false)
+        auto.configure(15)
+        asleep += minutes(3)
+        auto.onStart()
+        assertEquals(1, calls)
+    }
+
+    @Test
+    fun armingIsStoredAndReturningClearsIt() {
+        auto.configure(2)
+        val at = now()
+        auto.onStop(changingConfigurations = false)
+        assertEquals(Armed(BOOT, at + minutes(2), 2), store.armed)
+        auto.onStart()
+        assertNull(store.armed)
+    }
+
+    @Test
+    fun storedDeadlineIsClearedAfterDisconnectNeverAndCancel() {
+        auto.configure(2)
+        auto.onStop(changingConfigurations = false)
+        advance(minutes(2))
+        assertEquals(1, calls)
+        assertNull(store.armed)
+
+        auto.onStop(changingConfigurations = false)
+        auto.configure(0)
+        assertNull(store.armed)
+
+        auto.configure(2)
+        auto.onStop(changingConfigurations = false)
+        // «Desconectar» (en la app o en la notificación).
+        auto.cancel()
+        assertNull(store.armed)
+        advance(minutes(30))
+        assertEquals(1, calls)
+    }
+
+    @Test
+    fun withoutBootCountNothingIsStored() {
+        boot = null
+        auto.configure(2)
+        auto.onStop(changingConfigurations = false)
+        assertNull(store.armed)
+    }
+
+    /** I1: reinicio STICKY (proceso nuevo) con el plazo ya vencido: hay que desconectar sin arrancar. */
+    @Test
+    fun restartWithExpiredDeadlineDisconnects() {
+        store.armed = Armed(BOOT, now() - 1, 2)
+        val restarted = autoDisconnect()
+        assertTrue(restarted.resumeAfterRestart())
+        assertNull(store.armed)
+        assertTrue(restarted.returnHome.value)
+        // Quien llama para el servicio y el motor; el temporizador no llama además.
+        advance(minutes(30))
+        assertEquals(0, calls)
+    }
+
+    /** I1: reinicio STICKY con el plazo aún por vencer: se vuelve a armar por lo que queda. */
+    @Test
+    fun restartWithFutureDeadlineRearms() {
+        store.armed = Armed(BOOT, now() + minutes(1), 2)
+        val restarted = autoDisconnect()
+        assertFalse(restarted.resumeAfterRestart())
+        advance(minutes(1) - 1)
+        assertEquals(0, calls)
+        advance(1)
+        assertEquals(1, calls)
+        assertNull(store.armed)
+    }
+
+    /** Volver a la app tras un reinicio STICKY con el plazo rearmado: cuenta desde la salida original. */
+    @Test
+    fun returnAfterRearmUsesTheOriginalExit() {
+        store.armed = Armed(BOOT, now() + minutes(1), 2)
+        val restarted = autoDisconnect()
+        assertFalse(restarted.resumeAfterRestart())
+        asleep += minutes(2)
+        restarted.onStart()
+        assertEquals(1, calls)
+        assertNull(store.armed)
+    }
+
+    /** Un plazo de otro arranque del móvil (elapsedRealtime empezó de cero) no vale. */
+    @Test
+    fun deadlineFromAnotherBootIsIgnored() {
+        store.armed = Armed(BOOT - 1, now() - 1, 2)
+        val restarted = autoDisconnect()
+        assertFalse(restarted.resumeAfterRestart())
+        assertNull(store.armed)
+        advance(minutes(30))
+        assertEquals(0, calls)
+        assertFalse(restarted.returnHome.value)
+    }
+
+    @Test
+    fun implausibleStoredDeadlineIsIgnored() {
+        // Armado «en el futuro» (el reloj fue hacia atrás) o sin plazo.
+        listOf(Armed(BOOT, now() + minutes(5), 2), Armed(BOOT, now() - 1, 0)).forEach {
+            store.armed = it
+            assertFalse(autoDisconnect().resumeAfterRestart())
+            assertNull(store.armed)
+        }
+        boot = null
+        store.armed = Armed(BOOT, now() - 1, 2)
+        assertFalse(autoDisconnect().resumeAfterRestart())
+        advance(minutes(30))
+        assertEquals(0, calls)
+    }
+
+    /** Arranque al encender (R20): borra un plazo guardado, sin actuar sobre él. */
+    @Test
+    fun bootStartDropsStoredDeadline() {
+        store.armed = Armed(BOOT, now() - 1, 2)
+        val booted = autoDisconnect()
+        booted.onBootStart()
+        assertNull(store.armed)
+        assertFalse(booted.resumeAfterRestart())
+        advance(minutes(30))
+        assertEquals(0, calls)
+    }
+
+    /** M1: tras un corte, la interfaz vuelve una vez a la lista con «Activar». */
+    @Test
+    fun returnHomeAfterDisconnectUntilShown() {
+        assertFalse(auto.returnHome.value)
+        auto.configure(2)
+        auto.onStop(changingConfigurations = false)
+        asleep += minutes(3)
+        auto.onStart()
+        assertTrue(auto.returnHome.value)
+        auto.returnedHome()
+        assertFalse(auto.returnHome.value)
+        // Volver antes del plazo no cambia nada.
+        auto.onStop(changingConfigurations = false)
+        auto.onStart()
+        assertFalse(auto.returnHome.value)
+    }
+
+    private class MemoryStore : ArmedStore {
+        var armed: Armed? = null
+
+        override fun load(): Armed? = armed
+
+        override fun save(armed: Armed) {
+            this.armed = armed
+        }
+
+        override fun clear() {
+            armed = null
+        }
+    }
+
+    private companion object {
+        const val BOOT = 7
     }
 }

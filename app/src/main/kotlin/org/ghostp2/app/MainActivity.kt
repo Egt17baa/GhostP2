@@ -120,6 +120,7 @@ class MainActivity : FragmentActivity() {
     }
 
     private fun disconnect() {
+        container.autoDisconnect.cancel()
         // Si el servicio no está en marcha no hace nada; su onDestroy detiene el motor.
         stopService(GhostService.stopIntent(this))
         container.stop()
