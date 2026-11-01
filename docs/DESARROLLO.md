@@ -86,5 +86,9 @@ O con `gh`: `base64 -w0 ghostp2-release.jks | gh secret set GHOSTP2_KEYSTORE_BAS
     y crea la Release de GitHub de la etiqueta con los APK y las sumas.
   - Sin él: compila los APK sin firmar y los sube como artefacto `apk-sin-firmar` con su
     `SHA256SUMS.txt`, con un aviso; **no** crea Release.
+  - Endurecido: sus acciones van fijadas por SHA de commit (la etiqueta mayor en un comentario; para
+    actualizarlas, `git ls-remote https://github.com/<dueño>/<acción> refs/tags/<etiqueta>`, y en una
+    etiqueta anotada el SHA de la línea `^{}`), `persist-credentials: false` en el checkout (también en
+    `test`) y la caché de Gradle solo de lectura (`cache-read-only: true`).
 
 Publicar una versión: `git tag v0.1.0 && git push origin v0.1.0`.
