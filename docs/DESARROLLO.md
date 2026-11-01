@@ -71,6 +71,11 @@ En *Settings → Secrets and variables → Actions → New repository secret*:
 O con `gh`: `base64 -w0 ghostp2-release.jks | gh secret set GHOSTP2_KEYSTORE_BASE64` y
 `gh secret set GHOSTP2_KEYSTORE_PASSWORD` (pide el valor), igual para los otros dos.
 
+Opcional, como **variable** (no secreto) en *Settings → Secrets and variables → Actions → Variables*:
+`GHOSTP2_CERT_SHA256`, el SHA-256 del certificado de firma (`keytool -list -v -keystore
+ghostp2-release.jks`, con o sin dos puntos). Si existe, el job `release` falla cuando algún APK firmado
+no lleva ese certificado; si no, solo deja un aviso. O con `gh variable set GHOSTP2_CERT_SHA256`.
+
 ## CI
 
 `.github/workflows/ci.yml`:
@@ -78,17 +83,22 @@ O con `gh`: `base64 -w0 ghostp2-release.jks | gh secret set GHOSTP2_KEYSTORE_BAS
 - **Job `test`** (cada push y pull request): `./gradlew test lintDebug lintRelease :app:assembleDebug
   :app:assembleRelease` (lint falla con cualquier error; `checkReleaseBuilds` en `:app`, `:core:data` y
   `:core:tor`). Después comprueba que en `releaseRuntimeClasspath` de `:app` no hay Google Play Services,
-  Firebase, ML Kit ni Play Core, y que el manifiesto de cada APK de versión no declara el inicializador
-  de emoji2 (buscaría fuentes en Google Play Services) ni es depurable.
+  Firebase, ML Kit, Play Core, `datatransport`, UMP, `com.google.android.libraries`, Install Referrer
+  ni Play Billing; que el manifiesto de cada APK de versión no declara el inicializador de emoji2
+  (buscaría fuentes en Google Play Services) ni es depurable, y que su dex no contiene clases
+  `Lcom/google/android/gms/` ni `Lcom/google/firebase/`.
 - **Job `release`** (solo etiquetas `v*`, después de `test`):
   - Con el secreto `GHOSTP2_KEYSTORE_BASE64`: lo decodifica en un archivo temporal del runner (se borra
     al acabar el paso), compila y firma los APK, los verifica con `apksigner`, calcula `SHA256SUMS.txt`
     y crea la Release de GitHub de la etiqueta con los APK y las sumas.
   - Sin él: compila los APK sin firmar y los sube como artefacto `apk-sin-firmar` con su
     `SHA256SUMS.txt`, con un aviso; **no** crea Release.
-  - Endurecido: sus acciones van fijadas por SHA de commit (la etiqueta mayor en un comentario; para
+  - Endurecido: sus acciones van fijadas por SHA de commit (la etiqueta exacta en un comentario; para
     actualizarlas, `git ls-remote https://github.com/<dueño>/<acción> refs/tags/<etiqueta>`, y en una
     etiqueta anotada el SHA de la línea `^{}`), `persist-credentials: false` en el checkout (también en
-    `test`) y la caché de Gradle solo de lectura (`cache-read-only: true`).
+    `test`) y la caché de Gradle solo de lectura (`cache-read-only: true`). Las acciones de `test` van
+    fijadas a los mismos commits.
+  - Con la variable `GHOSTP2_CERT_SHA256`, compara el certificado de cada APK firmado (`apksigner
+    verify --print-certs`) y falla si no coincide.
 
 Publicar una versión: `git tag v0.1.0 && git push origin v0.1.0`.
