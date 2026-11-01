@@ -34,12 +34,13 @@ data class ContactRow(
 )
 
 /**
- * Filas de [contacts], ordenadas por nombre sin distinguir mayúsculas (ni acentos al comparar primero;
- * a igualdad, por id). `identityChanged` si el contacto guardado es `IDENTITY_CHANGED` o su presencia lo es.
+ * Filas de [contacts], ordenadas por nombre en español (la ñ tras la n), sin distinguir mayúsculas
+ * (ni acentos al comparar primero; a igualdad, por id). `identityChanged` si el contacto guardado es `IDENTITY_CHANGED` o su presencia lo es.
  */
 fun contactRows(contacts: List<Contact>, presence: Map<String, Presence>, deleting: Set<String>): List<ContactRow> {
-    // Collator no es seguro entre hilos: uno por llamada. SECONDARY: "ana" = "Ana", "Álvaro" junto a "Alberto".
-    val collator = Collator.getInstance(Locale.ROOT).apply { strength = Collator.SECONDARY }
+    // Collator no es seguro entre hilos: uno por llamada. Español: la ñ va entre la n y la o.
+    // SECONDARY: "ana" = "Ana", "Álvaro" junto a "Alberto".
+    val collator = Collator.getInstance(SPANISH).apply { strength = Collator.SECONDARY }
     return contacts
         .map { c ->
             val p = presence[c.id]
@@ -54,6 +55,9 @@ fun contactRows(contacts: List<Contact>, presence: Map<String, Presence>, deleti
         }
         .sortedWith(compareBy<ContactRow, String>(collator) { it.name }.thenBy { it.id })
 }
+
+/** Orden de la lista: la interfaz está en español. */
+private val SPANISH: Locale = Locale.forLanguageTag("es")
 
 sealed interface ContactsUiState {
     data object Loading : ContactsUiState

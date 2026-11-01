@@ -85,6 +85,17 @@ class ContactsViewModelTest {
     }
 
     @Test
+    fun rowsAreSortedInSpanishWithEnyeAfterN() {
+        val rows = contactRows(
+            listOf(contact("1", "Óscar"), contact("2", "ñandú"), contact("3", "Nuria"), contact("4", "Noa")),
+            emptyMap(),
+            emptySet(),
+        )
+        // En español la ñ es una letra propia, entre la n y la o.
+        assertEquals(listOf("Noa", "Nuria", "ñandú", "Óscar"), rows.map { it.name })
+    }
+
+    @Test
     fun pairedPeerShowsOnline() {
         assertTrue(runBlocking { app.container.start().await() })
         EngineHarness(1, network = app.network).use { peer ->
