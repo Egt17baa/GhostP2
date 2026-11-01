@@ -33,9 +33,14 @@ import org.ghostp2.app.StorageState
  * Almacenamiento cifrado ilegible ([StorageState.Corrupted]) o que falla ([StorageState.Unavailable],
  * [StorageState.Failed]). "Reintentar" solo vuelve a leer; "Empezar de cero" borra todo: con datos
  * ilegibles, tras una confirmación; tras [StorageState.FAILURES_BEFORE_RESET] fallos seguidos, tras dos.
+ * [onRetry] es lo que hace "Reintentar" (por defecto, volver a comprobar el almacenamiento).
  */
 @Composable
-fun StorageErrorScreen(container: AppContainer, state: StorageState) {
+fun StorageErrorScreen(
+    container: AppContainer,
+    state: StorageState,
+    onRetry: suspend () -> Unit = { container.checkStorage() },
+) {
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -44,18 +49,18 @@ fun StorageErrorScreen(container: AppContainer, state: StorageState) {
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         when (state) {
-            StorageState.Corrupted -> CorruptedPanel(container)
+            StorageState.Corrupted -> CorruptedPanel(container, onRetry)
             is StorageState.Unavailable -> RetryPanel(
-                container, state, stringResource(R.string.store_unavailable), stringResource(R.string.store_unavailable_detail),
+                container, state, stringResource(R.string.store_unavailable), stringResource(R.string.store_unavailable_detail), onRetry,
             )
-            is StorageState.Failed -> RetryPanel(container, state, stringResource(R.string.store_failed), null)
+            is StorageState.Failed -> RetryPanel(container, state, stringResource(R.string.store_failed), null, onRetry)
             StorageState.Unknown, StorageState.Ok -> Unit
         }
     }
 }
 
 @Composable
-private fun CorruptedPanel(container: AppContainer) {
+private fun CorruptedPanel(container: AppContainer, onRetry: suspend () -> Unit) {
     val ui = rememberCoroutineScope()
     var failed by remember { mutableStateOf(false) }
     var confirming by remember { mutableStateOf(false) }
@@ -64,7 +69,7 @@ private fun CorruptedPanel(container: AppContainer) {
     if (failed) Text(stringResource(R.string.store_reset_failed))
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         // Solo lectura: vuelve a comprobar (p. ej. Keystore tardó en responder) sin borrar nada.
-        OutlinedButton(onClick = { ui.launch { container.checkStorage() } }) { Text(stringResource(R.string.action_retry)) }
+        OutlinedButton(onClick = { ui.launch { onRetry() } }) { Text(stringResource(R.string.action_retry)) }
         Button(onClick = { confirming = true }) { Text(stringResource(R.string.store_reset)) }
     }
     if (confirming) {
@@ -82,13 +87,19 @@ private fun CorruptedPanel(container: AppContainer) {
 }
 
 @Composable
-private fun RetryPanel(container: AppContainer, state: StorageState.FailureStreak, title: String, detail: String?) {
+private fun RetryPanel(
+    container: AppContainer,
+    state: StorageState.FailureStreak,
+    title: String,
+    detail: String?,
+    onRetry: suspend () -> Unit,
+) {
     val ui = rememberCoroutineScope()
     var failed by remember { mutableStateOf(false) }
     var step by remember { mutableIntStateOf(0) } // 0: nada, 1: primera confirmación, 2: segunda
     Text(title, style = MaterialTheme.typography.titleMedium)
     detail?.let { Text(it) }
-    Button(onClick = { ui.launch { container.checkStorage() } }) { Text(stringResource(R.string.action_retry)) }
+    Button(onClick = { ui.launch { onRetry() } }) { Text(stringResource(R.string.action_retry)) }
     if (state.canForceReset) {
         Text(stringResource(R.string.store_unavailable_persistent))
         if (failed) Text(stringResource(R.string.store_reset_failed))

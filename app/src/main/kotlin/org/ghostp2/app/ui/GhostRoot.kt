@@ -9,12 +9,15 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
@@ -41,7 +44,7 @@ class ActivityActions(
  */
 @Composable
 fun GhostRoot(container: AppContainer, actions: ActivityActions) {
-    val storage by container.storage.collectAsState()
+    val storage by container.storage.collectAsStateWithLifecycle()
     LaunchedEffect(Unit) { if (container.storage.value == StorageState.Unknown) container.checkStorage() }
 
     Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
@@ -54,19 +57,48 @@ fun GhostRoot(container: AppContainer, actions: ActivityActions) {
     }
 }
 
-/** Almacenamiento comprobado: espera a los ajustes y después navega. */
+/**
+ * Almacenamiento comprobado: espera a los ajustes y después navega. Si el flujo de ajustes falla, se
+ * vuelve a comprobar el almacenamiento: si sigue mal, la raíz pasa a [StorageErrorScreen] (y este flujo
+ * deja de recogerse); si no, se reintenta, hasta [SETTINGS_ATTEMPTS] lecturas. Agotadas, se muestra
+ * [StorageErrorScreen] con [StorageState.Failed] (nunca una carga sin fin) y "Reintentar" vuelve a
+ * empezar; cada tanda agotada cuenta como un fallo de la racha (a la tercera se ofrece empezar de cero).
+ */
 @Composable
 private fun ReadyRoot(container: AppContainer, actions: ActivityActions) {
-    val settingsFlow = remember(container) {
+    var round by remember { mutableIntStateOf(0) }
+    var exhaustedRounds by remember { mutableIntStateOf(0) }
+    var exhausted by remember { mutableStateOf(false) }
+    val settingsFlow = remember(container, round) {
         container.settings.settings
-            // Un fallo al leer vuelve a comprobar el almacenamiento: si sigue mal, la raíz pasa a
-            // StorageErrorScreen (y este flujo deja de recogerse); si no, se reintenta en un momento.
-            .retryWhen { _, _ ->
-                (container.checkStorage() == StorageState.Ok).also { retry -> if (retry) delay(SETTINGS_RETRY_MILLIS) }
+            .retryWhen { _, attempt ->
+                attempt + 1 < SETTINGS_ATTEMPTS &&
+                    container.checkStorage() == StorageState.Ok &&
+                    run {
+                        delay(SETTINGS_RETRY_MILLIS)
+                        true
+                    }
             }
-            .catch { /* Se muestra StorageErrorScreen; nunca se cierra la app. */ }
+            .catch {
+                // Nunca se cierra la app; si el almacenamiento falla, ya lo muestra la raíz.
+                if (container.storage.value == StorageState.Ok) {
+                    exhaustedRounds++
+                    exhausted = true
+                }
+            }
     }
-    val settings by settingsFlow.collectAsState(initial = null as AppSettings?)
+    val settings by settingsFlow.collectAsStateWithLifecycle(initialValue = null as AppSettings?)
+    if (exhausted) {
+        Box(Modifier.safeDrawingPadding()) {
+            StorageErrorScreen(container, StorageState.Failed(exhaustedRounds), onRetry = {
+                if (container.checkStorage() == StorageState.Ok) {
+                    exhausted = false
+                    round++
+                }
+            })
+        }
+        return
+    }
     if (settings == null) {
         Loading()
         return
@@ -87,8 +119,8 @@ private fun ReadyRoot(container: AppContainer, actions: ActivityActions) {
  */
 @Composable
 private fun RootBanner(container: AppContainer, actions: ActivityActions) {
-    val status by container.engine.status.collectAsState()
-    val startFailed by container.startFailed.collectAsState()
+    val status by container.engine.status.collectAsStateWithLifecycle()
+    val startFailed by container.startFailed.collectAsStateWithLifecycle()
     val ui = rememberCoroutineScope()
     EngineBanner(
         status = status,
@@ -103,4 +135,5 @@ private fun Loading() {
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
 }
 
+private const val SETTINGS_ATTEMPTS = 3
 private const val SETTINGS_RETRY_MILLIS = 1_000L

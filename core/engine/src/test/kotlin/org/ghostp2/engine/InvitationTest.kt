@@ -148,8 +148,8 @@ class InvitationTest {
             Primitives.x25519PublicFromPrivate(aContact.clientAuthPrivateForPeerOnion).publicKey.hex(),
         )
         // addClientAuth registrado: FakeTor solo deja conectar con la autorización correcta.
-        h.tor(1).connect(aId.onion!!, 7420, 5_000).close()
-        h.tor(0).connect(bId.onion!!, 7420, 5_000).close()
+        h.tor(1).connect(aId.onion, 7420, 5_000).close()
+        h.tor(0).connect(bId.onion, 7420, 5_000).close()
     }
 
     @Test

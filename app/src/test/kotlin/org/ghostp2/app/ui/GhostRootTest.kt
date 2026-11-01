@@ -34,9 +34,14 @@ class GhostRootTest {
     private val app = RuntimeEnvironment.getApplication() as TestGhostApp
     private val container get() = app.container
 
+    private var activations = 0
+
     /** Como la actividad, pero sin servicio: "Activar" arranca el motor del contenedor directamente. */
     private val actions = ActivityActions(
-        activate = { container.start() },
+        activate = {
+            activations++
+            container.start()
+        },
         disconnect = { container.stop() },
         requestBatteryExemption = {},
         requestNotifications = {},
@@ -100,6 +105,58 @@ class GhostRootTest {
         // La comprobación (solo lectura) pasa: no es la pantalla de error del almacenamiento.
         assertEquals(StorageState.Ok, container.storage.value)
         assertEquals(EngineErrorKind.STORAGE, (container.engine.status.value as EngineStatus.Error).kind)
+    }
+
+    @Test
+    fun storageBannerRetryWithFailingStorageShowsStorageError() {
+        app.storage.saveFailure = StoreUnavailableException(IOException("x"))
+        show()
+        waitForText("GhostP2 está desactivado")
+        compose.onNodeWithText("Activar").performClick()
+        waitForText("No se pudieron leer o guardar tus datos cifrados")
+        assertEquals(1, activations)
+
+        // Ahora tampoco se puede leer: "Reintentar" comprueba antes y no vuelve a arrancar.
+        app.storage.failure = StoreUnavailableException(IOException("x"))
+        compose.onNodeWithText("Reintentar").performClick()
+
+        waitForText("No se pudo acceder a tus datos cifrados")
+        assertEquals(StorageState.Unavailable(1), container.storage.value)
+        assertEquals(1, activations)
+    }
+
+    @Test
+    fun corruptedResetNeedsOneConfirmationAndWipes() {
+        app.storage.failure = StoreCorruptedException(IOException("x"))
+        show()
+        waitForText("No se pudieron leer tus datos cifrados")
+
+        compose.onNodeWithText("Empezar de cero").performClick()
+        compose.onNodeWithText("¿Empezar de cero?").assertExists()
+        assertEquals(0, app.tor.wipeStateCalls.get())
+        app.storage.failure = null // tras borrar, el almacenamiento nuevo se lee bien
+        compose.onNodeWithText("Borrar todo").performClick()
+
+        // Una sola confirmación: wipeCorrupted (wipeAll del motor, con el estado de Tor), no forceReset.
+        compose.onAllNodesWithText("¿Seguro? Última confirmación").assertCountEquals(0)
+        compose.waitUntil(TIMEOUT) { container.storage.value == StorageState.Ok }
+        assertEquals(1, app.tor.wipeStateCalls.get())
+        assertEquals(0, app.storage.forceResets)
+        waitForText("GhostP2 está desactivado")
+    }
+
+    @Test
+    fun unreadableSettingsStopRetryingAndShowStorageError() {
+        app.storage.settings.failure = IllegalStateException("x")
+        show()
+
+        // Tras unas pocas lecturas fallidas: error con "Reintentar", no una carga sin fin.
+        waitForText("Ha ocurrido un error inesperado. Tus datos no se han tocado.")
+        assertEquals(StorageState.Ok, container.storage.value)
+
+        app.storage.settings.failure = null
+        compose.onNodeWithText("Reintentar").performClick()
+        waitForText("GhostP2 está desactivado")
     }
 
     private companion object {

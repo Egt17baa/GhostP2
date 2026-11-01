@@ -15,12 +15,29 @@ class SourceRulesTest {
 
     @Test
     fun allTextFieldsAreGhostTextField() {
-        val pattern = Regex("""\b(Outlined)?TextField\(|BasicTextField\(""")
+        // Cualquier `…TextField(` (TextField, OutlinedTextField, BasicTextField, SecureTextField,
+        // OutlinedSecureTextField, BasicSecureTextField…) salvo GhostTextField.
+        val pattern = Regex("""\b(?!GhostTextField\()\w*TextField\(""")
         val offenders = sources()
             .filter { it.name != "GhostTextField.kt" }
             .filter { pattern.containsMatchIn(it.readText()) }
             .map { it.path }
         assertTrue("Campos de texto que no son GhostTextField: $offenders", offenders.isEmpty())
+    }
+
+    @Test
+    fun textFieldPatternCatchesEveryVariant() {
+        val pattern = Regex("""\b(?!GhostTextField\()\w*TextField\(""")
+        listOf("TextField(", "OutlinedTextField(", "BasicTextField(", "SecureTextField(", "OutlinedSecureTextField(")
+            .forEach { assertTrue(it, pattern.containsMatchIn(" $it")) }
+        assertTrue(!pattern.containsMatchIn(" GhostTextField(value"))
+    }
+
+    @Test
+    fun noTextFieldStateInSources() {
+        // El estado de texto de Compose se puede guardar en el Bundle: los campos usan un String en memoria.
+        val offenders = sources().filter { Regex("""TextFieldState\(""").containsMatchIn(it.readText()) }.map { it.path }
+        assertTrue("TextFieldState en las fuentes: $offenders", offenders.isEmpty())
     }
 
     @Test

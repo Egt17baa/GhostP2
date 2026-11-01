@@ -41,7 +41,11 @@ fun GhostTextField(
             label = label?.let { { Text(it) } },
             singleLine = singleLine,
             keyboardOptions = KeyboardOptions(autoCorrectEnabled = false, imeAction = imeAction),
-            keyboardActions = KeyboardActions(onAny = { onImeAction() }),
+            // Primero lo de quien llama y después lo normal de la acción (pasar al siguiente campo, cerrar el teclado…).
+            keyboardActions = KeyboardActions(onAny = {
+                onImeAction()
+                defaultKeyboardAction(imeAction)
+            }),
         )
     }
 }

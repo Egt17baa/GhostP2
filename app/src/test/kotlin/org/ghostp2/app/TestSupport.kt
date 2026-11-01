@@ -1,9 +1,13 @@
 package org.ghostp2.app
 
+import android.content.ComponentName
 import android.os.Looper
+import androidx.activity.ComponentActivity
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.withTimeout
 import org.ghostp2.data.AppSettings
@@ -30,6 +34,13 @@ class TestGhostApp : GhostApp() {
     val storage = TestStorage()
 
     override fun createContainer(): AppContainer = AppContainer(this, tor, storage)
+
+    override fun onCreate() {
+        super.onCreate()
+        // Actividad vacía de createComposeRule(), registrada solo en las pruebas (sin ui-test-manifest,
+        // que la metería exportada y sin FLAG_SECURE en el APK de debug).
+        shadowOf(packageManager).addActivityIfNotPresent(ComponentName(this, ComponentActivity::class.java))
+    }
 }
 
 /**
@@ -84,7 +95,13 @@ class TestStorage : AppStorage {
 class InMemorySettingsRepository(initial: AppSettings = AppSettings()) : SettingsRepository {
     private val state = MutableStateFlow(initial.sanitized())
 
-    override val settings: Flow<AppSettings> = state
+    /** Hace fallar la lectura del flujo [settings] (como un archivo que no se puede leer). */
+    @Volatile var failure: Exception? = null
+
+    override val settings: Flow<AppSettings> = flow {
+        failure?.let { throw it }
+        emitAll(state)
+    }
 
     override suspend fun get(): AppSettings = state.value
 
