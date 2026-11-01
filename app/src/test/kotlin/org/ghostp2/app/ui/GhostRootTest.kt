@@ -1,10 +1,11 @@
 package org.ghostp2.app.ui
 
-import androidx.compose.material3.Text
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.SemanticsMatcher
+import androidx.compose.ui.test.SemanticsNodeInteraction
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasText
@@ -23,8 +24,6 @@ import androidx.lifecycle.LifecycleRegistry
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.navigation.NavGraph
 import androidx.navigation.NavHostController
-import androidx.navigation.compose.NavHost
-import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
@@ -390,21 +389,49 @@ class GhostRootTest {
         compose.waitUntil(TIMEOUT) { container.foregroundChatId == null }
     }
 
+    /** Dos toques seguidos (en el mismo fotograma) en un botón de navegación abren una sola pantalla. */
     @Test
-    fun openIfRegisteredOnlyNavigatesToKnownDestinations() {
-        var nav: NavHostController? = null
+    fun doubleTapOnAddOpensOneScreenAndOneInvitation() {
+        val nav = mutableListOf<NavHostController>()
         compose.setContent {
-            val controller = rememberNavController().also { nav = it }
-            NavHost(controller, startDestination = Routes.CONTACTS) {
-                composable(Routes.CONTACTS) { Text("lista") }
-                composable(Routes.CHAT) { entry -> Text("chat ${entry.idArg()}") }
-            }
+            val controller = rememberNavController()
+            nav += controller
+            GhostRoot(container, actions, controller)
         }
-        compose.waitUntil(TIMEOUT) { nav != null }
-        compose.runOnUiThread { nav!!.openIfRegistered(Routes.contact("a/b")) }
-        compose.onNodeWithText("lista").assertExists()
-        compose.runOnUiThread { nav!!.openIfRegistered(Routes.chat("a/b")) }
-        waitForText("chat a/b")
+        waitForText("Aún no tienes contactos")
+        compose.onNodeWithText("Activar").performClick()
+        compose.waitUntil(TIMEOUT) { container.engine.status.value == EngineStatus.Online }
+        doubleTap(compose.onNodeWithContentDescription("Añadir contacto"))
+
+        compose.waitUntilAtLeastOneExists(hasText("ghostp2:", substring = true), PAIR_TIMEOUT)
+        compose.waitForIdle()
+        compose.runOnUiThread { assertEquals(listOf(Routes.CONTACTS, Routes.ADD), screens(nav.last())) }
+        assertEquals(1, app.network.published.value.values.count { !it.requiresClientAuth })
+        // Un solo "Volver" lleva a la lista.
+        compose.onNodeWithContentDescription("Volver").performClick()
+        waitForText("Aún no tienes contactos")
+        compose.waitUntil(TIMEOUT) { app.network.published.value.values.none { !it.requiresClientAuth } }
+    }
+
+    @Test
+    fun doubleTapOnSettingsAndOnARowOpensOneScreen() {
+        runBlocking { app.storage.contacts.upsert(active("c1", "Ana")) }
+        val nav = mutableListOf<NavHostController>()
+        compose.setContent {
+            val controller = rememberNavController()
+            nav += controller
+            GhostRoot(container, actions, controller)
+        }
+        waitForText("Ana")
+        doubleTap(compose.onNodeWithContentDescription("Ajustes"))
+        waitForText("Borrar todo")
+        compose.runOnUiThread { assertEquals(listOf(Routes.CONTACTS, Routes.SETTINGS), screens(nav.last())) }
+        compose.onNodeWithContentDescription("Volver").performClick()
+        waitForText("Ana")
+
+        doubleTap(compose.onNodeWithText("Ana"))
+        waitForText("Activa GhostP2 para enviar")
+        compose.runOnUiThread { assertEquals(listOf(Routes.CONTACTS, Routes.CHAT), screens(nav.last())) }
     }
 
     @Test
@@ -597,6 +624,15 @@ class GhostRootTest {
 
     private fun changed(id: String, name: String) =
         Contact(id, name, ByteArray(32), "x".repeat(56), ByteArray(32), ByteArray(32), ByteArray(32), false, ContactStatus.IDENTITY_CHANGED)
+
+    /** Dos clics seguidos sin dejar que la interfaz se actualice entre ellos (un doble toque rápido). */
+    private fun doubleTap(node: SemanticsNodeInteraction) {
+        val click = node.fetchSemanticsNode().config[SemanticsActions.OnClick].action!!
+        compose.runOnUiThread {
+            click()
+            click()
+        }
+    }
 
     /** Rutas de las pantallas de la pila, sin el grafo. */
     private fun screens(nav: NavHostController) =

@@ -31,8 +31,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleResumeEffect
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.compose.dropUnlessResumed
 import androidx.navigation.NavController
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
@@ -55,6 +58,7 @@ import org.ghostp2.app.ui.chat.PhotoViewerScreen
 import org.ghostp2.app.ui.chat.PhotoViewerViewModel
 import org.ghostp2.app.ui.contact.ContactDetailScreen
 import org.ghostp2.app.ui.contact.ContactDetailViewModel
+import org.ghostp2.app.ui.contacts.ContactRow
 import org.ghostp2.app.ui.contacts.ContactsScreen
 import org.ghostp2.app.ui.contacts.ContactsViewModel
 import org.ghostp2.app.ui.contacts.openRoute
@@ -212,9 +216,9 @@ private fun ReadyRoot(container: AppContainer, actions: ActivityActions, navCont
             ContactsScreen(
                 state = state,
                 banner = { RootBanner(container, actions) },
-                onOpen = { row -> navController.openIfRegistered(openRoute(row)) },
-                onAdd = { navController.openIfRegistered(Routes.ADD) },
-                onSettings = { navController.openIfRegistered(Routes.SETTINGS) },
+                onOpen = dropUnlessResumedWith { row: ContactRow -> navController.open(openRoute(row)) },
+                onAdd = dropUnlessResumed { navController.open(Routes.ADD) },
+                onSettings = dropUnlessResumed { navController.open(Routes.SETTINGS) },
                 onRetry = vm::retry,
                 onDisconnect = actions.disconnect.takeIf { status == EngineStatus.Online },
             )
@@ -244,7 +248,7 @@ private fun ReadyRoot(container: AppContainer, actions: ActivityActions, navCont
                 onAccept = vm::accept,
                 // Si el almacenamiento falla, la raíz pasa a StorageErrorScreen (el aviso visible).
                 onActivate = { ui.launch { if (container.checkStorage() == StorageState.Ok) actions.activate() } },
-                onBack = { navController.popBackStack() },
+                onBack = dropUnlessResumed { navController.popBackStack() },
                 startFailed = startFailed,
             )
         }
@@ -267,7 +271,7 @@ private fun ReadyRoot(container: AppContainer, actions: ActivityActions, navCont
                 onVerifiedChange = vm::setVerified,
                 saving = saving,
                 onSave = { vm.save(name, verified) },
-                onLater = { navController.leaveNaming(id) },
+                onLater = dropUnlessResumed { navController.leaveNaming(id) },
             )
         }
         composable(Routes.CONTACT) { entry ->
@@ -288,14 +292,14 @@ private fun ReadyRoot(container: AppContainer, actions: ActivityActions, navCont
                 renameError = renameError,
                 actionError = actionError,
                 deleteResult = deleteResult,
-                onBack = { navController.popBackStack() },
+                onBack = dropUnlessResumed { navController.popBackStack() },
                 onStartRename = vm::startRename,
                 onRenameDraftChange = vm::setRenameDraft,
                 onRename = { renameDraft?.let(vm::rename) },
                 onCancelRename = vm::cancelRename,
                 onSetVerified = vm::setVerified,
                 // Emparejar de nuevo con una invitación nueva; el detalle se queda detrás en la pila.
-                onRepair = { navController.navigate(Routes.ADD) },
+                onRepair = dropUnlessResumed { navController.open(Routes.ADD) },
                 onClearChat = vm::clearChat,
                 onDelete = vm::delete,
                 onDeleteDone = { navController.popBackStack(Routes.CONTACTS, inclusive = false) },
@@ -321,8 +325,8 @@ private fun ReadyRoot(container: AppContainer, actions: ActivityActions, navCont
                 draft = vm.draft,
                 onDraftChange = { vm.draft = it },
                 onSend = { vm.send() },
-                onBack = { navController.popBackStack() },
-                onOpenContact = { navController.navigate(Routes.contact(id)) { launchSingleTop = true } },
+                onBack = dropUnlessResumed { navController.popBackStack() },
+                onOpenContact = dropUnlessResumed { navController.open(Routes.contact(id)) },
                 onClear = vm::clear,
                 photoButton = { enabled ->
                     // Selector de fotos del sistema: solo imágenes y sin permiso de galería. La Uri no se guarda.
@@ -332,9 +336,7 @@ private fun ReadyRoot(container: AppContainer, actions: ActivityActions, navCont
                     }
                 },
                 photoContent = { item ->
-                    PhotoContent(item, vm.bitmaps, onOpen = {
-                        navController.navigate(Routes.photo(id, item.id)) { launchSingleTop = true }
-                    })
+                    PhotoContent(item, vm.bitmaps, onOpen = dropUnlessResumed { navController.open(Routes.photo(id, item.id)) })
                 },
                 preparingPhotos = preparingPhotos,
                 photoError = photoError,
@@ -351,13 +353,13 @@ private fun ReadyRoot(container: AppContainer, actions: ActivityActions, navCont
             PhotoViewerScreen(
                 photo = photo,
                 saveResult = saveResult,
-                onBack = { navController.popBackStack() },
+                onBack = dropUnlessResumed { navController.popBackStack() },
                 onSaveTo = { target -> vm.save(resolver, target) },
                 onSaveResultShown = vm::saveResultShown,
             )
         }
         composable(Routes.SETTINGS) {
-            SettingsRoute(container, actions, onBack = { navController.popBackStack() })
+            SettingsRoute(container, actions, onBack = dropUnlessResumed { navController.popBackStack() })
         }
     }
 }
@@ -428,12 +430,19 @@ private fun NavController.leaveNaming(id: String) {
     }
 }
 
+/** Abre [route] sin duplicarla si ya es la de arriba (`launchSingleTop`). */
+private fun NavController.open(route: String) {
+    navigate(route) { launchSingleTop = true }
+}
+
 /**
- * Navega a [route] solo si su destino ya está en el grafo: las pantallas de añadir, detalle, chat y
- * ajustes llegan en tareas posteriores y, hasta entonces, pulsar no hace nada (en vez de cerrar la app).
+ * Como `dropUnlessResumed` de lifecycle, para clics con un argumento: solo actúa con la pantalla
+ * reanudada, así un doble toque (el segundo llega con la navegación ya en marcha) abre una sola pantalla.
  */
-internal fun NavController.openIfRegistered(route: String) {
-    if (graph.findNode(route) != null) navigate(route)
+@Composable
+private fun <T> dropUnlessResumedWith(block: (T) -> Unit): (T) -> Unit {
+    val owner = LocalLifecycleOwner.current
+    return { value -> if (owner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) block(value) }
 }
 
 /**
