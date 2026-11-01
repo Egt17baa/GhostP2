@@ -1,9 +1,16 @@
 package org.ghostp2.app.ui
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
@@ -16,6 +23,8 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavController
 import androidx.navigation.compose.NavHost
@@ -27,9 +36,13 @@ import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.retryWhen
 import kotlinx.coroutines.launch
 import org.ghostp2.app.AppContainer
+import org.ghostp2.app.R
 import org.ghostp2.app.StorageState
 import org.ghostp2.app.ui.chat.ChatScreen
 import org.ghostp2.app.ui.chat.ChatViewModel
+import org.ghostp2.app.ui.chat.PhotoContent
+import org.ghostp2.app.ui.chat.PhotoViewerScreen
+import org.ghostp2.app.ui.chat.PhotoViewerViewModel
 import org.ghostp2.app.ui.contact.ContactDetailScreen
 import org.ghostp2.app.ui.contact.ContactDetailViewModel
 import org.ghostp2.app.ui.contacts.ContactsScreen
@@ -242,6 +255,8 @@ private fun ReadyRoot(container: AppContainer, actions: ActivityActions) {
             val vm = ghostViewModel(container) { ChatViewModel(it, id) }
             val state by vm.state.collectAsStateWithLifecycle()
             val gone by vm.gone.collectAsStateWithLifecycle()
+            val preparingPhotos by vm.preparingPhotos.collectAsStateWithLifecycle()
+            val photoError by vm.photoErrors.collectAsStateWithLifecycle()
             // Contacto borrado (desde el detalle o por él): a la lista.
             LaunchedEffect(gone) { if (gone) navController.popBackStack(Routes.CONTACTS, inclusive = false) }
             ChatScreen(
@@ -252,6 +267,36 @@ private fun ReadyRoot(container: AppContainer, actions: ActivityActions) {
                 onBack = { navController.popBackStack() },
                 onOpenContact = { navController.navigate(Routes.contact(id)) { launchSingleTop = true } },
                 onClear = vm::clear,
+                photoButton = { enabled ->
+                    // Selector de fotos del sistema: solo imágenes y sin permiso de galería. La Uri no se guarda.
+                    val picker = rememberLauncherForActivityResult(PickVisualMedia()) { uri -> uri?.let(vm::pickPhoto) }
+                    IconButton(onClick = { picker.launch(PickVisualMediaRequest(PickVisualMedia.ImageOnly)) }, enabled = enabled) {
+                        Icon(Icons.Filled.Add, contentDescription = stringResource(R.string.chat_photo_send))
+                    }
+                },
+                photoContent = { item ->
+                    PhotoContent(item, vm.bitmaps, onOpen = {
+                        navController.navigate(Routes.photo(id, item.id)) { launchSingleTop = true }
+                    })
+                },
+                preparingPhotos = preparingPhotos,
+                photoError = photoError,
+                onPhotoErrorShown = vm::photoErrorShown,
+            )
+        }
+        composable(Routes.PHOTO) { entry ->
+            val id = entry.idArg()
+            val item = entry.idArg("item")
+            val vm = ghostViewModel(container) { PhotoViewerViewModel(it, id, item) }
+            val photo by vm.photo.collectAsStateWithLifecycle()
+            val saveResult by vm.saveResult.collectAsStateWithLifecycle()
+            val resolver = LocalContext.current.contentResolver
+            PhotoViewerScreen(
+                photo = photo,
+                saveResult = saveResult,
+                onBack = { navController.popBackStack() },
+                onSaveTo = { target -> vm.save(resolver, target) },
+                onSaveResultShown = vm::saveResultShown,
             )
         }
     }

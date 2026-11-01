@@ -1,15 +1,21 @@
 package org.ghostp2.app.ui.chat
 
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -30,6 +36,8 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -38,19 +46,28 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.ghostp2.app.R
+import org.ghostp2.app.photo.PhotoBitmaps
 import org.ghostp2.app.ui.GhostTextField
 import org.ghostp2.core.protocol.PeerSession
 import org.ghostp2.engine.ChatContent
@@ -69,8 +86,10 @@ internal const val COUNTER_THRESHOLD = 7_500
  * (aviso que lleva al detalle); con el contacto no `ONLINE` se avisa de que se descartará, pero se puede
  * enviar. Contador por encima de [COUNTER_THRESHOLD] caracteres; por encima del máximo no se envía.
  *
- * Fotos (Task 12): [photoButton] va junto al campo (recibe si se puede enviar) y [photoContent] pinta
- * las burbujas de foto; por ahora, un simple "Foto".
+ * Fotos: [photoButton] va junto al campo (recibe si se puede enviar) y [photoContent] pinta el contenido
+ * de las burbujas de foto ([PhotoContent]); la barra de progreso de `Sending` la pone la burbuja. Con
+ * [preparingPhotos] > 0 se avisa de "Preparando foto…" y [photoError] se muestra una vez en una
+ * snackbar (y se confirma con [onPhotoErrorShown]).
  * [state] `null` ⇒ cargando. El menú y el diálogo abiertos son simple `remember` (sin contenido).
  */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -85,11 +104,26 @@ fun ChatScreen(
     onClear: () -> Unit,
     photoButton: @Composable RowScope.(enabled: Boolean) -> Unit = {},
     photoContent: @Composable (ChatItem) -> Unit = { Text(stringResource(R.string.chat_photo)) },
+    preparingPhotos: Int = 0,
+    photoError: PhotoError? = null,
+    onPhotoErrorShown: () -> Unit = {},
 ) {
     var menuOpen by remember { mutableStateOf(false) }
     var confirmClear by remember { mutableStateOf(false) }
+    val snackbar = remember { SnackbarHostState() }
+    val ui = rememberCoroutineScope()
+    val errorText = photoError?.let { stringResource(it.text) }
+    LaunchedEffect(photoError) {
+        if (errorText != null) {
+            // En el ámbito de la pantalla: confirmar el aviso no lo cierra; uno nuevo sustituye al anterior.
+            snackbar.currentSnackbarData?.dismiss()
+            ui.launch { snackbar.showSnackbar(errorText) }
+            onPhotoErrorShown()
+        }
+    }
 
     Scaffold(
+        snackbarHost = { SnackbarHost(snackbar) },
         topBar = {
             TopAppBar(
                 title = {
@@ -139,6 +173,7 @@ fun ChatScreen(
             Column(Modifier.padding(padding).fillMaxSize().imePadding()) {
                 Messages(state.items, photoContent, Modifier.weight(1f))
                 Notices(state, onOpenContact)
+                if (preparingPhotos > 0) NoticeText(stringResource(R.string.chat_photo_preparing))
                 Input(state, draft, onDraftChange, onSend, photoButton)
             }
         }
@@ -235,6 +270,62 @@ private fun messageText(text: String, struck: Boolean): AnnotatedString =
     } else {
         buildAnnotatedString { withStyle(SpanStyle(textDecoration = TextDecoration.LineThrough)) { append(text) } }
     }
+
+/** Estado de una miniatura: decodificándose (fuera del hilo principal), lista o que no se puede mostrar. */
+private sealed interface Thumbnail {
+    data object Loading : Thumbnail
+
+    class Ready(val image: ImageBitmap) : Thumbnail
+
+    data object Discarded : Thumbnail
+}
+
+/**
+ * Contenido de una burbuja de foto: la miniatura (de [bitmaps], decodificada una vez y fuera del hilo
+ * principal), que al pulsarla llama a [onOpen]. Si la foto está descartada ([ChatContent.PhotoDiscarded])
+ * o sus bytes ya están a cero (o no son una imagen), "Foto descartada para liberar memoria".
+ */
+@Composable
+fun PhotoContent(item: ChatItem, bitmaps: PhotoBitmaps, onOpen: () -> Unit) {
+    val jpeg = (item.content as? ChatContent.Photo)?.jpeg
+    if (jpeg == null) {
+        DiscardedPhoto()
+        return
+    }
+    val thumbnail by produceState(
+        initialValue = remember(item.id, jpeg) { bitmaps.cached(item.id, jpeg)?.let { Thumbnail.Ready(it) } ?: Thumbnail.Loading },
+        item.id,
+        jpeg,
+    ) {
+        if (value is Thumbnail.Loading) {
+            value = withContext(Dispatchers.Default) { bitmaps.thumbnail(item.id, jpeg) }?.let { Thumbnail.Ready(it) } ?: Thumbnail.Discarded
+        }
+    }
+    when (val current = thumbnail) {
+        Thumbnail.Loading -> Box(
+            Modifier.size(width = 160.dp, height = 120.dp)
+                .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.5f), MaterialTheme.shapes.small),
+        )
+        is Thumbnail.Ready -> Image(
+            bitmap = current.image,
+            contentDescription = stringResource(R.string.chat_photo),
+            contentScale = ContentScale.Fit,
+            modifier = Modifier.widthIn(max = 240.dp).heightIn(max = 320.dp)
+                .aspectRatio(current.image.width.toFloat() / current.image.height)
+                .clickable(onClick = onOpen),
+        )
+        Thumbnail.Discarded -> DiscardedPhoto()
+    }
+}
+
+@Composable
+private fun DiscardedPhoto() {
+    Text(
+        stringResource(R.string.chat_photo_discarded),
+        fontStyle = FontStyle.Italic,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+}
 
 /** Avisos sobre la entrada: identidad cambiada (lleva al detalle), motor parado o contacto no conectado. */
 @Composable
