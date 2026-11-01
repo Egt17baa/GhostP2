@@ -5,22 +5,31 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 /**
  * Cola de fotos salientes, en memoria. Un solo trabajador: codifica una foto, la entrega al motor con
  * [send] y espera con [awaitFinished] a que termine su envío antes de codificar la siguiente (una sola
- * foto en vuelo). Entre esperando y en curso caben como mucho [capacity] fotos.
+ * foto en vuelo).
+ *
+ * **Capacidad (R25):** como mucho [capacity] fotos (3) en total, contando la que está en vuelo
+ * (codificándose, enviándose o esperando a que termine su envío) más las que esperan.
  *
  * [send] devuelve el id del elemento del historial o `null` si no se pudo enviar (motor no `Online` ⇒
- * [PhotoException.Reason.NOT_ACTIVE]). Tras [send] los bytes codificados se rellenan con ceros: el motor
- * guarda su propia copia.
+ * [PhotoException.Reason.NOT_ACTIVE]); se llama con el cerrojo tomado, así que después de [clear] no se
+ * envía nada. Tras [send] los bytes codificados se rellenan con ceros: el motor guarda su propia copia.
+ *
+ * La cola nunca se atasca: cualquier fallo de una foto (también un `Error`, o una
+ * `CancellationException` que no viene de cancelar al trabajador) se informa en [errors] y se pasa a la
+ * siguiente.
  */
 class PhotoQueue(
     private val scope: CoroutineScope,
@@ -56,10 +65,7 @@ class PhotoQueue(
         if (waiting.size + (if (inFlight != null) 1 else 0) >= capacity) return false
         waiting.addLast(Item(contactId, uri))
         adjustPreparing(contactId, +1)
-        if (worker == null) {
-            val gen = generation
-            worker = scope.launch { work(gen) }
-        }
+        startWorkerLocked()
         true
     }
 
@@ -75,22 +81,33 @@ class PhotoQueue(
         job?.cancel()
     }
 
+    // Con `lock` tomado. Un trabajador ya terminado (o lanzado en un scope cancelado) no cuenta.
+    private fun startWorkerLocked() {
+        if (worker?.isActive == true) return
+        val gen = generation
+        worker = scope.launch { work(gen) }
+    }
+
     private suspend fun work(gen: Long) {
-        while (true) {
-            val item = synchronized(lock) {
-                if (gen != generation) return
-                val next = waiting.removeFirstOrNull()
-                if (next == null) {
-                    worker = null
-                    return
+        try {
+            while (true) {
+                val item = synchronized(lock) {
+                    if (gen != generation) return
+                    val next = waiting.removeFirstOrNull() ?: return
+                    inFlight = next
+                    next
                 }
-                inFlight = next
-                next
-            }
-            try {
                 process(item, gen)
-            } finally {
                 synchronized(lock) { if (gen == generation) inFlight = null }
+            }
+        } finally {
+            synchronized(lock) {
+                if (gen == generation) {
+                    worker = null
+                    inFlight = null
+                    // Salida anómala con fotos esperando: otro trabajador las atiende.
+                    if (waiting.isNotEmpty()) startWorkerLocked()
+                }
             }
         }
     }
@@ -99,11 +116,17 @@ class PhotoQueue(
         val jpeg = try {
             encode(item.uri)
         } catch (e: CancellationException) {
-            throw e
+            // Solo se propaga si es este trabajador el cancelado; si no, es un fallo de la foto.
+            if (!currentCoroutineContext().isActive) throw e
+            fail(item, gen, PhotoException.Reason.UNREADABLE)
+            return
         } catch (e: PhotoException) {
             fail(item, gen, e.reason)
             return
-        } catch (_: Exception) {
+        } catch (_: OutOfMemoryError) {
+            fail(item, gen, PhotoException.Reason.TOO_LARGE)
+            return
+        } catch (_: Throwable) {
             fail(item, gen, PhotoException.Reason.UNREADABLE)
             return
         }
@@ -112,8 +135,8 @@ class PhotoQueue(
                 // Un clear() durante la codificación: no se envía nada.
                 if (gen != generation) return
                 adjustPreparing(item.contactId, -1)
+                send(item.contactId, jpeg)
             }
-            send(item.contactId, jpeg)
         } catch (_: Exception) {
             // Inesperado (el motor rechaza la foto): se trata como no enviada.
             null
@@ -127,7 +150,8 @@ class PhotoQueue(
         try {
             awaitFinished(item.contactId, itemId)
         } catch (e: CancellationException) {
-            throw e
+            if (!currentCoroutineContext().isActive) throw e
+            // No viene de cancelar al trabajador: se da el envío por terminado.
         } catch (_: Exception) {
             // No se pudo seguir el envío: se pasa a la siguiente foto.
         }

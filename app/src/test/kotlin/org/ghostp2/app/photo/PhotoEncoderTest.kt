@@ -5,10 +5,12 @@ import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.net.Uri
 import androidx.exifinterface.media.ExifInterface
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
 import org.ghostp2.core.protocol.PeerSession
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
@@ -52,6 +54,14 @@ class PhotoEncoderTest {
         val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size, o)
         return o.outWidth to o.outHeight
+    }
+
+    @Test
+    fun outputHasOnlyJfifHeader() {
+        // Ni siquiera el perfil ICC sRGB que añade Skia en APP2.
+        val found = markers(PhotoEncoder.encode(jpeg(64, 48), 2048))
+        assertEquals(0xE0, found.first())
+        assertTrue(found.none { it in 0xE1..0xEF || it == 0xFE })
     }
 
     @Test
@@ -154,6 +164,135 @@ class PhotoEncoderTest {
         } catch (e: PhotoException) {
             assertEquals(PhotoException.Reason.TOO_LARGE, e.reason)
         }
+    }
+
+    private fun noise(width: Int, height: Int, seed: Int = 3): ByteArray {
+        val random = Random(seed)
+        return jpeg(width, height, quality = 100) { bitmap ->
+            val pixels = IntArray(bitmap.width * bitmap.height) { random.nextInt() or (0xFF shl 24) }
+            bitmap.setPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
+        }
+    }
+
+    @Test
+    fun compressLoopEndsInTooLarge() {
+        val input = noise(800, 800)
+        try {
+            PhotoEncoder.encode(input, 2048, maxBytes = 500) {}
+            fail("Debería fallar")
+        } catch (e: PhotoException) {
+            assertEquals(PhotoException.Reason.TOO_LARGE, e.reason)
+        }
+        assertArrayEquals(ByteArray(input.size), input)
+    }
+
+    @Test
+    fun shrinkStartsFromTheCurrentSize() {
+        // 600×600 (menor que maxSidePx): si no cabe a calidad 45, se reduce desde 600 (a 450), no desde 2048.
+        val input = noise(600, 600)
+        val decoded = BitmapFactory.decodeByteArray(input, 0, input.size)
+        val atMinimum = ByteArrayOutputStream().also { decoded.compress(Bitmap.CompressFormat.JPEG, 45, it) }.size()
+        val out = PhotoEncoder.encode(input, 2048, maxBytes = atMinimum - 1) {}
+        assertEquals(450 to 450, size(out))
+        assertTrue(out.size < atMinimum)
+    }
+
+    @Test
+    fun cancellationStopsAndWipes() {
+        val input = jpeg(64, 64)
+        try {
+            PhotoEncoder.encode(input, 2048, PeerSession.MAX_PHOTO_BYTES) { throw CancellationException("cancelada") }
+            fail("Debería cancelarse")
+        } catch (_: CancellationException) {
+        }
+        assertArrayEquals(ByteArray(input.size), input)
+    }
+
+    @Test
+    fun decodedPixelsAreCapped() {
+        // R26: el submuestreo normal deja ≥ maxSidePx; si eso pasa de ~24 Mpx se dobla otra vez.
+        assertEquals(1, PhotoEncoder.sampleSize(4000, 3000, 2048))
+        assertEquals(2, PhotoEncoder.sampleSize(8000, 2000, 2048))
+        assertEquals(2, PhotoEncoder.sampleSize(6000, 6000, 3072))
+        assertEquals(4, PhotoEncoder.sampleSize(16000, 12000, 2048))
+        for ((w, h, side) in listOf(Triple(6143, 6143, 3072), Triple(20000, 20000, 1280), Triple(50000, 1000, 3072))) {
+            val sample = PhotoEncoder.sampleSize(w, h, side)
+            assertTrue((w / sample).toLong() * (h / sample) <= PhotoEncoder.MAX_DECODED_PIXELS)
+        }
+    }
+
+    @Test
+    fun transparencyBecomesWhite() {
+        val bitmap = Bitmap.createBitmap(40, 40, Bitmap.Config.ARGB_8888)
+        bitmap.eraseColor(Color.TRANSPARENT)
+        val png = ByteArrayOutputStream().also { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }.toByteArray()
+        val out = PhotoEncoder.encode(png, 2048)
+        val pixel = BitmapFactory.decodeByteArray(out, 0, out.size).getPixel(20, 20)
+        assertTrue(Color.red(pixel) > 240 && Color.green(pixel) > 240 && Color.blue(pixel) > 240)
+    }
+
+    /** Marcadores de los segmentos de cabecera de un JPEG, hasta el inicio de los datos (SOS). */
+    private fun markers(jpeg: ByteArray): List<Int> {
+        assertEquals(0xFF, jpeg[0].toInt() and 0xFF)
+        assertEquals(0xD8, jpeg[1].toInt() and 0xFF)
+        val found = mutableListOf<Int>()
+        var i = 2
+        while (i + 4 <= jpeg.size) {
+            assertEquals(0xFF, jpeg[i].toInt() and 0xFF)
+            val marker = jpeg[i + 1].toInt() and 0xFF
+            found += marker
+            if (marker == 0xDA) break
+            val length = ((jpeg[i + 2].toInt() and 0xFF) shl 8) or (jpeg[i + 3].toInt() and 0xFF)
+            i += 2 + length
+        }
+        return found
+    }
+
+    private fun segment(marker: Int, payload: ByteArray): ByteArray {
+        val length = payload.size + 2
+        return byteArrayOf(0xFF.toByte(), marker.toByte(), (length shr 8).toByte(), length.toByte()) + payload
+    }
+
+    /** APP1 Exif (TIFF little-endian) con la marca y una miniatura JPEG en IFD1. */
+    private fun exifWithThumbnail(thumbnail: ByteArray): ByteArray {
+        val make = "Acme\u0000".toByteArray(Charsets.US_ASCII)
+        val buffer = java.nio.ByteBuffer.allocate(8 + 2 + 12 + 4 + 2 + 24 + 4 + make.size + thumbnail.size)
+            .order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        val ifd0 = 8
+        val ifd1 = ifd0 + 2 + 12 + 4
+        val makeAt = ifd1 + 2 + 24 + 4
+        val thumbAt = makeAt + make.size
+        buffer.put("II".toByteArray()).putShort(42).putInt(ifd0)
+        buffer.putShort(1).putShort(0x010F).putShort(2).putInt(make.size).putInt(makeAt).putInt(ifd1)
+        buffer.putShort(2)
+        buffer.putShort(0x0201).putShort(4).putInt(1).putInt(thumbAt)
+        buffer.putShort(0x0202).putShort(4).putInt(1).putInt(thumbnail.size)
+        buffer.putInt(0)
+        buffer.put(make).put(thumbnail)
+        return "Exif\u0000\u0000".toByteArray(Charsets.US_ASCII) + buffer.array()
+    }
+
+    @Test
+    fun metadataSegmentsAreStripped() {
+        val base = jpeg(64, 48)
+        val xmp = "http://ns.adobe.com/xap/1.0/\u0000<x:xmpmeta xmlns:x='adobe:ns:meta/'><gps>40.4,-3.7</gps></x:xmpmeta>"
+        val input = byteArrayOf(0xFF.toByte(), 0xD8.toByte()) +
+            segment(0xE1, exifWithThumbnail(jpeg(16, 16))) +
+            segment(0xE1, xmp.toByteArray(Charsets.UTF_8)) +
+            segment(0xE2, "MPF\u0000datos".toByteArray(Charsets.US_ASCII)) +
+            segment(0xED, "Photoshop 3.0\u00008BIM".toByteArray(Charsets.US_ASCII)) +
+            segment(0xFE, "comentario".toByteArray(Charsets.US_ASCII)) +
+            base.copyOfRange(2, base.size)
+        // La entrada sí los tiene (y ExifInterface ve la marca y la miniatura).
+        assertTrue(markers(input).containsAll(listOf(0xE1, 0xE2, 0xED, 0xFE)))
+        ExifInterface(ByteArrayInputStream(input)).let {
+            assertEquals("Acme", it.getAttribute(ExifInterface.TAG_MAKE))
+            assertTrue(it.hasThumbnail())
+        }
+        val out = PhotoEncoder.encode(input, 2048)
+        val found = markers(out)
+        assertTrue("Segmentos: ${found.map { Integer.toHexString(it) }}", found.none { it in 0xE1..0xEF || it == 0xFE })
+        assertFalse(ExifInterface(ByteArrayInputStream(out)).hasThumbnail())
     }
 
     @Test

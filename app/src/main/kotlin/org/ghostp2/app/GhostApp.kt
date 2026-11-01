@@ -30,6 +30,7 @@ import org.ghostp2.data.StoreCorruptedException
 import org.ghostp2.data.StoreUnavailableException
 import org.ghostp2.data.StoredRepositories
 import org.ghostp2.data.createRepositories
+import org.ghostp2.engine.ChatItem
 import org.ghostp2.engine.ContactRepository
 import org.ghostp2.engine.DeletionJournal
 import org.ghostp2.engine.DeliveryStatus
@@ -62,6 +63,18 @@ open class GhostApp : Application() {
  */
 internal val SilentExceptionHandler = CoroutineExceptionHandler { _, _ ->
     // A propósito vacío: sin registros (regla de no registrar contenido ni claves).
+}
+
+/**
+ * Espera a que el elemento [itemId] de [contactId] deje de estar en [DeliveryStatus.Sending] o salga del
+ * historial (borrado, descartado o motor parado).
+ */
+internal suspend fun awaitPhotoFinished(
+    conversations: StateFlow<Map<String, List<ChatItem>>>,
+    contactId: String,
+    itemId: String,
+) {
+    conversations.first { all -> all[contactId]?.firstOrNull { it.id == itemId }?.status !is DeliveryStatus.Sending }
 }
 
 /** El contenedor del proceso a partir de cualquier `Context`. */
@@ -178,19 +191,15 @@ class AppContainer internal constructor(
     val settings: SettingsRepository get() = store.settings
 
     /**
-     * Cola de fotos salientes (una en vuelo, como mucho 3 entre esperando y en curso). Solo envía con el
-     * motor `Online` (si no, `NOT_ACTIVE`); pasa a la siguiente cuando la anterior deja de estar en
-     * `Sending` o sale del historial. [stop] la vacía.
+     * Cola de fotos salientes: una en vuelo y como mucho 3 en total, contando la que está en vuelo (R25).
+     * Solo envía con el motor `Online` (si no, `NOT_ACTIVE`); pasa a la siguiente cuando la anterior deja
+     * de estar en `Sending` o sale del historial ([awaitPhotoFinished]). [stop] la vacía.
      */
     val photos = PhotoQueue(
         scope,
         encode = { uri -> PhotoEncoder.encode(appContext.contentResolver, uri, maxPhotoSidePx()) },
         send = { contactId, jpeg -> if (engine.status.value == EngineStatus.Online) engine.sendPhoto(contactId, jpeg) else null },
-        awaitFinished = { contactId, itemId ->
-            engine.conversations.first { all ->
-                all[contactId]?.firstOrNull { it.id == itemId }?.status !is DeliveryStatus.Sending
-            }
-        },
+        awaitFinished = { contactId, itemId -> awaitPhotoFinished(engine.conversations, contactId, itemId) },
     )
 
     /** Lado mayor de las fotos según los ajustes; si no se pueden leer, el valor por defecto. */
