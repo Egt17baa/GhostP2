@@ -1,5 +1,7 @@
 package org.ghostp2.app.ui.pairing
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.ViewModelStore
 import androidx.lifecycle.viewmodel.initializer
@@ -7,8 +9,10 @@ import androidx.lifecycle.viewmodel.viewModelFactory
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import org.ghostp2.app.R
 import org.ghostp2.app.TestGhostApp
 import org.ghostp2.app.eventually
+import org.ghostp2.app.ui.copySensitive
 import org.ghostp2.core.protocol.FrameStream
 import org.ghostp2.engine.AcceptResult
 import org.ghostp2.engine.EngineConfig
@@ -267,6 +271,55 @@ class PairingViewModelTest {
         eventually(TIMEOUT) { (vm.invitation.value as? InvitationState.Waiting)?.text?.let { it != first } == true }
         val onion = first.removePrefix("ghostp2:").substringBefore('.')
         eventually(TIMEOUT) { onion !in app.network.published.value }
+    }
+
+    private fun clipboard() = app.getSystemService(ClipboardManager::class.java)
+
+    /** Como "Copiar" de "Mi código": con la etiqueta de GhostP2 y marcado como sensible. */
+    private fun copyOwn(text: String) = copySensitive(app, app.getString(R.string.add_clip_label), text)
+
+    @Test
+    fun copiedInvitationIsClearedOncePaired() {
+        EngineHarness(1, network = app.network).use { peer ->
+            runBlocking { peer.startAll() }
+            val vm = viewModel()
+            vm.createInvitation()
+            val text = waitingText(vm)
+            copyOwn(text)
+
+            assertTrue(runBlocking { peer.engine(0).acceptInvitation(text) } is AcceptResult.Paired)
+            eventually(TIMEOUT) { vm.invitation.value is InvitationState.Paired }
+            eventually(TIMEOUT) { clipboard().primaryClip == null }
+        }
+    }
+
+    @Test
+    fun copiedInvitationIsClearedWhenCancelled() {
+        val vm = viewModel()
+        vm.createInvitation()
+        copyOwn(waitingText(vm))
+        vm.cancelInvitation()
+        assertNull(clipboard().primaryClip)
+    }
+
+    @Test
+    fun copiedInvitationIsClearedWhenTheViewModelIsCleared() {
+        val vm = viewModel()
+        vm.createInvitation()
+        copyOwn(waitingText(vm))
+        store.clear()
+        assertNull(clipboard().primaryClip)
+    }
+
+    @Test
+    fun foreignClipSurvivesTheInvitationEnding() {
+        val vm = viewModel()
+        vm.createInvitation()
+        waitingText(vm)
+        clipboard().setPrimaryClip(ClipData.newPlainText("otra app", "hola"))
+        vm.cancelInvitation()
+        store.clear()
+        assertEquals("hola", clipboard().primaryClip!!.getItemAt(0).text.toString())
     }
 
     private companion object {

@@ -14,6 +14,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import org.ghostp2.app.AppContainer
+import org.ghostp2.app.ui.clearOwnClip
 import org.ghostp2.engine.AcceptResult
 import org.ghostp2.engine.EngineStatus
 import org.ghostp2.engine.InvitationHandle
@@ -37,7 +38,8 @@ sealed interface AcceptUi {
  * ningún estado guardado ni se registra en ningún log.
  *
  * La invitación vive lo que este ViewModel: [onCleared] (salir de la pantalla, emparejar y pasar a
- * nombrar, o que la actividad termine) la cancela y el motor retira el servicio temporal. Al girar la
+ * nombrar, o que la actividad termine) la cancela y el motor retira el servicio temporal. Cuando deja de
+ * esperar, y en [onCleared], se vacía el portapapeles si aún tiene la invitación copiada. Al girar la
  * pantalla el ViewModel se conserva (en memoria) y la invitación sigue, igual que el texto pegado
  * ([pasted]); si el sistema mata el proceso no se restaura nada: el motor, la invitación y el texto
  * desaparecen con él y, al volver, hace falta otra.
@@ -79,8 +81,18 @@ class PairingViewModel(private val container: AppContainer) : ViewModel() {
         cancelInvitation()
         val created = container.engine.createInvitation()
         handle = created
-        mutableInvitation.value = created.state.value
-        watcher = viewModelScope.launch { created.state.collect { mutableInvitation.value = it } }
+        showInvitation(created.state.value)
+        watcher = viewModelScope.launch { created.state.collect { showInvitation(it) } }
+    }
+
+    /**
+     * Pone el estado de la invitación. Si deja de estar en `Waiting` (emparejada, caducada, cancelada…),
+     * su texto ya no sirve: se vacía el portapapeles si aún lo tiene (solo lo copiado por GhostP2).
+     */
+    private fun showInvitation(state: InvitationState) {
+        val was = mutableInvitation.value
+        mutableInvitation.value = state
+        if (was is InvitationState.Waiting && state !is InvitationState.Waiting) clearOwnClip(container.appContext)
     }
 
     /** Cancela la invitación activa (idempotente) y la deja en `Cancelled`. */
@@ -92,7 +104,7 @@ class PairingViewModel(private val container: AppContainer) : ViewModel() {
         handle = null
         current.cancel()
         val state = current.state.value
-        mutableInvitation.value = if (state is InvitationState.Paired) state else InvitationState.Cancelled
+        showInvitation(if (state is InvitationState.Paired) state else InvitationState.Cancelled)
     }
 
     /** Cambia el texto pegado; al editarlo deja de mostrarse el fallo anterior. */
@@ -121,5 +133,7 @@ class PairingViewModel(private val container: AppContainer) : ViewModel() {
 
     override fun onCleared() {
         cancelInvitation()
+        // La invitación copiada ya no sirve sin esta pantalla (la cancela salir de ella).
+        clearOwnClip(container.appContext)
     }
 }
