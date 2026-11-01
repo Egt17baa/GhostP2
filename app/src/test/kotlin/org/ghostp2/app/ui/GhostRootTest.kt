@@ -285,6 +285,29 @@ class GhostRootTest {
     }
 
     @Test
+    fun wipeAllFromSettingsReturnsToOnboardingThenToTheList() {
+        runBlocking { app.storage.contacts.upsert(active("c1", "Ana")) }
+        show()
+        waitForText("Ana")
+        compose.onNodeWithContentDescription("Ajustes").performClick()
+        waitForText("Borrar todo")
+        compose.onNodeWithText("Borrar todo").performScrollTo().performClick()
+        compose.onNodeWithText("Borrar").performClick()
+        compose.onNodeWithText("Sí, borrar todo").performClick()
+
+        waitForText("Bienvenido a GhostP2")
+        assertFalse(runBlocking { app.storage.settings.get() }.onboardingDone)
+        assertTrue(runBlocking { app.storage.contacts.all() }.isEmpty())
+        compose.onNodeWithText("Siguiente").performClick()
+        compose.onNodeWithText("Siguiente").performClick()
+        compose.onNodeWithText("Activar GhostP2").performClick()
+
+        // La pila de navegación se vació: se vuelve a la lista, no a los ajustes.
+        waitForText("Aún no tienes contactos")
+        compose.onAllNodesWithText("Borrar todo").assertCountEquals(0)
+    }
+
+    @Test
     fun openIfRegisteredOnlyNavigatesToKnownDestinations() {
         var nav: NavHostController? = null
         compose.setContent {

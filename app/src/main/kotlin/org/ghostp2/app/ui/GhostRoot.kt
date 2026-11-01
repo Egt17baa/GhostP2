@@ -1,5 +1,8 @@
 package org.ghostp2.app.ui
 
+import android.content.Context
+import android.content.pm.PackageManager
+import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia
@@ -28,6 +31,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavController
 import androidx.navigation.compose.NavHost
@@ -39,6 +43,7 @@ import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.retryWhen
 import kotlinx.coroutines.launch
 import org.ghostp2.app.AppContainer
+import org.ghostp2.app.BatteryOptimization
 import org.ghostp2.app.R
 import org.ghostp2.app.StorageState
 import org.ghostp2.app.lock.LockScreen
@@ -57,6 +62,8 @@ import org.ghostp2.app.ui.pairing.AddContactScreen
 import org.ghostp2.app.ui.pairing.NameContactScreen
 import org.ghostp2.app.ui.pairing.NameContactViewModel
 import org.ghostp2.app.ui.pairing.PairingViewModel
+import org.ghostp2.app.ui.settings.SettingsScreen
+import org.ghostp2.app.ui.settings.SettingsViewModel
 import org.ghostp2.data.AppSettings
 import org.ghostp2.engine.EngineStatus
 
@@ -169,6 +176,11 @@ private fun ReadyRoot(container: AppContainer, actions: ActivityActions) {
         )
     }
     if (!current.onboardingDone) {
+        // Tras "Borrar todo" la pila de navegación (fuera del bloqueo) seguiría en los ajustes: se vacía
+        // hasta la lista para que, al terminar la bienvenida, se empiece por ella.
+        LaunchedEffect(navController) {
+            if (navController.currentBackStackEntry != null) navController.popBackStack(Routes.CONTACTS, inclusive = false)
+        }
         OnboardingRoute(actions, saveFailed = onboardingSaveFailed, onFinish = {
             if (!finishing) {
                 finishing = true
@@ -292,6 +304,11 @@ private fun ReadyRoot(container: AppContainer, actions: ActivityActions) {
             val photoError by vm.photoErrors.collectAsStateWithLifecycle()
             // Contacto borrado (desde el detalle o por él): a la lista.
             LaunchedEffect(gone) { if (gone) navController.popBackStack(Routes.CONTACTS, inclusive = false) }
+            // Con el chat a la vista, sus mensajes nuevos no se notifican.
+            LifecycleResumeEffect(id) {
+                container.chatShown(id)
+                onPauseOrDispose { container.chatHidden(id) }
+            }
             ChatScreen(
                 state = state,
                 draft = vm.draft,
@@ -332,8 +349,59 @@ private fun ReadyRoot(container: AppContainer, actions: ActivityActions) {
                 onSaveResultShown = vm::saveResultShown,
             )
         }
+        composable(Routes.SETTINGS) {
+            SettingsRoute(container, actions, onBack = { navController.popBackStack() })
+        }
     }
 }
+
+@Composable
+private fun SettingsRoute(container: AppContainer, actions: ActivityActions, onBack: () -> Unit) {
+    val vm = ghostViewModel(container) { SettingsViewModel(it) }
+    val settings by vm.state.collectAsStateWithLifecycle()
+    val lockNeedsDeviceLock by vm.lockNeedsDeviceLock.collectAsStateWithLifecycle()
+    val saveFailed by vm.saveFailed.collectAsStateWithLifecycle()
+    val wiping by vm.wiping.collectAsStateWithLifecycle()
+    val wipeFailed by vm.wipeFailed.collectAsStateWithLifecycle()
+    val myOnion by container.engine.myOnion.collectAsStateWithLifecycle()
+    val lastDiagnostic by container.lastDiagnostic.collectAsStateWithLifecycle()
+    val context = LocalContext.current
+    // Se vuelve a leer en cada onResume (al volver del diálogo del sistema).
+    var batteryIgnoring by remember { mutableStateOf(BatteryOptimization.isIgnoring(context)) }
+    LifecycleResumeEffect(context) {
+        batteryIgnoring = BatteryOptimization.isIgnoring(context)
+        onPauseOrDispose { }
+    }
+    val version = remember(context) { appVersion(context) }
+    SettingsScreen(
+        settings = settings,
+        batteryIgnoring = batteryIgnoring,
+        manufacturerHint = BatteryOptimization.manufacturerHint(Build.MANUFACTURER),
+        version = version,
+        myOnion = myOnion,
+        lastDiagnostic = lastDiagnostic,
+        lockNeedsDeviceLock = lockNeedsDeviceLock,
+        saveFailed = saveFailed,
+        wiping = wiping,
+        wipeFailed = wipeFailed,
+        onBack = onBack,
+        onSetLock = { vm.setLock(it) },
+        onSetLockAfter = vm::setLockAfter,
+        onSetHideNames = vm::setHideNames,
+        onSetMaxPhotoSide = vm::setMaxPhotoSide,
+        onRequestBattery = actions.requestBatteryExemption,
+        onSetStartOnBoot = vm::setStartOnBoot,
+        onWipeAll = vm::wipeAll,
+    )
+}
+
+/** `versionName` del paquete; vacío si no se puede leer. */
+private fun appVersion(context: Context): String =
+    try {
+        context.packageManager.getPackageInfo(context.packageName, 0).versionName.orEmpty()
+    } catch (_: PackageManager.NameNotFoundException) {
+        ""
+    }
 
 /**
  * Sale de nombrar al contacto [id] hacia su chat. Se vacía la pila hasta la lista (nombrar y, si se

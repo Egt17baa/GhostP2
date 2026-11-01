@@ -7,6 +7,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Solo para "Activar GhostP2 al encender el móvil" (R20), desactivado por defecto. -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <!-- Solo para escanear el QR de una invitación (R23); se pide al abrir "Escanear". -->
     <uses-permission android:name="android.permission.CAMERA" />
     <!-- Sin cámara también funciona (se pega el texto). CAMERA implica `android.hardware.camera`
@@ -51,5 +53,15 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Mantener la conexión cifrada P2P sobre Tor para recibir mensajes" />
         </service>
+
+        <!-- Exportado porque lo invoca el sistema; BOOT_COMPLETED es una difusión protegida y el
+             receptor ignora cualquier otra acción. -->
+        <receiver
+            android:name=".BootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>

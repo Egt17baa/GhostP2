@@ -16,7 +16,8 @@ import org.ghostp2.engine.Notice
 
 /**
  * Notificaciones de GhostP2. Ninguna lleva contenido de mensajes: como mucho el nombre del contacto,
- * y solo en la versión privada (en la pantalla de bloqueo se ve la versión pública, sin nombre).
+ * y solo en la versión privada (en la pantalla de bloqueo se ve la versión pública, sin nombre); con
+ * "Ocultar el nombre del contacto", ni siquiera eso.
  */
 object Notifications {
     /** Canal de la notificación fija del servicio (importancia baja: sin sonido). */
@@ -140,20 +141,62 @@ object Notifications {
      * Notificación para un aviso del motor, o `null` si el aviso es solo de diagnóstico
      * (`PublicationFailed`, `ClientAuthFailed`: no se notifican; el último se ve en la pantalla de
      * diagnóstico, ver [AppContainer.lastDiagnostic]).
-     * `contactName` es el nombre guardado del contacto (o `null` si ya no se conoce).
+     * `contactName` es el nombre guardado del contacto (o `null` si ya no se conoce). Con [hideNames]
+     * ("Ocultar el nombre del contacto") no aparece ningún nombre, ni siquiera en la versión privada:
+     * "Nuevo mensaje", "Un contacto te ha eliminado de sus contactos", "La identidad de un contacto ha
+     * cambiado".
      */
-    fun forNotice(context: Context, notice: Notice, contactName: String?): Posted? {
+    fun forNotice(context: Context, notice: Notice, contactName: String?, hideNames: Boolean): Posted? {
         val fallback = context.getString(R.string.notification_unknown_contact)
         return when (notice) {
-            is Notice.MessageArrived ->
-                Posted(notice.contactId, MESSAGE_ID, message(context, contactName ?: fallback))
-            is Notice.ContactUnpairedYou ->
-                Posted(notice.contactId, UNPAIRED_ID, unpaired(context, notice.name))
-            is Notice.IdentityChanged ->
-                Posted(notice.contactId, IDENTITY_CHANGED_ID, identityChanged(context, contactName ?: fallback))
+            is Notice.MessageArrived -> Posted(
+                notice.contactId,
+                MESSAGE_ID,
+                if (hideNames) anonymousMessage(context) else message(context, contactName ?: fallback),
+            )
+            is Notice.ContactUnpairedYou -> Posted(
+                notice.contactId,
+                UNPAIRED_ID,
+                if (hideNames) anonymousUnpaired(context) else unpaired(context, notice.name),
+            )
+            is Notice.IdentityChanged -> Posted(
+                notice.contactId,
+                IDENTITY_CHANGED_ID,
+                if (hideNames) anonymousIdentityChanged(context) else identityChanged(context, contactName ?: fallback),
+            )
             Notice.PublicationFailed, is Notice.ClientAuthFailed -> null
         }
     }
+
+    /** "Nuevo mensaje", sin nombre ni texto. */
+    private fun anonymousMessage(context: Context): Notification =
+        contactNotification(
+            context,
+            title = context.getString(R.string.notification_message_public),
+            text = null,
+            publicTitle = context.getString(R.string.notification_message_public),
+            category = NotificationCompat.CATEGORY_MESSAGE,
+        )
+
+    /** "Un contacto te ha eliminado de sus contactos", sin nombre. */
+    private fun anonymousUnpaired(context: Context): Notification =
+        contactNotification(
+            context,
+            title = context.getString(R.string.notification_unpaired_anonymous),
+            text = null,
+            publicTitle = context.getString(R.string.notification_contact_public),
+            category = NotificationCompat.CATEGORY_STATUS,
+        )
+
+    /** "La identidad de un contacto ha cambiado", sin nombre. */
+    private fun anonymousIdentityChanged(context: Context): Notification =
+        contactNotification(
+            context,
+            title = context.getString(R.string.notification_identity_changed_anonymous),
+            text = context.getString(R.string.notification_identity_changed_text),
+            publicTitle = context.getString(R.string.notification_contact_public),
+            category = NotificationCompat.CATEGORY_STATUS,
+        )
 
     /** Publica [posted] si el usuario permite notificaciones (en API 33+ hace falta `POST_NOTIFICATIONS`). */
     fun post(context: Context, posted: Posted) {

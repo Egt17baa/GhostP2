@@ -74,14 +74,14 @@ class NotificationsTest {
 
     @Test
     fun messageNoticeBecomesNameOnlyNotificationPerContact() {
-        val posted = Notifications.forNotice(context, Notice.MessageArrived("c1"), contactName = "Ana")
+        val posted = Notifications.forNotice(context, Notice.MessageArrived("c1"), contactName = "Ana", hideNames = false)
 
         assertNotNull(posted)
         posted!!
         assertEquals("c1", posted.tag)
         assertEquals(listOf("Nuevo mensaje de Ana"), posted.notification.visibleTexts())
         // Diagnóstico interno: sin notificación.
-        assertNull(Notifications.forNotice(context, Notice.PublicationFailed, contactName = null))
+        assertNull(Notifications.forNotice(context, Notice.PublicationFailed, contactName = null, hideNames = false))
     }
 
     @Test
@@ -94,6 +94,27 @@ class NotificationsTest {
             assertEquals(Notification.VISIBILITY_PRIVATE, n.visibility)
             assertFalse(n.publicVersion.visibleTexts().any { it.contains("Ana") })
         }
+    }
+
+    @Test
+    fun hiddenNamesNeverShowTheName() {
+        val notices = listOf(
+            Notice.MessageArrived("c1") to "Nuevo mensaje",
+            Notice.ContactUnpairedYou("c1", "Ana") to "Un contacto te ha eliminado de sus contactos",
+            Notice.IdentityChanged("c1") to "La identidad de un contacto ha cambiado",
+        )
+        for ((notice, title) in notices) {
+            val posted = Notifications.forNotice(context, notice, contactName = "Ana", hideNames = true)!!
+            val n = posted.notification
+            assertEquals(title, n.extras.getCharSequence(Notification.EXTRA_TITLE).toString())
+            assertFalse(n.visibleTexts().toString(), n.visibleTexts().any { it.contains("Ana") })
+            assertFalse(n.publicVersion.visibleTexts().any { it.contains("Ana") })
+            assertEquals(Notification.VISIBILITY_PRIVATE, n.visibility)
+            assertEquals("c1", posted.tag)
+        }
+        // Sin ocultar, el nombre sí aparece (en la versión privada).
+        val shown = Notifications.forNotice(context, Notice.ContactUnpairedYou("c1", "Ana"), contactName = null, hideNames = false)!!
+        assertTrue(shown.notification.visibleTexts().any { it.contains("Ana") })
     }
 
     @Test

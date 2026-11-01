@@ -132,7 +132,13 @@ class InMemorySettingsRepository(initial: AppSettings = AppSettings()) : Setting
         emitAll(state)
     }
 
-    override suspend fun get(): AppSettings = state.value
+    /** Hace fallar [get] (como una lectura del archivo que falla). */
+    @Volatile var getFailure: Exception? = null
+
+    override suspend fun get(): AppSettings {
+        getFailure?.let { throw it }
+        return state.value
+    }
 
     /** Hace fallar [update] sin guardar nada (como una escritura del archivo que falla). */
     @Volatile var writeFailure: Exception? = null

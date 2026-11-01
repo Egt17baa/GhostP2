@@ -391,6 +391,135 @@ class GhostServiceTest {
         assertEquals(0, app.tor.wipeStateCalls.get())
     }
 
+    @Test
+    fun hiddenNamesSettingIsHonoured() {
+        shadowOf(app).grantPermissions(Manifest.permission.POST_NOTIFICATIONS)
+        runBlocking { app.storage.settings.update { it.copy(hideNotificationNames = true) } }
+        startService()
+        eventually { engine.status.value == EngineStatus.Online }
+
+        receiveMessage(name = "Ana")
+
+        eventually { messageNotifications().isNotEmpty() }
+        val n = messageNotifications().single()
+        assertEquals("Nuevo mensaje", n.extras.getCharSequence(Notification.EXTRA_TITLE).toString())
+        assertFalse(texts(n).any { it.contains("Ana") })
+    }
+
+    @Test
+    fun unreadableSettingsHideTheName() {
+        shadowOf(app).grantPermissions(Manifest.permission.POST_NOTIFICATIONS)
+        app.storage.settings.getFailure = IllegalStateException("ilegible")
+        startService()
+        eventually { engine.status.value == EngineStatus.Online }
+
+        receiveMessage(name = "Ana")
+
+        eventually { messageNotifications().isNotEmpty() }
+        assertFalse(texts(messageNotifications().single()).any { it.contains("Ana") })
+    }
+
+    @Test
+    fun openChatGetsNoMessageNotification() {
+        shadowOf(app).grantPermissions(Manifest.permission.POST_NOTIFICATIONS)
+        startService()
+        eventually { engine.status.value == EngineStatus.Online }
+
+        receiveMessage(name = "Ana", openChat = true)
+
+        Thread.sleep(300)
+        shadowOf(Looper.getMainLooper()).idle()
+        assertTrue(messageNotifications().isEmpty())
+    }
+
+    @Test
+    fun stickyRestartRethrowsOtherIllegalStateException() {
+        val service = Robolectric.buildService(GhostService::class.java).create().get()
+        service.enterForeground = { throw IllegalStateException("otro fallo") }
+
+        val thrown = runCatching { service.onStartCommand(null, Service.START_FLAG_RETRY, 1) }.exceptionOrNull()
+
+        assertTrue(thrown.toString(), thrown is IllegalStateException && thrown !is ForegroundServiceStartNotAllowedException)
+        assertEquals("otro fallo", thrown!!.message)
+    }
+
+    @Test
+    fun destroyLeavesTheForegroundState() {
+        val controller = startService()
+        eventually { engine.status.value == EngineStatus.Online }
+        assertTrue(controller.get().inForeground)
+
+        controller.destroy()
+
+        assertFalse(controller.get().inForeground)
+    }
+
+    @Test
+    fun bootStartNotAllowedInForegroundStopsAndAsksToOpenTheApp() {
+        shadowOf(app).grantPermissions(Manifest.permission.POST_NOTIFICATIONS)
+        val service = Robolectric.buildService(GhostService::class.java).create().get()
+        service.enterForeground = { throw ForegroundServiceStartNotAllowedException("segundo plano") }
+
+        service.onStartCommand(GhostService.startIntent(app, fromBoot = true), 0, 1) // no lanza
+
+        assertTrue(shadowOf(service).isStoppedBySelf)
+        assertTrue(networkCallbacks().isEmpty())
+        assertEquals(EngineStatus.Stopped, engine.status.value)
+        val titles = notificationManager().allNotifications.map { it.extras.getCharSequence(Notification.EXTRA_TITLE).toString() }
+        assertTrue(titles.toString(), "GhostP2 se ha detenido" in titles)
+    }
+
+    @Test
+    fun bootStartWithBrokenStorageAsksToOpenTheApp() {
+        shadowOf(app).grantPermissions(Manifest.permission.POST_NOTIFICATIONS)
+        app.storage.failure = StoreUnavailableException(IOException("x"))
+        val service = Robolectric.buildService(GhostService::class.java).create().get()
+
+        service.onStartCommand(GhostService.startIntent(app, fromBoot = true), 0, 1)
+
+        eventually { shadowOf(service).isStoppedBySelf }
+        val titles = notificationManager().allNotifications.map { it.extras.getCharSequence(Notification.EXTRA_TITLE).toString() }
+        assertTrue(titles.toString(), "GhostP2 se ha detenido" in titles)
+    }
+
+    /** Empareja con un contacto llamado [name] y espera a recibir un mensaje suyo (con su chat abierto si [openChat]). */
+    private fun receiveMessage(name: String, openChat: Boolean = false) {
+        EngineHarness(1, network = app.network).use { peer ->
+            runBlocking {
+                peer.startAll()
+                val (peerInMine, mineInPeer) = pairWithPeer(app, peer, TIMEOUT)
+                engine.renameContact(peerInMine, name)
+                if (openChat) app.container.chatShown(peerInMine)
+                withTimeout(TIMEOUT) {
+                    while (engine.conversations.value[peerInMine].isNullOrEmpty()) {
+                        if (peer.engine(0).presence.value[mineInPeer] == Presence.ONLINE) {
+                            peer.engine(0).sendText(mineInPeer, SECRET)
+                        }
+                        delay(100)
+                    }
+                }
+                if (openChat) {
+                    // Cerrado el chat, los mensajes siguientes vuelven a notificarse.
+                    app.container.chatHidden(peerInMine)
+                    assertNull(app.container.foregroundChatId)
+                }
+            }
+        }
+    }
+
+    private fun messageNotifications() =
+        notificationManager().allNotifications.filter { it.channelId == Notifications.CHANNEL_MESSAGES }
+
+    private fun texts(n: Notification): List<String> {
+        val keys = listOf(
+            Notification.EXTRA_TITLE, Notification.EXTRA_TEXT, Notification.EXTRA_BIG_TEXT,
+            Notification.EXTRA_SUB_TEXT, Notification.EXTRA_INFO_TEXT, Notification.EXTRA_SUMMARY_TEXT,
+        )
+        return listOf(n, n.publicVersion).flatMap { m ->
+            keys.mapNotNull { m.extras.getCharSequence(it)?.toString() } + listOfNotNull(m.tickerText?.toString())
+        }
+    }
+
     private fun notificationManager() = shadowOf(app.getSystemService(NotificationManager::class.java))
 
     private companion object {

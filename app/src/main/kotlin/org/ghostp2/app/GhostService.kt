@@ -37,17 +37,22 @@ import org.ghostp2.engine.Notice
  * - Intent `null`: el sistema recrea el servicio tras matar el proceso (`START_STICKY`, regla R19);
  *   se comporta igual que [ACTION_START]. Si entonces falla el almacenamiento, se detiene y deja una
  *   notificación que pide abrir la app.
+ * - [ACTION_START] con [EXTRA_FROM_BOOT] (lo envía [BootReceiver] al encender el móvil, R20): como el
+ *   reinicio `START_STICKY`, sin nadie mirando la pantalla; si no puede pasar a primer plano o falla el
+ *   almacenamiento, se detiene y deja la notificación que pide abrir la app.
  * - [ACTION_STOP] (acción "Desconectar") o cualquier otra acción: detiene el motor y el servicio, que
  *   ya no vuelve solo (`stopSelfResult`: el sistema solo recrea servicios iniciados).
- * - Mientras existe, reenvía `engine.notices` a notificaciones sin contenido, y con el motor en `Error`
- *   la notificación fija pasa a "sin conexión" (con "Desconectar").
+ * - Mientras existe, reenvía `engine.notices` a notificaciones sin contenido (sin nombre con "Ocultar el
+ *   nombre del contacto"; sin aviso de mensaje para el chat abierto en primer plano,
+ *   [AppContainer.foregroundChatId]), y con el motor en `Error` la notificación fija pasa a "sin
+ *   conexión" (con "Desconectar").
  *
  * No crea Tor ni repositorios: todo es del [AppContainer] (uno por proceso). Si Tor falla con el motor en
  * marcha (regla R18) el motor queda en `Error` y el servicio sigue: la pantalla ofrece "Reintentar", que
  * vuelve a enviar [ACTION_START], y al volver la red se reinicia solo una vez (como mucho uno cada
- * [RECOVERY_SPACING_MILLIS]). Se detiene siempre con `stopSelfResult(último startId)`. No se arranca solo
- * al encender el móvil (spec §6.9: no hay receptor de `BOOT_COMPLETED`); `START_STICKY` solo cubre que
- * el sistema mate el proceso con GhostP2 activo.
+ * [RECOVERY_SPACING_MILLIS]). Se detiene siempre con `stopSelfResult(último startId)`. Solo se arranca al
+ * encender el móvil si el usuario lo activó en los ajustes (R20, desactivado por defecto; ver
+ * [BootReceiver]); `START_STICKY` cubre que el sistema mate el proceso con GhostP2 activo.
  */
 class GhostService : Service() {
     @VisibleForTesting
@@ -83,12 +88,17 @@ class GhostService : Service() {
             container.engine.notices.collect { notice ->
                 // Un fallo al notificar nunca cierra la app ni corta los avisos siguientes.
                 try {
-                    val name = when (notice) {
-                        is Notice.MessageArrived -> nameOf(notice.contactId)
-                        is Notice.IdentityChanged -> nameOf(notice.contactId)
+                    // El chat ya está a la vista: sin aviso de mensaje nuevo.
+                    if (notice is Notice.MessageArrived && notice.contactId == container.foregroundChatId) return@collect
+                    val hideNames = hideNames()
+                    val name = when {
+                        hideNames -> null
+                        notice is Notice.MessageArrived -> nameOf(notice.contactId)
+                        notice is Notice.IdentityChanged -> nameOf(notice.contactId)
                         else -> null
                     }
-                    Notifications.forNotice(this@GhostService, notice, name)?.let { Notifications.post(this@GhostService, it) }
+                    Notifications.forNotice(this@GhostService, notice, name, hideNames)
+                        ?.let { Notifications.post(this@GhostService, it) }
                 } catch (e: CancellationException) {
                     throw e
                 } catch (_: Exception) {
@@ -111,6 +121,16 @@ class GhostService : Service() {
             }
         }
     }
+
+    /** "Ocultar el nombre del contacto", leído en cada aviso; si no se puede leer, se oculta. */
+    private suspend fun hideNames(): Boolean =
+        try {
+            container.settings.get().hideNotificationNames
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            true
+        }
 
     private suspend fun nameOf(contactId: String): String? =
         try {
@@ -143,7 +163,8 @@ class GhostService : Service() {
         latestStartId = startId
         when {
             intent == null -> onStart(restarted = true)
-            intent.action == ACTION_START -> onStart(restarted = false)
+            // Al encender el móvil nadie mira la pantalla: igual que el reinicio STICKY.
+            intent.action == ACTION_START -> onStart(restarted = intent.getBooleanExtra(EXTRA_FROM_BOOT, false))
             else -> onStop() // ACTION_STOP (o un intent desconocido): nunca quedarse en marcha sin pedirlo.
         }
         return START_STICKY
@@ -155,8 +176,9 @@ class GhostService : Service() {
             try {
                 enterForeground(notification)
             } catch (e: IllegalStateException) {
-                // API 31+: un reinicio STICKY en segundo plano puede no tener permiso para pasar a primer
-                // plano. Sin motor ni NetworkCallback: se detiene y pide abrir la app (sin bucle de cierres).
+                // API 31+: un reinicio STICKY (o un arranque al encender el móvil) en segundo plano puede no
+                // tener permiso para pasar a primer plano. Sin motor ni NetworkCallback: se detiene y pide
+                // abrir la app (sin bucle de cierres). Cualquier otro IllegalStateException se relanza.
                 if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S || e !is ForegroundServiceStartNotAllowedException) throw e
                 generation++
                 runCatching { Notifications.postStopped(this) }
@@ -216,7 +238,14 @@ class GhostService : Service() {
         stopSelfResult(latestStartId)
     }
 
+    /** Si está en primer plano por un START (para las pruebas). */
+    @VisibleForTesting
+    internal val inForeground: Boolean get() = foreground
+
     override fun onDestroy() {
+        // Ya no hay primer plano: un cambio de estado del motor tardío no vuelve a llamar a startForeground.
+        foreground = false
+        generation++
         unregisterNetworkCallback()
         // Sin servicio no hay notificación fija: el motor no sigue en marcha a escondidas.
         container.stop()
@@ -253,8 +282,12 @@ class GhostService : Service() {
         const val ACTION_START = "org.ghostp2.app.action.START"
         const val ACTION_STOP = "org.ghostp2.app.action.STOP"
 
-        fun startIntent(context: Context): Intent =
+        /** Extra de [ACTION_START]: arranque al encender el móvil ([BootReceiver], R20). */
+        const val EXTRA_FROM_BOOT = "org.ghostp2.app.extra.FROM_BOOT"
+
+        fun startIntent(context: Context, fromBoot: Boolean = false): Intent =
             Intent(context, GhostService::class.java).setAction(ACTION_START)
+                .apply { if (fromBoot) putExtra(EXTRA_FROM_BOOT, true) }
 
         fun stopIntent(context: Context): Intent =
             Intent(context, GhostService::class.java).setAction(ACTION_STOP)

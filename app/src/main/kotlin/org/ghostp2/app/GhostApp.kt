@@ -11,6 +11,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
@@ -24,6 +25,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import org.ghostp2.app.lock.AppLock
 import org.ghostp2.app.lock.DeviceLock
 import org.ghostp2.app.photo.PhotoEncoder
@@ -177,7 +179,7 @@ class AppContainer internal constructor(
         StoredAppStorage(createRepositories(context.applicationContext)),
     )
 
-    private val appContext: Context = context.applicationContext
+    internal val appContext: Context = context.applicationContext
 
     /**
      * Scope del proceso (vive lo que la aplicación), con [SilentExceptionHandler]: el motor lo recibe y
@@ -199,6 +201,24 @@ class AppContainer internal constructor(
      * `onStart`/`onStop` y la raíz de la interfaz solo muestra la pantalla de bloqueo mientras dure.
      */
     val lock = AppLock()
+
+    /**
+     * Contacto cuyo chat está abierto y en primer plano (entre `onResume` y `onPause`), o `null`: el
+     * servicio no notifica sus mensajes nuevos, que ya se están viendo. Solo en memoria.
+     */
+    @Volatile
+    var foregroundChatId: String? = null
+        private set
+
+    /** El chat de [contactId] pasa a verse en primer plano. */
+    fun chatShown(contactId: String) {
+        synchronized(control) { foregroundChatId = contactId }
+    }
+
+    /** El chat de [contactId] deja de verse (si otro chat lo sustituyó ya, no cambia nada). */
+    fun chatHidden(contactId: String) {
+        synchronized(control) { if (foregroundChatId == contactId) foregroundChatId = null }
+    }
 
     /** Si el móvil tiene bloqueo de pantalla ([DeviceLock.available]); las pruebas lo sustituyen. */
     internal var deviceLockAvailable: (Context) -> Boolean = DeviceLock::available
@@ -380,6 +400,36 @@ class AppContainer internal constructor(
             } finally {
                 mutableStorage.update { StorageState.Unknown }
                 probeLocked()
+            }
+        }
+    }
+
+    /**
+     * "Borrar todo" de los ajustes (doble confirmación en la interfaz). Vacía la cola de fotos y, con el
+     * cerrojo del almacenamiento tomado: [MessengerEngine.wipeAll] (avisa a los contactos conectados,
+     * detiene el motor y borra identidad, contactos, claves, borrados pendientes y el estado de Tor),
+     * [SettingsRepository.wipe] (ajustes por defecto: `onboardingDone == false`, la raíz vuelve a la
+     * bienvenida), detiene el servicio y vuelve a comprobar el almacenamiento.
+     *
+     * El motor se borra antes de detener el servicio: [stop] cerraría las sesiones y los contactos no
+     * recibirían el aviso. Detener todo con el cerrojo aún tomado cancela un arranque pedido entretanto
+     * (espera el cerrojo en [checkStorage]), que si no crearía una identidad nueva tras el borrado.
+     * Lanza si falla el borrado del almacenamiento; aun así queda todo detenido.
+     */
+    suspend fun wipeAll() {
+        photos.clear()
+        storageLock.withLock {
+            try {
+                engine.wipeAll()
+                settings.wipe()
+            } finally {
+                withContext(NonCancellable) {
+                    stopEverything()
+                    foregroundChatId = null
+                    mutableLastDiagnostic.value = null
+                    mutableStorage.update { StorageState.Unknown }
+                    probeLocked()
+                }
             }
         }
     }

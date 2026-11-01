@@ -20,6 +20,8 @@
     <string name="notification_identity_changed_text">Vuelve a emparejar para seguir hablando</string>
     <string name="notification_contact_public">Aviso de un contacto</string>
     <string name="notification_unknown_contact">un contacto</string>
+    <string name="notification_unpaired_anonymous">Un contacto te ha eliminado de sus contactos</string>
+    <string name="notification_identity_changed_anonymous">La identidad de un contacto ha cambiado</string>
 
     <!-- Acciones comunes -->
     <string name="action_activate">Activar</string>
@@ -180,4 +182,49 @@
     <string name="lock_unlock">Desbloquear</string>
     <string name="lock_prompt_title">Desbloquear GhostP2</string>
     <string name="lock_disabled_no_device_lock">Tu móvil ya no tiene bloqueo de pantalla; se ha desactivado el bloqueo de GhostP2</string>
+    <!-- Ajustes -->
+    <string name="settings_title">Ajustes</string>
+    <string name="settings_section_security">Seguridad</string>
+    <string name="settings_lock">Bloqueo con huella o PIN</string>
+    <string name="settings_lock_needs_device_lock">Configura un bloqueo de pantalla en el móvil</string>
+    <string name="settings_lock_after">Bloquear tras</string>
+    <string name="settings_lock_after_0">Inmediatamente</string>
+    <string name="settings_lock_after_1">1 min</string>
+    <string name="settings_lock_after_5">5 min</string>
+    <string name="settings_lock_after_15">15 min</string>
+    <string name="settings_section_notifications">Notificaciones</string>
+    <string name="settings_hide_names">Ocultar el nombre del contacto</string>
+    <string name="settings_hide_names_detail">Las notificaciones dirán solo «Nuevo mensaje».</string>
+    <string name="settings_section_photos">Fotos</string>
+    <string name="settings_photo_max">Tamaño máximo</string>
+    <string name="settings_photo_side">%1$d px</string>
+    <string name="settings_section_background">Segundo plano</string>
+    <string name="settings_battery_ok">El ahorro de batería de Android no limita a GhostP2.</string>
+    <string name="settings_battery_limited">El ahorro de batería de Android puede cortar la conexión con la pantalla apagada.</string>
+    <string name="settings_battery_allow">Permitir en segundo plano</string>
+    <string name="settings_start_on_boot">Activar GhostP2 al encender el móvil</string>
+    <string name="settings_start_on_boot_detail">Si no se puede activar solo, verás un aviso para abrir la app.</string>
+    <string name="settings_section_data">Datos</string>
+    <string name="settings_wipe">Borrar todo</string>
+    <string name="settings_wipe_confirm_title">¿Borrar todo?</string>
+    <string name="settings_wipe_confirm_text">Se borrarán tu identidad, tus contactos y sus claves. Se avisará a los contactos conectados. No se puede deshacer.</string>
+    <string name="settings_wipe_confirm">Borrar</string>
+    <string name="settings_wipe_confirm_again_title">¿Seguro?</string>
+    <string name="settings_wipe_confirm_again_text">Es la última confirmación: GhostP2 volverá a empezar desde la bienvenida.</string>
+    <string name="settings_wipe_confirm_again">Sí, borrar todo</string>
+    <string name="settings_wiping">Borrando…</string>
+    <string name="settings_wipe_failed">No se pudo borrar todo. Vuelve a intentarlo.</string>
+    <string name="settings_save_failed">No se pudo guardar el ajuste</string>
+    <string name="settings_section_about">Acerca de</string>
+    <string name="settings_version">Versión %1$s</string>
+    <string name="settings_license">Licencia Apache-2.0</string>
+    <string name="settings_my_onion">Mi dirección: %1$s</string>
+    <string name="settings_my_onion_none">Mi dirección: todavía no publicada</string>
+    <string name="settings_diagnostic_none">Último aviso de diagnóstico: ninguno</string>
+    <string name="settings_diagnostic_publication">Último aviso de diagnóstico: Tor no pudo actualizar la publicación de tu dirección</string>
+    <plurals name="settings_diagnostic_client_auth">
+        <item quantity="one">Último aviso de diagnóstico: no se pudo registrar en Tor la autorización de %1$d contacto</item>
+        <item quantity="many">Último aviso de diagnóstico: no se pudo registrar en Tor la autorización de %1$d contactos</item>
+        <item quantity="other">Último aviso de diagnóstico: no se pudo registrar en Tor la autorización de %1$d contactos</item>
+    </plurals>
 </resources>
