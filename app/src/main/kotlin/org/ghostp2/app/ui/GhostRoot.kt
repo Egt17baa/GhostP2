@@ -156,6 +156,8 @@ private fun ReadyRoot(container: AppContainer, actions: ActivityActions) {
             val status by container.engine.status.collectAsStateWithLifecycle()
             val invitation by vm.invitation.collectAsStateWithLifecycle()
             val accept by vm.accept.collectAsStateWithLifecycle()
+            val pasted by vm.pasted.collectAsStateWithLifecycle()
+            val startFailed by container.startFailed.collectAsStateWithLifecycle()
             val paired by vm.pairedContactId.collectAsStateWithLifecycle()
             LaunchedEffect(paired) {
                 paired?.let { id ->
@@ -164,13 +166,17 @@ private fun ReadyRoot(container: AppContainer, actions: ActivityActions) {
                 }
             }
             AddContactScreen(
-                online = status == EngineStatus.Online,
+                status = status,
                 invitation = invitation,
                 accept = accept,
+                pasted = pasted,
+                onPastedChange = vm::setPasted,
                 onCreateInvitation = vm::createInvitation,
                 onAccept = vm::accept,
+                // Si el almacenamiento falla, la raíz pasa a StorageErrorScreen (el aviso visible).
                 onActivate = { ui.launch { if (container.checkStorage() == StorageState.Ok) actions.activate() } },
                 onBack = { navController.popBackStack() },
+                startFailed = startFailed,
             )
         }
         composable(Routes.NAME) { entry ->
@@ -179,11 +185,19 @@ private fun ReadyRoot(container: AppContainer, actions: ActivityActions) {
             val safetyNumber by vm.safetyNumber.collectAsStateWithLifecycle()
             val error by vm.error.collectAsStateWithLifecycle()
             val saved by vm.saved.collectAsStateWithLifecycle()
+            val saving by vm.saving.collectAsStateWithLifecycle()
+            val name by vm.name.collectAsStateWithLifecycle()
+            val verified by vm.verified.collectAsStateWithLifecycle()
             LaunchedEffect(saved) { if (saved) navController.leaveNaming(id) }
             NameContactScreen(
                 safetyNumber = safetyNumber,
                 error = error,
-                onSave = { name, verified -> vm.save(name, verified) },
+                name = name,
+                onNameChange = vm::setName,
+                verified = verified,
+                onVerifiedChange = vm::setVerified,
+                saving = saving,
+                onSave = { vm.save(name, verified) },
                 onLater = { navController.leaveNaming(id) },
             )
         }

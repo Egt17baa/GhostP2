@@ -3,7 +3,19 @@ package org.ghostp2.app.ui.pairing
 import android.content.ClipDescription
 import android.content.ClipboardManager
 import android.content.Context
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalTextToolbar
+import androidx.compose.ui.platform.TextToolbar
+import androidx.compose.ui.platform.TextToolbarStatus
+import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.test.SemanticsMatcher
+import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertIsOn
@@ -13,11 +25,17 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.longClick
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.performTouchInput
 import org.ghostp2.app.R
 import org.ghostp2.app.TestGhostApp
+import org.ghostp2.engine.EngineErrorKind
+import org.ghostp2.engine.EngineStatus
 import org.ghostp2.engine.InvitationState
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -39,19 +57,50 @@ class AddContactScreenTest {
     private var activations = 0
     private val accepted = mutableListOf<String>()
 
-    private fun show(online: Boolean, invitation: InvitationState?, accept: AcceptUi = AcceptUi.Idle) {
+    /** Menús de texto pedidos (copiar, pegar…): con un texto seleccionable, una pulsación larga abre uno. */
+    private var textMenus = 0
+
+    private val toolbar = object : TextToolbar {
+        override val status get() = TextToolbarStatus.Hidden
+
+        override fun hide() {}
+
+        override fun showMenu(
+            rect: Rect,
+            onCopyRequested: (() -> Unit)?,
+            onPasteRequested: (() -> Unit)?,
+            onCutRequested: (() -> Unit)?,
+            onSelectAllRequested: (() -> Unit)?,
+        ) {
+            textMenus++
+        }
+    }
+
+    private fun show(
+        online: Boolean,
+        invitation: InvitationState?,
+        accept: AcceptUi = AcceptUi.Idle,
+        status: EngineStatus = if (online) EngineStatus.Online else EngineStatus.Stopped,
+        startFailed: Boolean = false,
+    ) {
         compose.setContent {
             context = LocalContext.current
-            AddContactScreen(
-                online = online,
-                invitation = invitation,
-                accept = accept,
-                onCreateInvitation = { creates++ },
-                onAccept = { accepted += it },
-                onActivate = { activations++ },
-                onBack = {},
-                clock = { NOW },
-            )
+            var pasted by remember { mutableStateOf("") }
+            CompositionLocalProvider(LocalTextToolbar provides toolbar) {
+                AddContactScreen(
+                    status = status,
+                    invitation = invitation,
+                    accept = accept,
+                    pasted = pasted,
+                    onPastedChange = { pasted = it },
+                    onCreateInvitation = { creates++ },
+                    onAccept = { accepted += it },
+                    onActivate = { activations++ },
+                    onBack = {},
+                    startFailed = startFailed,
+                    clock = { NOW },
+                )
+            }
         }
     }
 
@@ -73,6 +122,48 @@ class AddContactScreenTest {
         // Marcada como sensible: Android 13+ no la muestra en la vista previa del portapapeles.
         assertEquals(true, clip.description.extras?.getBoolean(ClipDescription.EXTRA_IS_SENSITIVE))
         compose.onNodeWithText("Invitación copiada").assertExists()
+    }
+
+    @Test
+    fun invitationTextIsNotSelectable() {
+        show(online = true, invitation = InvitationState.Waiting(INVITATION, NOW + 125_000))
+
+        val node = compose.onNodeWithText(INVITATION)
+        // R24: ni acción de copiar ni de selección en el nodo…
+        node.assert(SemanticsMatcher.keyNotDefined(SemanticsActions.CopyText))
+        node.assert(SemanticsMatcher.keyNotDefined(SemanticsActions.SetSelection))
+        node.assert(SemanticsMatcher.keyNotDefined(SemanticsActions.OnLongClick))
+        // …y una pulsación larga no selecciona nada ni abre el menú de copiar.
+        node.performTouchInput { longClick() }
+        compose.waitForIdle()
+        assertEquals(0, textMenus)
+        assertNull(context!!.getSystemService(ClipboardManager::class.java).primaryClip)
+    }
+
+    @Test
+    fun startingShowsConnectingInsteadOfActivate() {
+        show(online = false, invitation = null, status = EngineStatus.StartingTor(40))
+
+        compose.onNodeWithText("Conectando a la red Tor…", substring = true).assertExists()
+        compose.onAllNodesWithText("Activa GhostP2 para añadir contactos").assertCountEquals(0)
+        compose.onAllNodesWithText("Activar").assertCountEquals(0)
+        assertEquals(0, creates)
+    }
+
+    @Test
+    fun failedStartShowsErrorAndRetry() {
+        show(online = false, invitation = null, startFailed = true)
+        compose.onNodeWithText("Error inesperado").assertExists()
+        compose.onNodeWithText("Reintentar").performClick()
+        assertEquals(1, activations)
+    }
+
+    @Test
+    fun storageErrorShowsErrorAndRetry() {
+        show(online = false, invitation = null, status = EngineStatus.Error("x", EngineErrorKind.STORAGE))
+        compose.onNodeWithText("No se pudieron leer o guardar tus datos cifrados").assertExists()
+        compose.onNodeWithText("Reintentar").performClick()
+        assertEquals(1, activations)
     }
 
     @Test
@@ -140,13 +231,20 @@ class AddContactScreenTest {
 
     @Test
     fun nameScreenShowsSafetyNumberAndSaves() {
-        val saves = mutableListOf<Pair<String, Boolean>>()
+        var saves = 0
         var later = 0
+        var name by mutableStateOf("")
+        var verified by mutableStateOf(false)
         compose.setContent {
             NameContactScreen(
                 safetyNumber = "12345 67890 11111 22222 33333 44444",
                 error = null,
-                onSave = { name, verified -> saves += name to verified },
+                name = name,
+                onNameChange = { name = it },
+                verified = verified,
+                onVerifiedChange = { verified = it },
+                saving = false,
+                onSave = { saves++ },
                 onLater = { later++ },
             )
         }
@@ -157,16 +255,27 @@ class AddContactScreenTest {
         compose.onNodeWithText("Hemos comprobado que coincide").performClick()
         compose.onNodeWithText("Hemos comprobado que coincide").assertIsOn()
         compose.onNodeWithText("Guardar").performClick()
-        assertEquals(listOf("Ana" to true), saves)
+        assertEquals(1, saves)
+        assertEquals("Ana", name)
+        assertTrue(verified)
 
         compose.onNodeWithText("Más tarde").performClick()
         assertEquals(1, later)
     }
 
     @Test
+    fun nameScreenWhileSavingDisablesButtons() {
+        compose.setContent {
+            NameContactScreen("12345 67890 11111 22222 33333 44444", null, "Ana", {}, false, {}, saving = true, onSave = {}, onLater = {})
+        }
+        compose.onNodeWithText("Guardar").assertIsNotEnabled()
+        compose.onNodeWithText("Más tarde").assertIsNotEnabled()
+    }
+
+    @Test
     fun nameScreenShowsError() {
         compose.setContent {
-            NameContactScreen(safetyNumber = null, error = R.string.name_error_blank, onSave = { _, _ -> }, onLater = {})
+            NameContactScreen(null, R.string.name_error_blank, "", {}, false, {}, saving = false, onSave = {}, onLater = {})
         }
         compose.onNodeWithText("Escribe un nombre").assertExists()
     }

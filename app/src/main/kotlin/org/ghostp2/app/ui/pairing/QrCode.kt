@@ -14,7 +14,10 @@ import com.google.zxing.qrcode.decoder.ErrorCorrectionLevel
  * guardan en disco, en la caché ni en el estado guardado, y nunca se registran).
  */
 object QrCode {
-    /** Matriz `sizePx`×`sizePx` de [text] con corrección `M` y margen de 2 módulos. */
+    /**
+     * Matriz de [text] con corrección `M` y margen de 2 módulos, de `sizePx`×`sizePx` como mínimo:
+     * con `0`, el tamaño nativo (un elemento por módulo, sin escalar).
+     */
     fun encode(text: String, sizePx: Int): BitMatrix =
         QRCodeWriter().encode(
             text,
@@ -28,7 +31,11 @@ object QrCode {
             ),
         )
 
-    /** Bitmap en negro sobre blanco, un píxel por punto de [matrix] (también en tema oscuro, para leerlo). */
+    /**
+     * Bitmap en negro sobre blanco con un píxel por elemento de [matrix] (también en tema oscuro, para
+     * leerlo). Con la matriz nativa es un píxel por módulo: quien lo dibuja lo amplía sin suavizar
+     * (`FilterQuality.None`).
+     */
     fun toImageBitmap(matrix: BitMatrix): ImageBitmap {
         val width = matrix.width
         val height = matrix.height
@@ -39,7 +46,6 @@ object QrCode {
         }
         val bitmap = createBitmap(width, height)
         bitmap.setPixels(pixels, 0, width, 0, 0, width, height)
-        pixels.fill(0)
         return bitmap.asImageBitmap()
     }
 

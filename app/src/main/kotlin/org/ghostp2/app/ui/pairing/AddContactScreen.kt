@@ -11,7 +11,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -39,7 +38,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
@@ -48,32 +46,40 @@ import kotlinx.coroutines.delay
 import org.ghostp2.app.R
 import org.ghostp2.app.ui.GhostTextField
 import org.ghostp2.app.ui.copySensitive
+import org.ghostp2.engine.EngineErrorKind
+import org.ghostp2.engine.EngineStatus
 import org.ghostp2.engine.InvitationState
 
 /**
  * Añadir contacto, con tres pestañas: "Mi código" (QR y texto de [invitation], "Caduca en mm:ss",
  * "Copiar", "Compartir" y "Crear otra" al caducar, cancelarse o fallar), "Escanear" ([QrScanner],
- * que acepta al leer y pasa a "Pegar") y "Pegar" ([GhostTextField] y "Aceptar", con el estado
- * [accept]). Sin el motor [online]: "Activa GhostP2 para añadir contactos" y "Activar".
+ * que acepta al leer y pasa a "Pegar") y "Pegar" ([GhostTextField] con [pasted] y "Aceptar", con
+ * el estado [accept]). Sin el motor `Online` ([status]): parado, "Activa GhostP2 para añadir
+ * contactos" y "Activar"; arrancando, "Conectando a la red Tor…"; con error (o [startFailed]), el
+ * aviso del error y "Reintentar" ([onActivate] en los dos casos).
  *
- * Con el motor `Online` y sin invitación (o cancelada al parar el motor) se pide una con
- * [onCreateInvitation]. La pestaña elegida y el texto pegado solo viven en la composición (nada
- * guardable): el texto lleva el secreto de la invitación. [clock] es el reloj de pared de la cuenta atrás.
+ * El texto de la invitación no se puede seleccionar (R24): solo se copia con "Copiar", marcado como
+ * sensible. Con el motor `Online` y sin invitación (o cancelada al parar el motor) se pide una con
+ * [onCreateInvitation]. [pasted] lo guarda el ViewModel en memoria; la pestaña elegida solo vive en la
+ * composición (nada guardable). [clock] es el reloj de pared de la cuenta atrás.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AddContactScreen(
-    online: Boolean,
+    status: EngineStatus,
     invitation: InvitationState?,
     accept: AcceptUi,
+    pasted: String,
+    onPastedChange: (String) -> Unit,
     onCreateInvitation: () -> Unit,
     onAccept: (String) -> Unit,
     onActivate: () -> Unit,
     onBack: () -> Unit,
+    startFailed: Boolean = false,
     clock: () -> Long = System::currentTimeMillis,
 ) {
     var tab by remember { mutableIntStateOf(TAB_MINE) }
-    var pasted by remember { mutableStateOf("") }
+    val online = status == EngineStatus.Online
 
     LaunchedEffect(online) {
         if (online && (invitation == null || invitation == InvitationState.Cancelled)) onCreateInvitation()
@@ -93,10 +99,7 @@ fun AddContactScreen(
     ) { padding ->
         Column(Modifier.padding(padding).fillMaxSize()) {
             if (!online) {
-                Centered {
-                    Text(stringResource(R.string.add_not_online), textAlign = TextAlign.Center)
-                    Button(onClick = onActivate) { Text(stringResource(R.string.action_activate)) }
-                }
+                NotOnline(status, startFailed, onActivate)
                 return@Column
             }
             PrimaryTabRow(selectedTabIndex = tab) {
@@ -114,9 +117,27 @@ fun AddContactScreen(
                     },
                     onUsePaste = { tab = TAB_PASTE },
                 )
-                else -> Paste(pasted, { pasted = it }, accept, onAccept)
+                else -> Paste(pasted, onPastedChange, accept, onAccept)
             }
         }
+    }
+}
+
+/** Motor no `Online`: qué pasa y, salvo mientras arranca, cómo activarlo (o reintentar). */
+@Composable
+private fun NotOnline(status: EngineStatus, startFailed: Boolean, onActivate: () -> Unit) {
+    val retry = stringResource(R.string.action_retry)
+    val (message, action) = when {
+        startFailed -> stringResource(R.string.banner_unexpected) to retry
+        status is EngineStatus.StartingTor -> stringResource(R.string.banner_starting, status.percent) to null
+        status is EngineStatus.Error && status.kind == EngineErrorKind.STORAGE -> stringResource(R.string.banner_storage_error) to retry
+        status is EngineStatus.Error -> stringResource(R.string.banner_tor_error) to retry
+        else -> stringResource(R.string.add_not_online) to stringResource(R.string.action_activate)
+    }
+    Centered {
+        if (action == null) CircularProgressIndicator()
+        Text(message, textAlign = TextAlign.Center)
+        action?.let { Button(onClick = onActivate) { Text(it) } }
     }
 }
 
@@ -139,9 +160,8 @@ private fun MyCode(invitation: InvitationState?, onCreateInvitation: () -> Unit,
 @Composable
 private fun Waiting(waiting: InvitationState.Waiting, clock: () -> Long) {
     val context = LocalContext.current
-    val sizePx = with(LocalDensity.current) { QR_SIZE.roundToPx() }
-    // Solo en memoria: ni en disco ni en el estado guardado.
-    val qr = remember(waiting.text, sizePx) { QrCode.toImageBitmap(QrCode.encode(waiting.text, sizePx)) }
+    // Un píxel por módulo (tamaño nativo); el Image lo amplía sin suavizar. Solo en memoria.
+    val qr = remember(waiting.text) { QrCode.toImageBitmap(QrCode.encode(waiting.text, 0)) }
     var now by remember { mutableLongStateOf(clock()) }
     LaunchedEffect(waiting.expiresAtMillis) {
         while (true) {
@@ -165,9 +185,8 @@ private fun Waiting(waiting: InvitationState.Waiting, clock: () -> Long) {
         )
         Text(stringResource(R.string.add_expires_in, countdown(waiting.expiresAtMillis - now)))
         Text(stringResource(R.string.add_mine_hint), style = MaterialTheme.typography.bodySmall, textAlign = TextAlign.Center)
-        SelectionContainer {
-            Text(waiting.text, fontFamily = FontFamily.Monospace, textAlign = TextAlign.Center)
-        }
+        // Sin SelectionContainer (R24): copiar desde la selección no marcaría el portapapeles como sensible.
+        Text(waiting.text, fontFamily = FontFamily.Monospace, textAlign = TextAlign.Center)
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             Button(onClick = {
                 copySensitive(context, clipLabel, waiting.text)

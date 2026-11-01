@@ -4,17 +4,20 @@ import androidx.annotation.StringRes
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.ghostp2.app.AppContainer
 import org.ghostp2.app.R
 import org.ghostp2.engine.MAX_CONTACT_NAME_CHARS
 
 /**
  * Nombrar al contacto recién emparejado: muestra el número de seguridad y guarda el nombre y la marca
- * de verificado. El nombre escrito lo guarda la pantalla en memoria (nunca en estado guardable).
+ * de verificado. El nombre escrito y la casilla viven aquí, en memoria (sobreviven a un giro; nunca en
+ * estado guardable).
  */
 class NameContactViewModel(private val container: AppContainer, private val contactId: String) : ViewModel() {
     private val mutableSafetyNumber = MutableStateFlow<String?>(null)
@@ -32,7 +35,24 @@ class NameContactViewModel(private val container: AppContainer, private val cont
     /** El nombre y la verificación ya están guardados: la pantalla pasa al chat. */
     val saved: StateFlow<Boolean> = mutableSaved.asStateFlow()
 
-    private var saving = false
+    private val mutableName = MutableStateFlow("")
+    val name: StateFlow<String> = mutableName.asStateFlow()
+
+    private val mutableVerified = MutableStateFlow(false)
+    val verified: StateFlow<Boolean> = mutableVerified.asStateFlow()
+
+    private val mutableSaving = MutableStateFlow(false)
+
+    /** Guardando: "Guardar" y "Más tarde" quedan desactivados. */
+    val saving: StateFlow<Boolean> = mutableSaving.asStateFlow()
+
+    fun setName(value: String) {
+        mutableName.value = value
+    }
+
+    fun setVerified(value: Boolean) {
+        mutableVerified.value = value
+    }
 
     init {
         viewModelScope.launch {
@@ -60,19 +80,22 @@ class NameContactViewModel(private val container: AppContainer, private val cont
             return false
         }
         mutableError.value = null
-        if (saving) return true
-        saving = true
+        if (mutableSaving.value) return true
+        mutableSaving.value = true
         viewModelScope.launch {
             try {
-                container.engine.renameContact(contactId, trimmed)
-                container.engine.setVerified(contactId, verified)
+                // Una vez empezado, se termina aunque se salga de la pantalla (no se corta entre los dos pasos).
+                withContext(NonCancellable) {
+                    container.engine.renameContact(contactId, trimmed)
+                    container.engine.setVerified(contactId, verified)
+                }
                 mutableSaved.value = true
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 mutableError.value = R.string.name_error_save
             } finally {
-                saving = false
+                mutableSaving.value = false
             }
         }
         return true

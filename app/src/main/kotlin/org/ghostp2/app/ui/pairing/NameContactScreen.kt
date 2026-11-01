@@ -18,10 +18,6 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
@@ -34,21 +30,24 @@ import org.ghostp2.engine.MAX_CONTACT_NAME_CHARS
 
 /**
  * Tras emparejar: número de seguridad en 6 grupos (`null` ⇒ aún no se tiene o no se pudo calcular),
- * "Comparadlo por otro canal…", nombre, "Hemos comprobado que coincide", "Guardar" ([onSave] con el
- * nombre tal cual y la casilla) y "Más tarde" ([onLater]: se queda como "Contacto nuevo").
- * [error] es el id de cadena del ViewModel. El nombre y la casilla solo viven en la composición.
+ * "Comparadlo por otro canal…", nombre ([name]), "Hemos comprobado que coincide" ([verified]),
+ * "Guardar" ([onSave]) y "Más tarde" ([onLater]: se queda como "Contacto nuevo"). Con [saving] los dos
+ * botones quedan desactivados. [error] es el id de cadena del ViewModel, que guarda el nombre y la
+ * casilla en memoria.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun NameContactScreen(
     safetyNumber: String?,
     error: Int?,
-    onSave: (name: String, verified: Boolean) -> Unit,
+    name: String,
+    onNameChange: (String) -> Unit,
+    verified: Boolean,
+    onVerifiedChange: (Boolean) -> Unit,
+    saving: Boolean,
+    onSave: () -> Unit,
     onLater: () -> Unit,
 ) {
-    var name by remember { mutableStateOf("") }
-    var verified by remember { mutableStateOf(false) }
-
     Scaffold(topBar = { TopAppBar(title = { Text(stringResource(R.string.name_title)) }) }) { padding ->
         Column(
             Modifier.padding(padding).fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
@@ -63,13 +62,13 @@ fun NameContactScreen(
             Text(stringResource(R.string.name_safety_compare))
             GhostTextField(
                 value = name,
-                onValueChange = { name = it },
+                onValueChange = onNameChange,
                 modifier = Modifier.fillMaxWidth(),
                 label = stringResource(R.string.name_label),
                 singleLine = true,
             )
             Row(
-                Modifier.fillMaxWidth().toggleable(value = verified, role = Role.Checkbox, onValueChange = { verified = it }),
+                Modifier.fillMaxWidth().toggleable(value = verified, role = Role.Checkbox, onValueChange = onVerifiedChange),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Checkbox(checked = verified, onCheckedChange = null)
@@ -80,8 +79,8 @@ fun NameContactScreen(
                 Text(stringResource(it, MAX_CONTACT_NAME_CHARS), color = MaterialTheme.colorScheme.error)
             }
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                Button(onClick = { onSave(name, verified) }) { Text(stringResource(R.string.name_save)) }
-                TextButton(onClick = onLater) { Text(stringResource(R.string.name_later)) }
+                Button(onClick = onSave, enabled = !saving) { Text(stringResource(R.string.name_save)) }
+                TextButton(onClick = onLater, enabled = !saving) { Text(stringResource(R.string.name_later)) }
             }
         }
     }

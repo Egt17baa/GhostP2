@@ -13,6 +13,7 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import org.ghostp2.app.TestGhostApp
+import org.ghostp2.engine.EngineStatus
 import org.ghostp2.engine.InvitationState
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -55,9 +56,11 @@ class QrScannerTest {
         compose.setContent {
             activity = LocalActivity.current
             AddContactScreen(
-                online = true,
+                status = EngineStatus.Online,
                 invitation = InvitationState.Preparing,
                 accept = AcceptUi.Idle,
+                pasted = "",
+                onPastedChange = {},
                 onCreateInvitation = {},
                 onAccept = {},
                 onActivate = {},

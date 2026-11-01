@@ -1,7 +1,10 @@
 package org.ghostp2.app.ui
 
 import androidx.compose.material3.Text
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.ExperimentalTestApi
+import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasText
@@ -10,14 +13,15 @@ import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
-import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.ghostp2.app.StorageState
 import org.ghostp2.app.TestGhostApp
 import org.ghostp2.data.StoreCorruptedException
@@ -26,6 +30,7 @@ import org.ghostp2.engine.AcceptResult
 import org.ghostp2.engine.EngineErrorKind
 import org.ghostp2.engine.EngineHarness
 import org.ghostp2.engine.EngineStatus
+import org.ghostp2.engine.InvitationState
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -348,6 +353,53 @@ class GhostRootTest {
         waitForText("Aún no tienes contactos")
         compose.waitUntil(TIMEOUT) { app.network.published.value.values.none { !it.requiresClientAuth } }
     }
+
+    @Test
+    fun acceptingFromPasteNamesAndRemovesOwnInvitation() {
+        show()
+        waitForText("Aún no tienes contactos")
+        compose.onNodeWithText("Activar").performClick()
+        compose.waitUntil(TIMEOUT) { container.engine.status.value == EngineStatus.Online }
+        compose.onNodeWithContentDescription("Añadir contacto").performClick()
+        val invitation = hasText("ghostp2:", substring = true)
+        compose.waitUntilAtLeastOneExists(invitation, PAIR_TIMEOUT)
+        val mine = compose.onNode(invitation).fetchSemanticsNode().config[SemanticsProperties.Text].single().text
+            .removePrefix("ghostp2:").substringBefore('.')
+        assertTrue(mine in app.network.published.value)
+
+        EngineHarness(1, network = app.network).use { peer ->
+            runBlocking { peer.startAll() }
+            val handle = peer.engine(0).createInvitation()
+            val theirs = runBlocking { withTimeout(PAIR_TIMEOUT) { handle.state.first { it is InvitationState.Waiting } } }
+                as InvitationState.Waiting
+
+            compose.onNode(hasText("Pegar") and hasRole(Role.Tab)).performClick()
+            compose.onNodeWithText("Invitación").performTextInput(theirs.text)
+            compose.onNodeWithText("Aceptar").performClick()
+
+            // Emparejado aceptando: a nombrar, y "Añadir" (con mi invitación) ha salido de la pila.
+            compose.waitUntilAtLeastOneExists(hasText("Comparadlo por otro canal (en persona o por llamada)"), PAIR_TIMEOUT)
+            compose.waitUntil(TIMEOUT) { mine !in app.network.published.value }
+            compose.onNodeWithText("Más tarde").performClick()
+            waitForText("Contacto nuevo")
+        }
+    }
+
+    @Test
+    fun activateFromAddWithFailingStorageShowsStorageError() {
+        show()
+        waitForText("Aún no tienes contactos")
+        compose.onNodeWithText("Añadir contacto").performClick()
+        waitForText("Activa GhostP2 para añadir contactos")
+
+        app.storage.failure = StoreUnavailableException(IOException("x"))
+        compose.onNodeWithText("Activar").performClick()
+
+        waitForText("No se pudo acceder a tus datos cifrados")
+        assertEquals(0, activations)
+    }
+
+    private fun hasRole(role: Role) = SemanticsMatcher.expectValue(SemanticsProperties.Role, role)
 
     private companion object {
         const val PAIR_TIMEOUT = 30_000L

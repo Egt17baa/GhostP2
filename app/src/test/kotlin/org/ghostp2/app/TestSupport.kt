@@ -3,12 +3,15 @@ package org.ghostp2.app
 import android.content.ComponentName
 import android.os.Looper
 import androidx.activity.ComponentActivity
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.updateAndGet
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import org.ghostp2.data.AppSettings
 import org.ghostp2.data.SettingsRepository
@@ -46,8 +49,9 @@ class TestGhostApp : GhostApp() {
 
 /**
  * Almacenamiento en memoria; [failure] hace fallar la lectura de la identidad (como un archivo ilegible),
- * [saveFailure] solo su escritura (la comprobación pasa, pero el motor no puede guardar la identidad) y
- * [contactsFailure] el flujo de contactos al empezar a recogerlo.
+ * [saveFailure] solo su escritura (la comprobación pasa, pero el motor no puede guardar la identidad),
+ * [contactsFailure] el flujo de contactos al empezar a recogerlo y [contactWriteDelayMillis] retrasa
+ * cada escritura de contacto.
  */
 class TestStorage : AppStorage {
     @Volatile var failure: Exception? = null
@@ -76,10 +80,19 @@ class TestStorage : AppStorage {
 
     private val memoryContacts = InMemoryContactRepository()
 
+    /** Retraso de cada escritura de contacto (para cancelar a mitad de un guardado). */
+    @Volatile var contactWriteDelayMillis = 0L
+
     override val contacts: ContactRepository = object : ContactRepository by memoryContacts {
         override val contacts: Flow<List<Contact>> = flow {
             contactsFailure?.let { throw it }
             emitAll(memoryContacts.contacts)
+        }
+
+        override suspend fun upsert(contact: Contact) {
+            // Fuera del hilo principal: en Robolectric su reloj no avanza solo.
+            if (contactWriteDelayMillis > 0) withContext(Dispatchers.Default) { delay(contactWriteDelayMillis) }
+            memoryContacts.upsert(contact)
         }
     }
 

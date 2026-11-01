@@ -57,6 +57,7 @@ class NameContactViewModelTest {
 
             assertTrue(vm.save("  Ana  ", verified = true))
             eventually(TIMEOUT) { vm.saved.value }
+            assertFalse(vm.saving.value)
             assertEquals("Ana", stored(id).name)
             assertTrue(stored(id).verified)
             assertNull(vm.error.value)
@@ -87,12 +88,36 @@ class NameContactViewModelTest {
     }
 
     @Test
+    fun nameAndCheckboxLiveInTheViewModel() {
+        runBlocking { app.storage.contacts.upsert(contact("c1")) }
+        val vm = viewModel("c1")
+        vm.setName("Ana")
+        vm.setVerified(true)
+        // Otra pantalla (p. ej. tras girar) obtiene el mismo ViewModel con lo escrito.
+        assertEquals("Ana", viewModel("c1").name.value)
+        assertTrue(viewModel("c1").verified.value)
+    }
+
+    @Test
+    fun savingFlagAndSaveSurvivesLeaving() {
+        runBlocking { app.storage.contacts.upsert(contact("c1")) }
+        val vm = viewModel("c1")
+        app.storage.contactWriteDelayMillis = 300
+        assertTrue(vm.save("Ana", verified = true))
+        assertTrue(vm.saving.value)
+        // Salir a mitad (el ViewModel se destruye): el guardado termina igualmente, los dos pasos.
+        store.clear()
+        eventually(TIMEOUT) { stored("c1").name == "Ana" && stored("c1").verified }
+    }
+
+    @Test
     fun saveFailureShowsError() {
         // Contacto que no existe: el motor lanza al renombrar; no se navega.
         val vm = viewModel("no-existe")
         assertTrue(vm.save("Ana", verified = false))
         eventually(TIMEOUT) { vm.error.value == R.string.name_error_save }
         assertFalse(vm.saved.value)
+        assertFalse(vm.saving.value)
     }
 
     private companion object {
