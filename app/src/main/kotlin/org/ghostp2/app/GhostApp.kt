@@ -245,6 +245,12 @@ class AppContainer internal constructor(
     }
 
     private val mutableStorage = MutableStateFlow<StorageState>(StorageState.Unknown)
+
+    /** Primera espera antes de volver a leer los ajustes del bloqueo (después 2, 4 y 8 veces más). */
+    @Volatile internal var lockRetryMillis = LOCK_RETRY_MILLIS
+
+    /** Cuántas comprobaciones del almacenamiento han terminado (para reintentar leer los ajustes del bloqueo). */
+    private val storageChecks = MutableStateFlow(0)
     val storage: StateFlow<StorageState> = mutableStorage.asStateFlow()
 
     private val mutableStartFailed = MutableStateFlow(false)
@@ -264,12 +270,19 @@ class AppContainer internal constructor(
     val lastDiagnostic: StateFlow<Notice?> = mutableLastDiagnostic.asStateFlow()
 
     init {
-        // Si los ajustes no se pueden leer, se reintenta con esperas crecientes; mientras, el bloqueo
-        // sigue sin configurar (cerrado) y la raíz muestra la carga o el error del almacenamiento.
+        // Si los ajustes no se pueden leer, se reintenta [LOCK_SETTINGS_RETRIES] veces con esperas
+        // crecientes y, después, solo tras cada nueva comprobación del almacenamiento ("Reintentar",
+        // "Activar"…). Mientras, el bloqueo sigue sin configurar (cerrado) y la raíz muestra la carga o
+        // el error del almacenamiento.
         scope.launch {
             settings.settings
                 .retryWhen { _, attempt ->
-                    delay(LOCK_RETRY_MILLIS shl attempt.coerceAtMost(4L).toInt())
+                    if (attempt < LOCK_SETTINGS_RETRIES) {
+                        delay(lockRetryMillis shl attempt.toInt())
+                    } else {
+                        val seen = storageChecks.value
+                        storageChecks.first { it > seen }
+                    }
                     true
                 }
                 .collect { lock.configure(it.lockEnabled, it.lockAfterMinutes) }
@@ -313,6 +326,7 @@ class AppContainer internal constructor(
             StorageState.Failed(nextStreak())
         }
         mutableStorage.value = result
+        storageChecks.update { it + 1 }
         return result
     }
 
@@ -475,5 +489,8 @@ class AppContainer internal constructor(
     }
 }
 
-/** Primera espera antes de volver a leer los ajustes para el bloqueo (después 2, 4, 8 y 16 s). */
+/** Valor por defecto de [AppContainer.lockRetryMillis]. */
 private const val LOCK_RETRY_MILLIS = 1_000L
+
+/** Reintentos con espera; agotados, solo se reintenta tras otra comprobación del almacenamiento. */
+private const val LOCK_SETTINGS_RETRIES = 4L

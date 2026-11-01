@@ -16,6 +16,7 @@ import org.ghostp2.app.ui.GhostRoot
 import org.ghostp2.engine.Contact
 import org.ghostp2.engine.ContactStatus
 import org.junit.After
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -24,6 +25,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
+import java.io.IOException
 
 @OptIn(ExperimentalTestApi::class)
 @RunWith(RobolectricTestRunner::class)
@@ -121,9 +123,10 @@ class LockRootTest {
     @Test
     fun nothingSensitiveWhileSettingsLoad() {
         lockEnabledWithContact()
-        container.deviceLockAvailable = { true }
+        // Antes de crear el contenedor: también retiene la lectura del bloqueo.
         val gate = CompletableDeferred<Unit>()
         app.storage.settings.emitGate = gate
+        container.deviceLockAvailable = { true }
         show()
 
         compose.waitUntil(TIMEOUT) { container.storage.value == StorageState.Ok }
@@ -135,9 +138,53 @@ class LockRootTest {
             compose.onAllNodesWithText("GhostP2 está bloqueado").assertCountEquals(0)
         }
 
+        // Al llegar los ajustes, fotograma a fotograma: ni un solo fotograma con la lista antes del bloqueo.
+        compose.mainClock.autoAdvance = false
         gate.complete(Unit)
-        compose.waitUntilAtLeastOneExists(hasText("GhostP2 está bloqueado"), TIMEOUT)
+        val deadline = System.currentTimeMillis() + TIMEOUT
+        var frames = 0
+        while (compose.onAllNodesWithText("GhostP2 está bloqueado").fetchSemanticsNodes().isEmpty()) {
+            assertNothingSensitive()
+            check(System.currentTimeMillis() < deadline) { "La pantalla de bloqueo no llegó en $frames fotogramas" }
+            compose.mainClock.advanceTimeByFrame()
+            frames++
+            Thread.sleep(1)
+        }
         assertNothingSensitive()
+        // Y en los siguientes tampoco.
+        repeat(10) {
+            compose.mainClock.advanceTimeByFrame()
+            assertNothingSensitive()
+        }
+        compose.mainClock.autoAdvance = true
+    }
+
+    @Test
+    fun settingsReachingTheRootBeforeTheLockShowNothing() {
+        lockEnabledWithContact()
+        // Antes de crear el contenedor (que empieza a leer los ajustes para el bloqueo al crearse).
+        val lockFeed = CompletableDeferred<Unit>()
+        app.storage.settings.offMainGate = lockFeed
+        container.deviceLockAvailable = { true }
+        compose.mainClock.autoAdvance = false
+        show()
+
+        // La raíz ya tiene los ajustes (bloqueo activado) y el bloqueo aún no: falla cerrado.
+        val deadline = System.currentTimeMillis() + TIMEOUT
+        while (compose.onAllNodesWithText("GhostP2 está bloqueado").fetchSemanticsNodes().isEmpty()) {
+            assertNothingSensitive()
+            check(System.currentTimeMillis() < deadline) { "La pantalla de bloqueo no llegó" }
+            compose.mainClock.advanceTimeByFrame()
+            Thread.sleep(1)
+        }
+        lockFeed.complete(Unit)
+        repeat(20) {
+            compose.mainClock.advanceTimeByFrame()
+            Thread.sleep(1)
+            assertNothingSensitive()
+        }
+        assertTrue(container.lock.locked.value)
+        compose.mainClock.autoAdvance = true
     }
 
     @Test
@@ -181,6 +228,23 @@ class LockRootTest {
         compose.onNodeWithText("Desbloquear").performClick()
         compose.waitUntilAtLeastOneExists(hasText("Ana"), TIMEOUT)
         compose.waitUntil(TIMEOUT) { runBlocking { !app.storage.settings.get().lockEnabled } }
+    }
+
+    @Test
+    fun settingsRetriesStopUntilStorageIsCheckedAgain() {
+        val settings = app.storage.settings
+        settings.failure = IOException("x")
+        container.lockRetryMillis = 1
+        // 1 lectura + 4 reintentos con espera; después, nada hasta otra comprobación del almacenamiento.
+        compose.waitUntil(TIMEOUT) { settings.collections.get() == 5 }
+        Thread.sleep(300)
+        assertEquals(5, settings.collections.get())
+        assertTrue(container.lock.locked.value)
+
+        settings.failure = null
+        runBlocking { container.checkStorage() }
+        compose.waitUntil(TIMEOUT) { !container.lock.locked.value }
+        assertEquals(6, settings.collections.get())
     }
 
     private companion object {

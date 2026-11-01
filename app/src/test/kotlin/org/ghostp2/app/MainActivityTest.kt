@@ -1,6 +1,8 @@
 package org.ghostp2.app
 
+import android.os.Looper
 import android.view.WindowManager.LayoutParams.FLAG_SECURE
+import androidx.appcompat.app.AlertDialog
 import androidx.fragment.app.FragmentActivity
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -11,6 +13,7 @@ import org.junit.runner.RunWith
 import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
@@ -30,6 +33,19 @@ class MainActivityTest {
         assertTrue(activity.window.attributes.flags and FLAG_SECURE != 0)
         // BiometricPrompt necesita una FragmentActivity.
         assertTrue(FragmentActivity::class.java.isInstance(activity))
+    }
+
+    /**
+     * En API 26-28, biometric 1.1.0 puede mostrar su `FingerprintDialogFragment`, un `AlertDialog` de
+     * AppCompat creado con la actividad: con un tema que no es AppCompat lanza al mostrarse y, como el
+     * bloqueo se pide solo al abrir, la app se cerraría en cada arranque.
+     */
+    @Test
+    @Config(sdk = [27])
+    fun themeSupportsAppCompatDialogs() {
+        val activity = Robolectric.buildActivity(MainActivity::class.java).setup().get()
+        AlertDialog.Builder(activity).setMessage("x").create().show()
+        shadowOf(Looper.getMainLooper()).idle()
     }
 
     @Test

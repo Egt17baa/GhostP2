@@ -7,8 +7,11 @@ import android.os.Bundle
 import android.view.WindowManager.LayoutParams.FLAG_SECURE
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
+import org.ghostp2.app.lock.LocalLockPrompt
+import org.ghostp2.app.lock.LockPrompt
 import org.ghostp2.app.ui.ActivityActions
 import org.ghostp2.app.ui.GhostRoot
 import org.ghostp2.app.ui.theme.GhostTheme
@@ -29,10 +32,20 @@ class MainActivity : FragmentActivity() {
     private val batteryExemption =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { }
 
+    /** El único `BiometricPrompt` de esta actividad (se crea en [onCreate]: necesita su ViewModelStore). */
+    internal lateinit var lockPrompt: LockPrompt
+        private set
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // Impide capturas de pantalla y miniaturas en recientes
         window.setFlags(FLAG_SECURE, FLAG_SECURE)
+        lockPrompt = LockPrompt(
+            this,
+            onSucceeded = container.lock::unlock,
+            // El diálogo dice que no hay bloqueo de pantalla: se comprueba antes de desactivar nada.
+            onNoDeviceLock = { if (!container.deviceLockAvailable(this)) container.disableLockForMissingDeviceLock() },
+        )
         val actions = ActivityActions(
             activate = ::activate,
             disconnect = ::disconnect,
@@ -41,7 +54,9 @@ class MainActivity : FragmentActivity() {
             },
             requestNotifications = ::requestNotifications,
         )
-        setContent { GhostTheme { GhostRoot(container, actions) } }
+        setContent {
+            CompositionLocalProvider(LocalLockPrompt provides lockPrompt) { GhostTheme { GhostRoot(container, actions) } }
+        }
     }
 
     override fun onStart() {

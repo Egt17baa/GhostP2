@@ -72,6 +72,9 @@ dependencies {
     implementation(libs.androidx.navigation.compose)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.androidx.biometric)
+    // El diálogo de huella de biometric 1.1.0 (API 26-28) es un AlertDialog de AppCompat: el tema de la
+    // app tiene que ser AppCompat (Theme.GhostP2).
+    implementation(libs.androidx.appcompat)
     implementation(libs.androidx.fragment)
     implementation(libs.androidx.camera.camera2)
     implementation(libs.androidx.camera.lifecycle)

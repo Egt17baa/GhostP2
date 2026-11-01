@@ -31,6 +31,7 @@ import org.ghostp2.engine.InMemoryIdentityRepository
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.robolectric.Shadows.shadowOf
+import java.util.concurrent.atomic.AtomicInteger
 
 /** Aplicación de pruebas: el mismo [GhostApp] con [FakeTor] y almacenamiento en memoria en su [AppContainer]. */
 class TestGhostApp : GhostApp() {
@@ -126,8 +127,19 @@ class InMemorySettingsRepository(initial: AppSettings = AppSettings()) : Setting
     /** Si no es nulo, el flujo [settings] no emite nada hasta que se complete (ajustes aún leyéndose). */
     @Volatile var emitGate: CompletableDeferred<Unit>? = null
 
+    /** Veces que se ha empezado a recoger [settings] (cada reintento cuenta). */
+    val collections = AtomicInteger()
+
+    /**
+     * Si no es nulo, solo quien recoge [settings] fuera del hilo principal (el bloqueo del contenedor)
+     * espera a que se complete: la interfaz recibe los ajustes antes que el bloqueo.
+     */
+    @Volatile var offMainGate: CompletableDeferred<Unit>? = null
+
     override val settings: Flow<AppSettings> = flow {
+        collections.incrementAndGet()
         emitGate?.await()
+        if (Looper.myLooper() != Looper.getMainLooper()) offMainGate?.await()
         failure?.let { throw it }
         emitAll(state)
     }

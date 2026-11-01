@@ -153,8 +153,8 @@ private fun ReadyRoot(container: AppContainer, actions: ActivityActions) {
     }
     if (locked) {
         if (current.lockEnabled) {
+            // El éxito del diálogo lo recibe el LockPrompt de la actividad (desbloquea container.lock).
             LockScreen(
-                onUnlocked = container.lock::unlock,
                 onNoDeviceLock = container::disableLockForMissingDeviceLock,
                 deviceLockAvailable = container.deviceLockAvailable,
             )

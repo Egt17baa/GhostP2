@@ -1,4 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.GhostP2" parent="android:Theme.Material.Light.NoActionBar" />
+    <!-- AppCompat: el diálogo de huella de biometric 1.1.0 (API 26-28) es un AlertDialog de AppCompat y,
+         con un tema de plataforma, cierra la app al pedir el desbloqueo. DayNight claro u oscuro según el
+         sistema, con los mismos fondos y barras que Theme.Material(.Light).NoActionBar. -->
+    <style name="Theme.GhostP2" parent="Theme.AppCompat.DayNight.NoActionBar" />
 </resources>
