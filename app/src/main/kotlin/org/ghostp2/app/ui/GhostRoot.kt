@@ -34,6 +34,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavController
+import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
@@ -80,16 +81,25 @@ class ActivityActions(
  * [StorageErrorScreen]; con los ajustes aún sin leer: solo la carga; con la app bloqueada: solo
  * [LockScreen] (ni la bienvenida ni el `NavHost` llegan a componerse); mientras `onboardingDone` sea
  * falso: la bienvenida; después, el `NavHost` (inicio en [Routes.CONTACTS]).
+ *
+ * [navController] es de la raíz, no de lo que se ve con el almacenamiento bien: al volver del bloqueo o
+ * de un error, el `NavHost` sigue con la misma pila en vez de dejar la anterior (y sus ViewModel)
+ * huérfana en memoria. Cuando el almacenamiento deja de estar bien (error, "Empezar de cero", "Borrar
+ * todo") la pila se vacía hasta la lista: lo que hubiera abierto puede no existir ya.
  */
 @Composable
-fun GhostRoot(container: AppContainer, actions: ActivityActions) {
+fun GhostRoot(container: AppContainer, actions: ActivityActions, navController: NavHostController = rememberNavController()) {
     val storage by container.storage.collectAsStateWithLifecycle()
     LaunchedEffect(Unit) { if (container.storage.value == StorageState.Unknown) container.checkStorage() }
+    val storageOk = storage == StorageState.Ok
+    LaunchedEffect(storageOk) {
+        if (!storageOk && navController.currentBackStackEntry != null) navController.popBackStack(Routes.CONTACTS, inclusive = false)
+    }
 
     Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         when (val state = storage) {
             StorageState.Unknown -> Loading()
-            StorageState.Ok -> ReadyRoot(container, actions)
+            StorageState.Ok -> ReadyRoot(container, actions, navController)
             StorageState.Corrupted, is StorageState.Unavailable, is StorageState.Failed ->
                 Box(Modifier.safeDrawingPadding()) { StorageErrorScreen(container, state) }
         }
@@ -104,7 +114,7 @@ fun GhostRoot(container: AppContainer, actions: ActivityActions) {
  * empezar; cada tanda agotada cuenta como un fallo de la racha (a la tercera se ofrece empezar de cero).
  */
 @Composable
-private fun ReadyRoot(container: AppContainer, actions: ActivityActions) {
+private fun ReadyRoot(container: AppContainer, actions: ActivityActions, navController: NavHostController) {
     var round by remember { mutableIntStateOf(0) }
     var exhaustedRounds by remember { mutableIntStateOf(0) }
     var exhausted by remember { mutableStateOf(false) }
@@ -132,9 +142,6 @@ private fun ReadyRoot(container: AppContainer, actions: ActivityActions) {
     val settings by settingsFlow.collectAsStateWithLifecycle(initialValue = null as AppSettings?)
     val locked by container.lock.locked.collectAsStateWithLifecycle()
     val missingDeviceLockNotice by container.lock.missingDeviceLockNotice.collectAsStateWithLifecycle()
-    // Fuera del bloqueo: al desbloquear, el NavHost vuelve con la misma pila (y sus ViewModel) en vez de
-    // dejar la anterior huérfana en memoria.
-    val navController = rememberNavController()
     if (exhausted) {
         Box(Modifier.safeDrawingPadding()) {
             StorageErrorScreen(container, StorageState.Failed(exhaustedRounds), onRetry = {

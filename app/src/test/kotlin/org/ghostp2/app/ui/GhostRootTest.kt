@@ -21,6 +21,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.navigation.NavGraph
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -324,6 +325,42 @@ class GhostRootTest {
         compose.onAllNodesWithText("Borrar todo").assertCountEquals(0)
     }
 
+    /**
+     * La pila de navegación es de la raíz (no de la parte que se ve con el almacenamiento bien): un error
+     * del almacenamiento la vacía hasta la lista y, al volver, se empieza por ella con el mismo
+     * NavController (el chat y su ViewModel se destruyen, no quedan huérfanos).
+     */
+    @Test
+    fun storageErrorClearsTheBackStackOfTheSameController() {
+        runBlocking { app.storage.contacts.upsert(active("c1", "Ana")) }
+        val nav = mutableListOf<NavHostController>()
+        compose.setContent {
+            val controller = rememberNavController()
+            nav += controller
+            GhostRoot(container, actions, controller)
+        }
+        waitForText("Ana")
+        compose.onNodeWithText("Ana").performClick()
+        waitForText("Activa GhostP2 para enviar")
+        val chat = compose.runOnUiThread { nav.last().currentBackStackEntry!! }
+        assertEquals(Routes.CHAT, chat.destination.route)
+
+        app.storage.failure = StoreUnavailableException(IOException("x"))
+        runBlocking { container.checkStorage() }
+        waitForText("No se pudo acceder a tus datos cifrados")
+
+        app.storage.failure = null
+        compose.onNodeWithText("Reintentar").performClick()
+        waitForText("Ana")
+        compose.onAllNodesWithText("Activa GhostP2 para enviar").assertCountEquals(0)
+        // El chat ha salido de la pila de verdad: su ViewModel ya no existe.
+        compose.waitUntil(TIMEOUT) { chat.lifecycle.currentState == Lifecycle.State.DESTROYED }
+        compose.runOnUiThread {
+            assertEquals(1, nav.distinct().size)
+            assertEquals(listOf(Routes.CONTACTS), screens(nav.last()))
+        }
+    }
+
     @Test
     fun pausingTheChatClearsTheForegroundChat() {
         runBlocking { app.storage.contacts.upsert(active("c1", "Ana")) }
@@ -560,6 +597,10 @@ class GhostRootTest {
 
     private fun changed(id: String, name: String) =
         Contact(id, name, ByteArray(32), "x".repeat(56), ByteArray(32), ByteArray(32), ByteArray(32), false, ContactStatus.IDENTITY_CHANGED)
+
+    /** Rutas de las pantallas de la pila, sin el grafo. */
+    private fun screens(nav: NavHostController) =
+        nav.currentBackStack.value.filter { it.destination !is NavGraph }.map { it.destination.route }
 
     private fun hasRole(role: Role) = SemanticsMatcher.expectValue(SemanticsProperties.Role, role)
 
