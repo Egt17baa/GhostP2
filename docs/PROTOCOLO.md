@@ -645,7 +645,7 @@ contacto ofrece "Borrar contacto" (con confirmación; al terminar dice si el avi
 - Una excepción inesperada en una corrutina del proceso (motor, sesiones, servicio) no cierra la
   app: los scopes llevan un `CoroutineExceptionHandler` que la descarta sin registrarla.
 
-### 14.8 Servicio en primer plano (reglas R19 y R20)
+### 14.8 Servicio en primer plano (reglas R19, R20 y R29)
 
 - "Activar" inicia un servicio en primer plano de tipo `specialUse` con la notificación fija
   "GhostP2 activo · cifrado" y la acción "Desconectar". En Android 13+ se pide antes el permiso
@@ -666,6 +666,19 @@ contacto ofrece "Borrar contacto" (con confirmación; al terminar dice si el avi
   `START_STICKY`. Si el almacenamiento o la lectura fallan, no hace nada (GhostP2 queda apagado). Si
   el sistema no deja pasar a primer plano, deja la notificación "GhostP2 se ha detenido · Abre la
   app para volver a activarlo". Sin la opción, nada arranca GhostP2 al encender el móvil.
+- **R29**: opción "Desconectar al salir de la app" (Ajustes › Segundo plano): "Nunca" (por
+  defecto), "A los 2 minutos", "A los 5 minutos" o "A los 15 minutos"; cualquier otro valor guardado
+  se lee como "Nunca". Al pasar la actividad a segundo plano (`onStop` sin cambio de
+  configuración: girar el móvil no cuenta) se arma un temporizador en el scope del proceso; al
+  volver (`onStart`) se cancela. Si vence, o si al volver ya pasó el plazo según `elapsedRealtime`
+  (Android puede retrasar el temporizador con el móvil dormido; entonces se desconecta antes de
+  nada), se hace lo mismo que "Desconectar": se para el servicio (se quita la notificación fija) y
+  el motor (cierra sesiones y Tor, borra las conversaciones de la memoria y vacía la cola de
+  fotos). Como mucho una vez por salida; al volver, la pantalla ofrece "Activar". Solo cuenta si
+  el usuario abrió la app en esta ejecución: tras un arranque al encender (R20) o un reinicio
+  `START_STICKY` sin abrir la app no hay `onStop` y no se arma. Volver antes del plazo (también
+  desde el selector de fotos, el de "Guardar" o los diálogos del sistema) no corta nada. No toca
+  contactos ni identidad.
 - Exención de la optimización de batería: la bienvenida la pide ("Quitar el ahorro de batería") y
   Ajustes la muestra con "Permitir en segundo plano" (diálogo del sistema; si el fabricante lo
   quitó, la lista del sistema). Las dos muestran la ruta del ahorro propio del fabricante (Xiaomi,
@@ -700,9 +713,10 @@ contacto ofrece "Borrar contacto" (con confirmación; al terminar dice si el avi
   los formatos 1 y 2 y se escribe siempre el 2, así que un archivo de formato 1 pasa al 2 en la
   primera escritura; cualquier otro primer byte es "datos ilegibles" sin intentar descifrar. El
   formato 2 añade, con valor por defecto, los ajustes de la app (bienvenida hecha, bloqueo y
-  "Bloquear tras", ocultar nombres, lado mayor de las fotos, activar al encender; sin secretos ni
-  contenido) y los borrados pendientes (§14.6). Un archivo de formato 1 se lee con ajustes por
-  defecto y sin borrados pendientes.
+  "Bloquear tras", ocultar nombres, lado mayor de las fotos, activar al encender y, desde R29,
+  desconectar al salir; sin secretos ni contenido) y los borrados pendientes (§14.6). Un archivo de
+  formato 1 se lee con ajustes por defecto y sin borrados pendientes; uno de formato 2 escrito antes
+  de R29 (sin ese campo) se lee con "Nunca".
 - Estado de Tor en `noBackupFilesDir/tor` (consenso, guardas, cookie de control); sin claves de
   servicios ni de autorización.
 - **Tor vuelve a arrancar tras borrar su estado** ("Borrar todo", "Empezar de cero"):
@@ -831,6 +845,9 @@ Complementan las del núcleo (§13). GhostP2 no promete más de lo que hay aquí
   aun activado, el sistema puede no dejarlo arrancar. Sin la exención de batería, Android puede
   cortar la conexión con Tor o no recrear el servicio (R19). Para el ahorro de energía propio de
   cada fabricante solo hay una ayuda con la ruta de sus ajustes (Xiaomi, Samsung, Huawei/Honor,
-  OnePlus/OPPO/realme); GhostP2 no puede desactivarlo.
+  OnePlus/OPPO/realme); GhostP2 no puede desactivarlo. "Desconectar al salir de la app" (R29) usa
+  un temporizador del proceso, no una alarma del sistema: con el móvil dormido puede cortar más
+  tarde del plazo, como muy tarde al volver a la app; si Android mata el proceso antes, no queda
+  nada en marcha que cortar.
 - **Reinstalación** (R14): no se avisa; el contacto antiguo queda desconectado y hay que volver a
   emparejar.

@@ -69,6 +69,9 @@ gestor de archivos) o con `adb install app-arm64-v8a-release.apk`.
 4. **Hablar**: los dos tenéis que tener GhostP2 activo. Cada mensaje pasa por "enviando…" y
    "✓ entregado" (recibido por su app, no leído). Las fotos se eligen con el selector de fotos del
    sistema; "Guardar" en el visor es la única forma de que una foto llegue al disco.
+5. **Ajustes**: bloqueo con huella o PIN, ocultar el nombre en las notificaciones, tamaño de las
+   fotos, activar al encender el móvil y "Desconectar al salir de la app" ("Nunca" por defecto; a
+   los 2, 5 o 15 minutos fuera de la app cierra Tor y borra las conversaciones, R29).
 
 ## Compilar y probar
 

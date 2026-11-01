@@ -210,6 +210,12 @@
     <string name="settings_battery_allow">Permitir en segundo plano</string>
     <string name="settings_start_on_boot">Activar GhostP2 al encender el móvil</string>
     <string name="settings_start_on_boot_detail">Si no se puede activar solo, verás un aviso para abrir la app.</string>
+    <string name="settings_disconnect_after">Desconectar al salir de la app</string>
+    <string name="settings_disconnect_after_0">Nunca</string>
+    <string name="settings_disconnect_after_2">A los 2 minutos</string>
+    <string name="settings_disconnect_after_5">A los 5 minutos</string>
+    <string name="settings_disconnect_after_15">A los 15 minutos</string>
+    <string name="settings_disconnect_after_detail">Al pasar ese tiempo fuera de la app se cierra Tor y se borran las conversaciones. No recibirás mensajes hasta que vuelvas a activar GhostP2.</string>
     <string name="settings_section_data">Datos</string>
     <string name="settings_wipe">Borrar todo</string>
     <string name="settings_wipe_confirm_title">¿Borrar todo?</string>

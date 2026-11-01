@@ -119,6 +119,7 @@ dependencies {
     testImplementation(platform(libs.androidx.compose.bom))
     testImplementation(libs.androidx.compose.ui.test.junit4)
     testImplementation(libs.robolectric)
+    testImplementation(libs.coroutines.test)
     // FakeTor y repositorios en memoria del motor, inyectados mediante AppContainer.
     testImplementation(testFixtures(project(":core:engine")))
 }

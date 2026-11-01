@@ -223,6 +223,18 @@ apksigner sign --ks prueba.jks --out app-arm64-v8a-release.apk \
 > Si un toque no hace nada justo al cambiar de pantalla, vuelve a tocar: no es un fallo.
 > El gesto de atrás del sistema funciona siempre.
 
+### Desconectar al salir de la app (R29)
+
+Con A y B activos, emparejados y "en línea", y algún mensaje en el chat de A con B.
+
+| # | Paso | Resultado esperado |
+|---|---|---|
+| 80 | En A: "Ajustes" › "Segundo plano" › "Desconectar al salir de la app": comprueba que está marcado "Nunca" y elige "A los 2 minutos". Sal a la pantalla de inicio 1 minuto y vuelve. | Nada se corta: sigue "GhostP2 activo · cifrado", B sigue "en línea" y el chat conserva los mensajes. Girar el móvil o abrir el selector de fotos y volver tampoco corta nada. |
+| 81 | Sal a la pantalla de inicio 3 minutos, con la pantalla encendida, sin volver. | A los 2 minutos desaparece la notificación fija "GhostP2 activo · cifrado" y, poco después, B ve a A "desconectado". Al volver: "GhostP2 está desactivado" con "Activar"; el chat con B está vacío y los contactos siguen ahí. |
+| 82 | Pulsa "Activar" y espera a estar "en línea". Envía un mensaje a B. | Funciona igual que tras "Desconectar": Tor arranca, B vuelve a ver a A "en línea" y el mensaje llega. |
+| 83 | Sal de la app y apaga la pantalla 5 minutos o más. Enciéndela y vuelve a GhostP2. | Si al volver aún estaba la notificación fija (Android retrasó el temporizador), desaparece en ese momento y enseguida se ve "GhostP2 está desactivado" con el chat vacío; B ve a A "desconectado". Si ya había desaparecido, igual que el paso 81. |
+| 84 | Con "Activar GhostP2 al encender el móvil" activado y "A los 2 minutos", reinicia A, desbloquéalo y espera 5 minutos **sin abrir** GhostP2. | GhostP2 sigue activo con su notificación fija: sin abrir la app no hay salida que contar. Vuelve a dejar "Nunca" al terminar. |
+
 ## Lo que esta prueba no cubre
 
 - **Identidad cambiada** ("La identidad de <nombre> ha cambiado"): hace falta que un solo lado

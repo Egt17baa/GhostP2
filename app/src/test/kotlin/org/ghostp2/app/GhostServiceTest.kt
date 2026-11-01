@@ -39,7 +39,9 @@ import org.robolectric.Shadows.shadowOf
 import org.robolectric.android.controller.ServiceController
 import org.robolectric.annotation.Config
 import org.robolectric.shadows.ShadowNetwork
+import org.robolectric.shadows.ShadowSystemClock
 import java.io.IOException
+import java.time.Duration
 
 @RunWith(RobolectricTestRunner::class)
 @Config(application = TestGhostApp::class)
@@ -502,6 +504,65 @@ class GhostServiceTest {
         eventually { shadowOf(service).isStoppedBySelf }
         val titles = notificationManager().allNotifications.map { it.extras.getCharSequence(Notification.EXTRA_TITLE).toString() }
         assertTrue(titles.toString(), "GhostP2 se ha detenido" in titles)
+    }
+
+    /**
+     * «Desconectar al salir» (R29) con la vuelta justo al vencer el plazo: se pide parar el servicio y el
+     * motor; al destruirlo el sistema no queda nada a medias (ni la notificación fija «activo»).
+     */
+    @Test
+    fun expiryStopsServiceAndEngine() {
+        shadowOf(app).grantPermissions(Manifest.permission.POST_NOTIFICATIONS)
+        val controller = autoDisconnectWithAConversation()
+        val service = controller.get()
+
+        assertEquals(EngineStatus.Stopped, engine.status.value)
+        assertEquals(TorState.Off, app.tor.state.value)
+        assertTrue(engine.conversations.value.isEmpty())
+        assertFalse(service.inForeground)
+        assertTrue(shadowOf(service).isForegroundStopped)
+        assertTrue(networkCallbacks().isEmpty())
+        assertTrue(notificationManager().allNotifications.none { it.channelId == Notifications.CHANNEL_STATUS })
+    }
+
+    /** Tras el corte automático, «Activar» funciona igual que tras «Desconectar». */
+    @Test
+    fun activateAfterAutoDisconnectWorks() {
+        autoDisconnectWithAConversation()
+
+        val again = startService()
+        eventually { engine.status.value == EngineStatus.Online }
+        assertTrue(again.get().inForeground)
+        assertEquals(1, networkCallbacks().size)
+        // El corte fue de la salida anterior: volver a la app ahora no corta nada.
+        app.container.autoDisconnect.onStart()
+        assertNull(shadowOf(app).nextStoppedService)
+        assertEquals(EngineStatus.Online, engine.status.value)
+    }
+
+    /**
+     * Con «A los 2 minutos», motor en línea y una conversación: sale de la app y vuelve cuando ya pasaron
+     * 2 minutos (el temporizador no llega a dispararse). Comprueba que se pidió parar el servicio y lo
+     * destruye, como haría el sistema.
+     */
+    private fun autoDisconnectWithAConversation(): ServiceController<GhostService> {
+        runBlocking { app.storage.settings.update { it.copy(disconnectAfterMinutes = 2) } }
+        val auto = app.container.autoDisconnect
+        eventually { auto.minutes == 2 }
+        val controller = startService()
+        eventually { engine.status.value == EngineStatus.Online }
+        receiveMessage("Ana")
+        assertFalse(engine.conversations.value.isEmpty())
+
+        auto.onStop(changingConfigurations = false)
+        ShadowSystemClock.advanceBy(Duration.ofMinutes(2))
+        auto.onStart()
+
+        val stopped = shadowOf(app).nextStoppedService
+        assertEquals(GhostService::class.java.name, stopped?.component?.className)
+        controller.destroy()
+        eventually { engine.status.value == EngineStatus.Stopped && app.tor.state.value == TorState.Off }
+        return controller
     }
 
     /**

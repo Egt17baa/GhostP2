@@ -405,6 +405,7 @@ private fun SettingsRoute(container: AppContainer, actions: ActivityActions, onB
         onSetMaxPhotoSide = vm::setMaxPhotoSide,
         onRequestBattery = actions.requestBatteryExemption,
         onSetStartOnBoot = vm::setStartOnBoot,
+        onSetDisconnectAfter = vm::setDisconnectAfter,
         onWipeAll = vm::wipeAll,
     )
 }

@@ -48,9 +48,10 @@ import org.ghostp2.engine.Notice
 
 /**
  * Ajustes: Seguridad (bloqueo y "Bloquear tras"), Notificaciones ("Ocultar el nombre del contacto"),
- * Fotos ("Tamaño máximo"), Segundo plano (exención de batería, ayuda del fabricante [manufacturerHint]
- * y "Activar GhostP2 al encender el móvil"), Datos ("Borrar todo" con doble confirmación) y Acerca de
- * (versión, licencia, mi .onion abreviada y el último aviso de diagnóstico). [settings] `null` ⇒ cargando.
+ * Fotos ("Tamaño máximo"), Segundo plano (exención de batería, ayuda del fabricante [manufacturerHint],
+ * "Activar GhostP2 al encender el móvil" y "Desconectar al salir de la app", R29), Datos ("Borrar todo"
+ * con doble confirmación) y Acerca de (versión, licencia, mi .onion abreviada y el último aviso de
+ * diagnóstico). [settings] `null` ⇒ cargando.
  * Los diálogos abiertos son simple `remember` (sin contenido).
  */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -73,6 +74,7 @@ fun SettingsScreen(
     onSetMaxPhotoSide: (Int) -> Unit,
     onRequestBattery: () -> Unit,
     onSetStartOnBoot: (Boolean) -> Unit,
+    onSetDisconnectAfter: (Int) -> Unit,
     onWipeAll: () -> Unit,
 ) {
     Scaffold(
@@ -125,6 +127,13 @@ fun SettingsScreen(
             Text(stringResource(manufacturerHint), style = MaterialTheme.typography.bodySmall)
             SwitchRow(R.string.settings_start_on_boot, settings.startOnBoot, onSetStartOnBoot)
             Text(stringResource(R.string.settings_start_on_boot_detail), style = MaterialTheme.typography.bodySmall)
+            Text(stringResource(R.string.settings_disconnect_after), style = MaterialTheme.typography.bodyLarge)
+            for (minutes in AppSettings.DISCONNECT_MINUTES) {
+                RadioRow(stringResource(disconnectAfterLabel(minutes)), settings.disconnectAfterMinutes == minutes) {
+                    onSetDisconnectAfter(minutes)
+                }
+            }
+            Text(stringResource(R.string.settings_disconnect_after_detail), style = MaterialTheme.typography.bodySmall)
 
             Section(R.string.settings_section_data)
             WipeAll(wiping = wiping, wipeFailed = wipeFailed, onWipeAll = onWipeAll)
@@ -227,6 +236,14 @@ private fun lockAfterLabel(minutes: Int): Int = when (minutes) {
     1 -> R.string.settings_lock_after_1
     5 -> R.string.settings_lock_after_5
     else -> R.string.settings_lock_after_15
+}
+
+@StringRes
+private fun disconnectAfterLabel(minutes: Int): Int = when (minutes) {
+    0 -> R.string.settings_disconnect_after_0
+    2 -> R.string.settings_disconnect_after_2
+    5 -> R.string.settings_disconnect_after_5
+    else -> R.string.settings_disconnect_after_15
 }
 
 @Composable

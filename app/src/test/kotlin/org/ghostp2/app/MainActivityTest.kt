@@ -15,6 +15,7 @@ import org.junit.After
 import org.ghostp2.engine.EngineStatus
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -24,6 +25,8 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
+import org.robolectric.shadows.ShadowSystemClock
+import java.time.Duration
 
 @OptIn(ExperimentalTestApi::class)
 @RunWith(RobolectricTestRunner::class)
@@ -121,6 +124,26 @@ class MainActivityTest {
         controller.start()
         assertTrue(lock.locked.value)
         controller.stop().destroy()
+    }
+
+    /** «Desconectar al salir» (R29) a través del ciclo de vida de la actividad. */
+    @Test
+    fun backgroundDisconnectsThroughActivityLifecycle() {
+        runBlocking { app.storage.settings.update { it.copy(onboardingDone = true, lockEnabled = false, disconnectAfterMinutes = 2) } }
+        val controller = Robolectric.buildActivity(MainActivity::class.java).setup()
+        eventually { app.container.autoDisconnect.minutes == 2 }
+
+        // Girar el móvil, o salir y volver enseguida, no corta nada.
+        controller.recreate()
+        controller.pause().stop().restart().resume()
+        assertNull(shadowOf(app).nextStoppedService)
+
+        // Fuera más del plazo: al volver se para el servicio antes de nada.
+        controller.pause().stop()
+        ShadowSystemClock.advanceBy(Duration.ofMinutes(3))
+        controller.restart()
+        assertEquals(GhostService::class.java.name, shadowOf(app).nextStoppedService?.component?.className)
+        controller.resume().pause().stop().destroy()
     }
 
     private companion object {

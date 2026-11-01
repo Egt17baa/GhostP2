@@ -78,6 +78,11 @@ class SettingsViewModel(private val container: AppContainer) : ViewModel() {
         if (px in AppSettings.PHOTO_SIDES) save { it.copy(maxPhotoSidePx = px) }
     }
 
+    /** "Desconectar al salir de la app" (R29): uno de [AppSettings.DISCONNECT_MINUTES]; otro valor se ignora. */
+    fun setDisconnectAfter(minutes: Int) {
+        if (minutes in AppSettings.DISCONNECT_MINUTES) save { it.copy(disconnectAfterMinutes = minutes) }
+    }
+
     /** "Activar GhostP2 al encender el móvil" (R20). */
     fun setStartOnBoot(on: Boolean) = save { it.copy(startOnBoot = on) }
 

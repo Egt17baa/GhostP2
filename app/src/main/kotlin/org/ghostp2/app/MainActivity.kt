@@ -63,6 +63,8 @@ class MainActivity : FragmentActivity() {
 
     override fun onStart() {
         super.onStart()
+        // Antes de nada: si venció "Desconectar al salir de la app" (R29), se desconecta ya.
+        container.autoDisconnect.onStart()
         // Vuelve de segundo plano: bloquea si pasó el tiempo de "Bloquear tras".
         container.lock.onStart()
     }
@@ -71,6 +73,7 @@ class MainActivity : FragmentActivity() {
         super.onStop()
         // Girar el móvil recrea la actividad, pero no es salir de la app.
         container.lock.onStop(isChangingConfigurations)
+        container.autoDisconnect.onStop(isChangingConfigurations)
     }
 
     override fun onResume() {

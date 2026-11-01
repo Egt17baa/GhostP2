@@ -4,6 +4,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.assertIsNotSelected
+import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
@@ -53,6 +55,11 @@ class SettingsScreenTest {
             onSetMaxPhotoSide = { events += "side:$it" },
             onRequestBattery = { events += "battery" },
             onSetStartOnBoot = { events += "boot:$it" },
+            onSetDisconnectAfter = {
+                events += "disconnect:$it"
+                // Como el ViewModel: el ajuste guardado vuelve a la pantalla.
+                settings = settings?.copy(disconnectAfterMinutes = it)
+            },
             onWipeAll = { events += "wipe" },
         )
     }
@@ -104,6 +111,23 @@ class SettingsScreenTest {
         compose.onNodeWithText(text(R.string.settings_diagnostic_publication)).performScrollTo()
 
         assertEquals(listOf("lock:true", "after:5", "hide:true", "side:3072", "battery", "boot:true"), events)
+    }
+
+    @Test
+    fun disconnectOptionPersists() {
+        show()
+        compose.onNodeWithText(text(R.string.settings_disconnect_after)).performScrollTo()
+        compose.onNodeWithText(text(R.string.settings_disconnect_after_detail)).performScrollTo()
+        compose.onNodeWithText(text(R.string.settings_disconnect_after_0)).performScrollTo().assertIsSelected()
+        for (id in listOf(R.string.settings_disconnect_after_2, R.string.settings_disconnect_after_5, R.string.settings_disconnect_after_15)) {
+            compose.onNodeWithText(text(id)).performScrollTo().assertIsNotSelected()
+        }
+
+        compose.onNodeWithText(text(R.string.settings_disconnect_after_5)).performScrollTo().performClick()
+        assertEquals(listOf("disconnect:5"), events)
+        assertEquals(5, settings?.disconnectAfterMinutes)
+        compose.onNodeWithText(text(R.string.settings_disconnect_after_5)).assertIsSelected()
+        compose.onNodeWithText(text(R.string.settings_disconnect_after_0)).assertIsNotSelected()
     }
 
     @Test

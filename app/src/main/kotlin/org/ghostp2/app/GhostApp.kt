@@ -30,6 +30,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.ghostp2.app.lock.AppLock
+import org.ghostp2.app.lock.AutoDisconnect
 import org.ghostp2.app.lock.DeviceLock
 import org.ghostp2.app.photo.PhotoEncoder
 import org.ghostp2.app.photo.PhotoQueue
@@ -210,6 +211,18 @@ class AppContainer internal constructor(
     val lock = AppLock()
 
     /**
+     * "Desconectar al salir de la app" (R29), alimentado desde [settings] junto a [lock] y con los mismos
+     * `onStart`/`onStop` de la actividad. Desconecta por el mismo camino que "Desconectar": para el
+     * servicio (sin él no queda la notificación fija) y el motor ([stop]: cierra Tor y las sesiones,
+     * borra las conversaciones de memoria y vacía la cola de fotos).
+     */
+    val autoDisconnect = AutoDisconnect(scope) {
+        // Si el servicio no está en marcha no hace nada; su onDestroy también detiene el motor.
+        appContext.stopService(GhostService.stopIntent(appContext))
+        stop()
+    }
+
+    /**
      * Contacto cuyo chat está abierto y en primer plano (entre `onResume` y `onPause`), o `null`: el
      * servicio no notifica sus mensajes nuevos, que ya se están viendo. Solo en memoria.
      */
@@ -292,7 +305,10 @@ class AppContainer internal constructor(
                     }
                     true
                 }
-                .collect { lock.configure(it.lockEnabled, it.lockAfterMinutes) }
+                .collect {
+                    lock.configure(it.lockEnabled, it.lockAfterMinutes)
+                    autoDisconnect.configure(it.disconnectAfterMinutes)
+                }
         }
         // Suscrito desde ya (UNDISPATCHED): los avisos no se reproducen.
         scope.launch(start = CoroutineStart.UNDISPATCHED) {

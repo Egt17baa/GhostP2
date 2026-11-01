@@ -61,6 +61,8 @@ internal class StoredSettings(
     val hideNotificationNames: Boolean = false,
     val maxPhotoSidePx: Int = 2048,
     val startOnBoot: Boolean = false,
+    /** Añadido con R29: los archivos de formato 2 anteriores no lo tienen y se leen con "Nunca". */
+    val disconnectAfterMinutes: Int = 0,
 ) {
     fun toModel() = AppSettings(
         onboardingDone = onboardingDone,
@@ -69,6 +71,7 @@ internal class StoredSettings(
         hideNotificationNames = hideNotificationNames,
         maxPhotoSidePx = maxPhotoSidePx,
         startOnBoot = startOnBoot,
+        disconnectAfterMinutes = disconnectAfterMinutes,
     )
 
     companion object {
@@ -79,6 +82,7 @@ internal class StoredSettings(
             hideNotificationNames = s.hideNotificationNames,
             maxPhotoSidePx = s.maxPhotoSidePx,
             startOnBoot = s.startOnBoot,
+            disconnectAfterMinutes = s.disconnectAfterMinutes,
         )
     }
 }

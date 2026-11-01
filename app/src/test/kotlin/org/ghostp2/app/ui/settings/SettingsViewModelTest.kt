@@ -85,6 +85,21 @@ class SettingsViewModelTest {
     }
 
     @Test
+    fun disconnectAfterPersists() {
+        val vm = viewModel()
+        vm.setDisconnectAfter(5)
+        eventually { stored().disconnectAfterMinutes == 5 }
+
+        // Fuera de la lista no se guarda: la siguiente escritura es la primera.
+        val writes = java.util.concurrent.CopyOnWriteArrayList<AppSettings>()
+        app.storage.settings.onWrite = { writes += it }
+        vm.setDisconnectAfter(7)
+        vm.setDisconnectAfter(0)
+        eventually { writes.isNotEmpty() }
+        assertEquals(listOf(AppSettings()), writes.toList())
+    }
+
+    @Test
     fun optionsPersist() {
         val vm = viewModel()
         // Como la pantalla: el estado solo se lee mientras alguien lo recoge.

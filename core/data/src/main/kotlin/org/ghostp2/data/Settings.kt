@@ -18,18 +18,28 @@ data class AppSettings(
     val maxPhotoSidePx: Int = 2048,
     /** "Activar GhostP2 al encender el móvil" (R20), desactivado por defecto. */
     val startOnBoot: Boolean = false,
+    /**
+     * "Desconectar al salir de la app" (R29): minutos en segundo plano antes de parar todo; uno de
+     * [DISCONNECT_MINUTES], 0 = "Nunca" (por defecto).
+     */
+    val disconnectAfterMinutes: Int = 0,
 ) {
     /** Los mismos ajustes con cada valor fuera de su lista sustituido por el de por defecto. */
     fun sanitized(): AppSettings {
         val lock = if (lockAfterMinutes in LOCK_MINUTES) lockAfterMinutes else DEFAULT.lockAfterMinutes
         val side = if (maxPhotoSidePx in PHOTO_SIDES) maxPhotoSidePx else DEFAULT.maxPhotoSidePx
-        return if (lock == lockAfterMinutes && side == maxPhotoSidePx) this
-        else copy(lockAfterMinutes = lock, maxPhotoSidePx = side)
+        val disconnect =
+            if (disconnectAfterMinutes in DISCONNECT_MINUTES) disconnectAfterMinutes else DEFAULT.disconnectAfterMinutes
+        return if (lock == lockAfterMinutes && side == maxPhotoSidePx && disconnect == disconnectAfterMinutes) this
+        else copy(lockAfterMinutes = lock, maxPhotoSidePx = side, disconnectAfterMinutes = disconnect)
     }
 
     companion object {
         val LOCK_MINUTES = listOf(0, 1, 5, 15)
         val PHOTO_SIDES = listOf(1280, 2048, 3072)
+
+        /** Valores de "Desconectar al salir de la app"; 0 = "Nunca". */
+        val DISCONNECT_MINUTES = listOf(0, 2, 5, 15)
         private val DEFAULT = AppSettings()
     }
 }

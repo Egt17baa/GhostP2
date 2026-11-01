@@ -6,6 +6,9 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.serialization.ExperimentalSerializationApi
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.cbor.Cbor
 import org.ghostp2.engine.Identity
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -61,6 +64,55 @@ class SettingsRepositoryTest {
         assertEquals(1, fresh.get().lockAfterMinutes)
         assertEquals(2048, fresh.get().maxPhotoSidePx)
         assertEquals(1, StoredSettingsRepository(store()).settings.first().lockAfterMinutes)
+    }
+
+    @Test
+    fun disconnectMinutesDefaultsToNeverAndSanitizes() = runBlocking {
+        assertEquals(0, AppSettings().disconnectAfterMinutes)
+        assertEquals(listOf(0, 2, 5, 15), AppSettings.DISCONNECT_MINUTES)
+        assertEquals(AppSettings(), AppSettings(disconnectAfterMinutes = 7).sanitized())
+        val repo = StoredSettingsRepository(store())
+        repo.update { it.copy(disconnectAfterMinutes = 5) }
+        assertEquals(5, StoredSettingsRepository(store()).get().disconnectAfterMinutes)
+        repo.update { it.copy(disconnectAfterMinutes = 7) }
+        assertEquals(0, StoredSettingsRepository(store()).get().disconnectAfterMinutes)
+
+        // Un valor fuera de la lista ya guardado (p. ej. por otra versión) también se sanea al leer.
+        store().update { it.withSettings(StoredSettings(lockEnabled = true, disconnectAfterMinutes = 3)) }
+        assertEquals(AppSettings(lockEnabled = true), StoredSettingsRepository(store()).get())
+    }
+
+    /** Ajustes del formato 2 tal como se guardaban antes de «Desconectar al salir» (R29). */
+    @Serializable
+    private class StoredSettingsBeforeR29(
+        val onboardingDone: Boolean = false,
+        val lockEnabled: Boolean = false,
+        val lockAfterMinutes: Int = 1,
+        val hideNotificationNames: Boolean = false,
+        val maxPhotoSidePx: Int = 2048,
+        val startOnBoot: Boolean = false,
+    )
+
+    @Serializable
+    private class StoredDataBeforeR29(
+        val identity: StoredIdentity? = null,
+        val settings: StoredSettingsBeforeR29? = null,
+    )
+
+    @OptIn(ExperimentalSerializationApi::class)
+    @Test
+    fun format2FileWithoutDisconnectFieldReadsNever() = runBlocking {
+        val old = StoredDataBeforeR29(
+            StoredIdentity.from(identity()),
+            StoredSettingsBeforeR29(onboardingDone = true, lockEnabled = true, lockAfterMinutes = 15, startOnBoot = true),
+        )
+        val plain = Cbor.encodeToByteArray(StoredDataBeforeR29.serializer(), old)
+        file().writeBytes(byteArrayOf(2) + aead.encrypt(plain, byteArrayOf(2) + "ghostp2-store-v1".toByteArray()))
+
+        val read = StoredSettingsRepository(store()).get()
+        assertEquals(AppSettings(onboardingDone = true, lockEnabled = true, lockAfterMinutes = 15, startOnBoot = true), read)
+        assertEquals(0, read.disconnectAfterMinutes)
+        assertEquals(identity(), StoredIdentityRepository(store()).load())
     }
 
     @Test

@@ -244,9 +244,13 @@ class GhostService : Service() {
 
     override fun onDestroy() {
         // Ya no hay primer plano: un cambio de estado del motor tardío no vuelve a llamar a startForeground.
+        val wasForeground = foreground
         foreground = false
         generation++
         unregisterNetworkCallback()
+        // Parado sin ACTION_STOP ("Desconectar" o "Desconectar al salir de la app", R29, con
+        // stopService): la notificación fija "activo" se quita aquí, sin esperar a Android.
+        if (wasForeground) ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
         // Sin servicio no hay notificación fija: el motor no sigue en marcha a escondidas.
         container.stop()
         scope.cancel()
