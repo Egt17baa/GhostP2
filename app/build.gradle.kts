@@ -16,9 +16,31 @@ android {
         versionName = "0.1.0"
     }
 
+    // Firma de la versión de lanzamiento: solo si existen las cuatro variables (en CI, desde los
+    // secretos de GitHub). Si falta alguna, assembleRelease genera APK sin firmar.
+    val firma = listOf(
+        "GHOSTP2_KEYSTORE_FILE",
+        "GHOSTP2_KEYSTORE_PASSWORD",
+        "GHOSTP2_KEY_ALIAS",
+        "GHOSTP2_KEY_PASSWORD",
+    ).associateWith { providers.environmentVariable(it).orNull }
+    val hayFirma = firma.values.all { !it.isNullOrEmpty() }
+
+    signingConfigs {
+        if (hayFirma) {
+            create("release") {
+                storeFile = file(firma.getValue("GHOSTP2_KEYSTORE_FILE")!!)
+                storePassword = firma.getValue("GHOSTP2_KEYSTORE_PASSWORD")
+                keyAlias = firma.getValue("GHOSTP2_KEY_ALIAS")
+                keyPassword = firma.getValue("GHOSTP2_KEY_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = true
+            if (hayFirma) signingConfig = signingConfigs.getByName("release")
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }
@@ -51,6 +73,17 @@ android {
 
     testOptions {
         unitTests.isIncludeAndroidResources = true
+    }
+
+    // F-Droid: sin el bloque de dependencias cifrado por Google en el APK ni en el AAB.
+    dependenciesInfo {
+        includeInApk = false
+        includeInBundle = false
+    }
+
+    lint {
+        abortOnError = true
+        checkReleaseBuilds = true
     }
 }
 
