@@ -78,6 +78,9 @@ import org.ghostp2.engine.Presence
 /** A partir de cuántos caracteres Unicode se muestra el contador ("7 501 / 8 000"). */
 internal const val COUNTER_THRESHOLD = 7_500
 
+/** Líneas visibles como mucho en el campo del mensaje. */
+private const val CHAT_INPUT_MAX_LINES = 6
+
 /** Lado mayor mínimo de las miniaturas del chat (submuestreadas hasta < 2× esto). */
 internal const val THUMBNAIL_SIDE_PX = 768
 
@@ -388,6 +391,8 @@ private fun Input(
                 onValueChange = onDraftChange,
                 modifier = Modifier.weight(1f),
                 label = stringResource(R.string.chat_message_label),
+                // Un texto largo no empuja la lista fuera de la pantalla.
+                maxLines = CHAT_INPUT_MAX_LINES,
                 enabled = canWrite,
             )
             IconButton(onClick = onSend, enabled = canSend) {

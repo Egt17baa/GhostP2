@@ -28,6 +28,8 @@ fun GhostTextField(
     modifier: Modifier = Modifier,
     label: String? = null,
     singleLine: Boolean = false,
+    /** Alto máximo en líneas; con más texto, el campo se desplaza por dentro en vez de crecer. */
+    maxLines: Int = if (singleLine) 1 else Int.MAX_VALUE,
     enabled: Boolean = true,
     imeAction: ImeAction = ImeAction.Default,
     onImeAction: () -> Unit = {},
@@ -40,6 +42,7 @@ fun GhostTextField(
             enabled = enabled,
             label = label?.let { { Text(it) } },
             singleLine = singleLine,
+            maxLines = maxLines,
             keyboardOptions = KeyboardOptions(autoCorrectEnabled = false, imeAction = imeAction),
             // Primero lo de quien llama y después lo normal de la acción (pasar al siguiente campo, cerrar el teclado…).
             keyboardActions = KeyboardActions(onAny = {

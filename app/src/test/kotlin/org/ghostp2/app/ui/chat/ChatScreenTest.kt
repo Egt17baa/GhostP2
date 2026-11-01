@@ -9,6 +9,7 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.hasScrollAction
+import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
@@ -172,6 +173,24 @@ class ChatScreenTest {
         draft = "😀".repeat(PeerSession.MAX_TEXT_CHARS + 1)
         compose.onNodeWithText("${PeerSession.MAX_TEXT_CHARS + 1} / ${PeerSession.MAX_TEXT_CHARS}").assertExists()
         compose.onNodeWithContentDescription(text(R.string.chat_send)).assertIsNotEnabled()
+    }
+
+    @Test
+    fun longDraftStopsGrowingAtSixLines() {
+        show()
+        // Alto del campo editable (con su etiqueta dentro).
+        fun fieldHeight(): Int {
+            compose.waitForIdle()
+            return compose.onNode(hasSetTextAction()).fetchSemanticsNode().size.height
+        }
+        draft = (1..6).joinToString("\n") { "línea $it" }
+        val six = fieldHeight()
+        draft = (1..20).joinToString("\n") { "línea $it" }
+        val twenty = fieldHeight()
+        assertEquals(six, twenty)
+        // Con menos de seis líneas sí es más bajo: crece hasta el tope.
+        draft = "una"
+        assertTrue(fieldHeight() < six)
     }
 
     @Test
