@@ -656,7 +656,8 @@ contacto ofrece "Borrar contacto" (con confirmación; al terminar dice si el avi
   todo sin la exención de batería): entonces se detiene y deja la notificación "GhostP2 se ha
   detenido · Abre la app para volver a activarlo". Lo mismo si al reiniciarse el almacenamiento
   falla.
-- "Desconectar" (en la lista de contactos, en el aviso del estado o en la notificación) detiene
+- "Desconectar" (en la barra de la lista de contactos con el motor `Online`, en el aviso del estado
+  o en la notificación) detiene
   motor y servicio **para siempre**: el sistema no vuelve a crearlo.
 - **R20 (modifica R19)**: opción "Activar GhostP2 al encender el móvil" (Ajustes › Segundo plano),
   **desactivada por defecto**. Un receptor de `BOOT_COMPLETED` (difusión protegida: solo la envía el
@@ -726,7 +727,9 @@ contacto ofrece "Borrar contacto" (con confirmación; al terminar dice si el avi
   (`IME_FLAG_NO_PERSONALIZED_LEARNING`) y no autocorregir. `FLAG_SECURE` en la ventana.
 - **R24**: el texto de la invitación no se puede seleccionar; solo se copia con "Copiar", que lo
   marca como sensible (`EXTRA_IS_SENSITIVE`, Android 13+). "Compartir" lo envía a otra app con el
-  selector del sistema. "Borrar todo" vacía el portapapeles si tiene una invitación de GhostP2.
+  selector del sistema. El portapapeles se vacía si tiene una invitación de GhostP2 cuando la
+  propia deja de esperar (emparejada, caducada o cancelada), al salir de "Añadir contacto" y con
+  "Borrar todo".
 - **Fotos salientes**: selector de fotos del sistema (`PickVisualMedia`, solo imágenes, sin
   permiso de galería) y recodificación a JPEG sin metadatos (orientación aplicada, sRGB,
   transparencia sobre blanco), con el lado mayor del ajuste "Tamaño máximo" (nunca se amplía) y
@@ -785,12 +788,26 @@ Complementan las del núcleo (§13). GhostP2 no promete más de lo que hay aquí
   así que no protege `ghostp2.bin` frente a quien ejecute código como la app, y el motor sigue
   funcionando (recibe y notifica) con la app bloqueada. Es un bloqueo en memoria del proceso; el
   arranque en frío vuelve a bloquear. En Android 8.0–8.1 solo hay credencial, no huella (R28).
+- **Errores del almacenamiento antes del bloqueo**: si `ghostp2.bin` no se puede leer, las pantallas
+  de error ("Reintentar", "Empezar de cero") se muestran **antes** del bloqueo de la app (R22): sin
+  datos legibles no hay ajustes de los que saber si el bloqueo está activado. No muestran nada de los
+  datos; lo único que permiten es destructivo: quien tenga el móvil desbloqueado puede borrarlo todo
+  con "Empezar de cero" (con confirmación), igual que podría desde los ajustes del sistema.
 - **R23: sin cámara para fotos**: `TakePicture` exige que la cámara escriba la foto en un archivo
   (en disco) y `TakePicturePreview` solo devuelve una miniatura; por eso solo se envían fotos
   elegidas con el selector del sistema. La cámara (CameraX, opcional en el manifiesto) solo se usa
   para escanear el QR de la invitación, y los fotogramas no se guardan.
 - **Estado de Tor en disco**: guardas y caché de consenso revelan, a quien lea el
   almacenamiento de la app, que se ha usado Tor (no con quién).
+- **Tor colgado al borrar**: detener Tor espera como mucho 15 s. Si el proceso no para en ese plazo,
+  "Borrar todo" y "Empezar de cero" borran igualmente su directorio, y un Tor aún vivo podría volver
+  a escribir ahí parte de su estado (guardas, consenso; nunca claves, que no se escriben) hasta que
+  muera. No se reintenta ni se avisa.
+- **Eventos atrasados de Tor**: el estado de Tor se deriva de los eventos del runtime de kmp-tor, que no
+  dicen de qué arranque son. Tras detener y volver a arrancar enseguida, un evento atrasado del
+  arranque anterior puede dar `Ready` antes de tiempo (las operaciones fallan con `IOException` y se
+  reintentan como cualquier fallo de conexión) o, si es el de su parada, dejar Tor en `Error` (el
+  motor muestra el error con "Reintentar") hasta el siguiente arranque. No se ha visto en pruebas.
 - **Metadatos visibles**: la red local y la operadora ven que usas Tor (sin puentes, puede estar
   bloqueado); tus contactos ven cuándo estás en línea; un adversario que observe gran parte de la
   red puede correlacionar horarios y volumen (latido cada 20 s, ráfagas de fotos). Los nodos de
