@@ -209,7 +209,7 @@ private fun ReadyRoot(container: AppContainer, actions: ActivityActions) {
                 onAdd = { navController.openIfRegistered(Routes.ADD) },
                 onSettings = { navController.openIfRegistered(Routes.SETTINGS) },
                 onRetry = vm::retry,
-                onDisconnect = actions.disconnect.takeIf { status != EngineStatus.Stopped },
+                onDisconnect = actions.disconnect.takeIf { status == EngineStatus.Online },
             )
         }
         composable(Routes.ADD) {

@@ -43,7 +43,7 @@ fun openRoute(row: ContactRow): String = if (row.identityChanged) Routes.contact
 
 /**
  * Lista de contactos con [banner] (el aviso del motor) encima. Barra superior: "Añadir contacto",
- * "Ajustes" y, si [onDisconnect] no es `null` (motor no parado), "Desconectar".
+ * "Ajustes" y, si [onDisconnect] no es `null` (motor `Online`), "Desconectar".
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

@@ -149,6 +149,18 @@ class GhostRootTest {
     }
 
     @Test
+    fun topBarDisconnectOnlyWhileOnline() {
+        app.storage.saveFailure = StoreUnavailableException(IOException("x"))
+        show()
+        waitForText("GhostP2 está desactivado")
+        compose.onNodeWithText("Activar").performClick()
+        waitForText("No se pudieron leer o guardar tus datos cifrados")
+        assertTrue(container.engine.status.value is EngineStatus.Error)
+        // Con el motor en error (ni parado ni Online) la barra no ofrece "Desconectar".
+        compose.onAllNodesWithContentDescription("Desconectar").assertCountEquals(0)
+    }
+
+    @Test
     fun storageBannerRetryWithFailingStorageShowsStorageError() {
         app.storage.saveFailure = StoreUnavailableException(IOException("x"))
         show()
