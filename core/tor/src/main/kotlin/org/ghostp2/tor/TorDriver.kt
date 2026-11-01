@@ -41,6 +41,12 @@ internal interface TorDriver {
  * [KmpTorTransport.wipeState]) recibe el mismo runtime. Los observadores se comparan por identidad, así
  * que se suscriben **una sola vez por runtime**; los drivers siguientes solo cambian el destino de los
  * eventos `STATE`.
+ *
+ * Los destinos son de **una sola instancia**: hay un único [StateSink] por runtime y solo el último
+ * driver creado sobre un `torDir` recibe sus eventos `STATE` (el anterior deja de recibirlos). Encaja con
+ * la regla de [KmpTorTransport] de una sola instancia por proceso; dos transportes vivos sobre el mismo
+ * directorio se quitarían los eventos entre sí. El destino se fija antes de suscribirse, así que no se
+ * pierde ningún evento emitido justo al suscribir.
  */
 internal class KmpTorDriver(torDir: File, onState: (RuntimeState) -> Unit) : TorDriver {
     private val runtime: TorRuntime
@@ -58,17 +64,20 @@ internal class KmpTorDriver(torDir: File, onState: (RuntimeState) -> Unit) : Tor
         runtime = TorRuntime.Builder(environment) {
             config { _ -> applyGhostConfig() }
         }
-        val sink = synchronized(sinks) {
-            sinks.getOrPut(runtime) {
-                StateSink().also { sink ->
-                    runtime.subscribe(
-                        RuntimeEvent.ERROR.observer(OBSERVER_TAG) { },
-                        RuntimeEvent.STATE.observer(OBSERVER_TAG) { sink.target(it) },
-                    )
-                }
+        synchronized(sinks) {
+            val existing = sinks[runtime]
+            if (existing != null) {
+                existing.target = onState
+            } else {
+                // Destino fijado antes de suscribirse: un evento inmediato ya llega a onState.
+                val sink = StateSink(onState)
+                sinks[runtime] = sink
+                runtime.subscribe(
+                    RuntimeEvent.ERROR.observer(OBSERVER_TAG) { },
+                    RuntimeEvent.STATE.observer(OBSERVER_TAG) { sink.target(it) },
+                )
             }
         }
-        sink.target = onState
     }
 
     override suspend fun startDaemon() {
@@ -85,9 +94,7 @@ internal class KmpTorDriver(torDir: File, onState: (RuntimeState) -> Unit) : Tor
         runtime.listeners().socks.firstOrNull()?.let { InetSocketAddress(it.address.toInetAddress(), it.port.value) }
 
     /** Destino actual de los eventos `STATE` de un runtime ya suscrito. */
-    private class StateSink {
-        @Volatile var target: (RuntimeState) -> Unit = {}
-    }
+    private class StateSink(@Volatile var target: (RuntimeState) -> Unit)
 
     private companion object {
         const val OBSERVER_TAG = "ghostp2"

@@ -799,10 +799,13 @@ Complementan las del núcleo (§13). GhostP2 no promete más de lo que hay aquí
   para escanear el QR de la invitación, y los fotogramas no se guardan.
 - **Estado de Tor en disco**: guardas y caché de consenso revelan, a quien lea el
   almacenamiento de la app, que se ha usado Tor (no con quién).
-- **Tor colgado al borrar**: detener Tor espera como mucho 15 s. Si el proceso no para en ese plazo,
-  "Borrar todo" y "Empezar de cero" borran igualmente su directorio, y un Tor aún vivo podría volver
-  a escribir ahí parte de su estado (guardas, consenso; nunca claves, que no se escriben) hasta que
-  muera. No se reintenta ni se avisa.
+- **Tor colgado al detener o borrar**: detener Tor espera como mucho 15 s. Si el proceso no para en
+  ese plazo, `KmpTorTransport` queda "envenenado" hasta que se reinicie el proceso de la app: los
+  arranques siguientes dejan Tor en `Error` sin lanzar otro proceso (el motor muestra el error con
+  "Reintentar", que vuelve a fallar hasta reiniciar), y `wipeState` informa de fallo. "Borrar todo" y
+  "Empezar de cero" borran igualmente su directorio (ese fallo se ignora, como el resto de Tor), y un
+  Tor aún vivo podría volver a escribir ahí parte de su estado (guardas, consenso; nunca claves, que no
+  se escriben) hasta que muera. No se reintenta la parada ni se avisa de forma específica.
 - **Eventos atrasados de Tor**: el estado de Tor se deriva de los eventos del runtime de kmp-tor, que no
   dicen de qué arranque son. Tras detener y volver a arrancar enseguida, un evento atrasado del
   arranque anterior puede dar `Ready` antes de tiempo (las operaciones fallan con `IOException` y se

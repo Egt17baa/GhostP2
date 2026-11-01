@@ -44,7 +44,9 @@ import io.matthewnelson.kmp.tor.runtime.TorState as RuntimeState
 class KmpTorTransportTest {
     private val dir: File = Files.createTempDirectory("tor-test").toFile()
     private val driver = FakeDriver()
-    private val tor = KmpTorTransport(File(dir, "tor")) { onState -> driver.also { it.onState = onState } }
+    private val tor = KmpTorTransport(File(dir, "tor"), STOP_TIMEOUT_MILLIS) { onState ->
+        driver.also { it.onState = onState }
+    }
 
     @After
     fun cerrar() {
@@ -308,7 +310,7 @@ class KmpTorTransportTest {
     @Test
     fun startAfterWipeStateUsesAFreshDriver() = runBlocking<Unit> {
         val drivers = mutableListOf<FakeDriver>()
-        val counted = KmpTorTransport(File(dir, "tor2")) { onState ->
+        val counted = KmpTorTransport(File(dir, "tor2"), STOP_TIMEOUT_MILLIS) { onState ->
             FakeDriver().also { it.onState = onState; drivers += it }
         }
         try {
@@ -343,6 +345,58 @@ class KmpTorTransportTest {
         assertEquals(TorState.Off, tor.state.value)
     }
 
+    @Test
+    fun stopTimeoutPoisonsTheTransport() = runBlocking<Unit> {
+        startReady()
+        driver.hangOnStop = true
+        withTimeout(5_000) { tor.stop() } // acotado: no se queda colgado
+        assertEquals(TorState.Off, tor.state.value)
+        // Un Tor que no se detuvo puede seguir vivo: no se arranca otro hasta reiniciar el proceso.
+        driver.hangOnStop = false
+        tor.start()
+        assertTrue(tor.state.value is TorState.Error)
+        tor.start()
+        assertTrue(tor.state.value is TorState.Error)
+        assertEquals("no se volvió a arrancar el proceso", 1, driver.starts)
+        // Borrar el estado informa del fallo, aunque borre lo que pueda.
+        File(tor.torDir, "work").mkdirs()
+        try {
+            tor.wipeState()
+            fail("se esperaba IOException")
+        } catch (e: IOException) {
+            // esperado
+        }
+        assertFalse(tor.torDir.exists())
+        assertEquals(TorState.Off, tor.state.value)
+    }
+
+    @Test
+    fun stopTimeoutDuringWipeStateReportsFailureAndPoisons() = runBlocking<Unit> {
+        startReady()
+        driver.hangOnStop = true
+        try {
+            withTimeout(5_000) { tor.wipeState() }
+            fail("se esperaba IOException")
+        } catch (e: IOException) {
+            // esperado
+        }
+        assertEquals(TorState.Off, tor.state.value)
+        driver.hangOnStop = false
+        tor.start()
+        assertTrue(tor.state.value is TorState.Error)
+    }
+
+    @Test
+    fun stopFailureWithoutTimeoutDoesNotPoison() = runBlocking<Unit> {
+        startReady()
+        driver.stopFailure = IllegalStateException("control caído")
+        tor.stop()
+        tor.wipeState()
+        tor.start()
+        assertNotEquals(TorState.Off, tor.state.value)
+        assertFalse(tor.state.value is TorState.Error)
+    }
+
     private suspend fun expectIOException(block: suspend () -> Any) {
         try {
             block()
@@ -362,6 +416,8 @@ class KmpTorTransportTest {
         @Volatile var commandFailure: Exception? = null
         @Volatile var addFailure: Exception? = null
         @Volatile var hangOnStart = false
+        @Volatile var hangOnStop = false
+        @Volatile var stopFailure: Exception? = null
         @Volatile var startCancelled = false
         val startEntered = CompletableDeferred<Unit>()
         @Volatile var socks: InetSocketAddress? = InetSocketAddress("127.0.0.1", 9050)
@@ -383,6 +439,8 @@ class KmpTorTransportTest {
 
         override suspend fun stopDaemon() {
             stops++
+            stopFailure?.let { throw it }
+            if (hangOnStop) awaitCancellation()
         }
 
         @Suppress("UNCHECKED_CAST")
@@ -411,6 +469,7 @@ class KmpTorTransportTest {
     }
 
     private companion object {
+        const val STOP_TIMEOUT_MILLIS = 300L
         const val DUCKDUCKGO = "duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad"
     }
 }

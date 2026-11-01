@@ -47,16 +47,21 @@ import io.matthewnelson.kmp.tor.runtime.TorState as RuntimeState
  *   kmp-tor está desactivado y la salida del proceso va a `/dev/null`; `SafeLogging` queda en su valor
  *   por defecto (activado). Ningún mensaje de error de esta clase incluye claves ni direcciones.
  *
+ * Si Tor no se detiene en el plazo de [stop] (15 s), la instancia queda "envenenada" ([poisoned]):
+ * [start] devuelve `Error` y [wipeState] lanza hasta que se reinicie el proceso.
+ *
  * Debe haber **una sola instancia por proceso** (kmp-tor comparte el runtime por directorio de trabajo).
  * Sus corrutinas propias cuelgan de un `SupervisorJob() + Dispatchers.Default` (regla R7); [stop] espera
  * a la de arranque, así que no queda ninguna viva después.
  */
 class KmpTorTransport internal constructor(
     internal val torDir: File,
+    private val stopTimeoutMillis: Long,
     private val driverFactory: (onState: (RuntimeState) -> Unit) -> TorDriver,
 ) : TorTransport {
 
-    internal constructor(torDir: File) : this(torDir, { onState -> KmpTorDriver(torDir, onState) })
+    internal constructor(torDir: File) :
+        this(torDir, STOP_TIMEOUT_MILLIS, { onState -> KmpTorDriver(torDir, onState) })
 
     constructor(context: Context) : this(File(context.applicationContext.noBackupFilesDir, TOR_DIR))
 
@@ -80,8 +85,19 @@ class KmpTorTransport internal constructor(
     @Volatile private var driver: TorDriver? = null
     private var startJob: Job? = null
 
+    /**
+     * "Envenenado": un `stopDaemon` agotó su plazo y el proceso de Tor puede seguir vivo. Desde entonces
+     * [start] deja el estado en `Error` sin arrancar nada y [wipeState] informa de fallo, hasta que se
+     * reinicie el proceso de la app (solo vive en memoria).
+     */
+    private var poisoned = false
+
     override suspend fun start() {
         lifecycle.withLock {
+            if (poisoned) {
+                mutableState.value = TorState.Error(STOP_TIMED_OUT)
+                return
+            }
             if (running && mutableState.value !is TorState.Error) return
             if (running) stopLocked() // desde Error: limpiar el intento anterior y volver a empezar
             val myRun = synchronized(lock) {
@@ -121,7 +137,10 @@ class KmpTorTransport internal constructor(
                 // kmp-tor conserva el entorno y el runtime por directorio, pero en cada arranque vuelve
                 // a crear los directorios, a escribir geoip si falta y a generar la configuración.
                 driver = null
+                // Se borra aunque Tor no se haya detenido (lo que pueda), pero entonces se informa del fallo:
+                // un Tor aún vivo podría volver a escribir parte de su estado.
                 val deleted = withContext(Dispatchers.IO) { !torDir.exists() || torDir.deleteRecursively() }
+                if (poisoned) throw IOException(STOP_TIMED_OUT)
                 if (!deleted) throw IOException("No se pudo borrar el estado de Tor")
             }
         }
@@ -232,8 +251,12 @@ class KmpTorTransport internal constructor(
             running = false
             run++
         }
-        // Interrumpe también un arranque en curso. Acotado: un Tor colgado no bloquea al motor.
-        driver?.let { d -> withTimeoutOrNull(STOP_TIMEOUT_MILLIS) { runCatching { d.stopDaemon() } } }
+        // Interrumpe también un arranque en curso. Acotado: un Tor colgado no bloquea al motor, pero
+        // envenena el transporte (ver [poisoned]). Un fallo que no sea por tiempo no envenena.
+        driver?.let { d ->
+            val finished = withTimeoutOrNull(stopTimeoutMillis) { runCatching { d.stopDaemon() } }
+            if (finished == null) poisoned = true
+        }
         startJob?.cancelAndJoin()
         startJob = null
         mutableState.value = TorState.Off
@@ -290,6 +313,7 @@ class KmpTorTransport internal constructor(
     private companion object {
         const val TOR_DIR = "tor"
         const val START_FAILED = "No se pudo arrancar Tor"
+        const val STOP_TIMED_OUT = "Tor no se detuvo a tiempo; hay que reiniciar la app"
         const val STOP_TIMEOUT_MILLIS = 15_000L
         const val COMMAND_TIMEOUT_MILLIS = 30_000L
     }
