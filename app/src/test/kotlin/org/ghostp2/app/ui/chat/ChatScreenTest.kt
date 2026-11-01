@@ -207,8 +207,10 @@ class ChatScreenTest {
         )
         show()
         scrollTo("hola")
-        compose.onNodeWithContentDescription(text(R.string.chat_bubble_status, text(R.string.chat_sender_me), "hola", text(R.string.chat_status_delivered)))
+        compose.onNodeWithContentDescription(text(R.string.chat_bubble_status, text(R.string.chat_sender_me), "hola", "entregado"))
             .assertExists()
+        // Sin el "✓": TalkBack leería el símbolo.
+        assertFalse(text(R.string.chat_bubble_status, "Tú", "hola", "entregado").contains("✓"))
         scrollTo("no estaba")
         compose.onNodeWithContentDescription(
             text(R.string.chat_bubble_status, "Tú", "no estaba", text(R.string.chat_status_not_connected)),

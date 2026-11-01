@@ -131,6 +131,7 @@ private fun NotOnline(status: EngineStatus, startFailed: Boolean, onActivate: ()
         startFailed -> stringResource(R.string.banner_unexpected) to retry
         status is EngineStatus.StartingTor -> stringResource(R.string.banner_starting, status.percent) to null
         status is EngineStatus.Error && status.kind == EngineErrorKind.STORAGE -> stringResource(R.string.banner_storage_error) to retry
+        status is EngineStatus.Error && status.kind == EngineErrorKind.TOR_STUCK -> stringResource(R.string.banner_tor_stuck) to retry
         status is EngineStatus.Error -> stringResource(R.string.banner_tor_error) to retry
         else -> stringResource(R.string.add_not_online) to stringResource(R.string.action_activate)
     }

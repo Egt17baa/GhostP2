@@ -20,6 +20,7 @@ import org.ghostp2.data.SettingsRepository
 import org.ghostp2.engine.AcceptResult
 import org.ghostp2.engine.Contact
 import org.ghostp2.engine.ContactRepository
+import org.ghostp2.engine.DeletionJournal
 import org.ghostp2.engine.EngineHarness
 import org.ghostp2.engine.InvitationState
 import org.ghostp2.engine.FakeTor
@@ -141,7 +142,25 @@ class TestStorage : AppStorage {
 
     override val settings = InMemorySettingsRepository()
 
-    override val deletions = InMemoryDeletionJournal()
+    private val memoryDeletions = InMemoryDeletionJournal()
+
+    /**
+     * Si no es nulo, la próxima retirada del diario de borrados (la del final de un borrado de
+     * contacto) espera a que se complete; las siguientes, no. [deletionRemoveReached] avisa al llegar.
+     */
+    @Volatile var deletionRemoveGate: CompletableDeferred<Unit>? = null
+    @Volatile var deletionRemoveReached: CompletableDeferred<Unit>? = null
+
+    override val deletions: DeletionJournal = object : DeletionJournal by memoryDeletions {
+        override suspend fun remove(contactId: String) {
+            val gate = synchronized(this@TestStorage) { deletionRemoveGate.also { deletionRemoveGate = null } }
+            if (gate != null) {
+                deletionRemoveReached?.complete(Unit)
+                gate.await()
+            }
+            memoryDeletions.remove(contactId)
+        }
+    }
 
     override suspend fun probe() {
         probeReached?.complete(Unit)

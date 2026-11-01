@@ -346,28 +346,50 @@ class KmpTorTransportTest {
     }
 
     @Test
-    fun stopTimeoutPoisonsTheTransport() = runBlocking<Unit> {
+    fun poisonedRecoversWhenTheRetriedStopFinishes() = runBlocking<Unit> {
         startReady()
         driver.hangOnStop = true
         withTimeout(5_000) { tor.stop() } // acotado: no se queda colgado
         assertEquals(TorState.Off, tor.state.value)
-        // Un Tor que no se detuvo puede seguir vivo: no se arranca otro hasta reiniciar el proceso.
-        driver.hangOnStop = false
-        tor.start()
-        assertTrue(tor.state.value is TorState.Error)
-        tor.start()
-        assertTrue(tor.state.value is TorState.Error)
-        assertEquals("no se volvió a arrancar el proceso", 1, driver.starts)
-        // Borrar el estado informa del fallo, aunque borre lo que pueda.
+        assertEquals(1, driver.stops)
+        // Envenenado: borrar el estado informa del fallo (borra lo que puede) sin volver a esperar.
         File(tor.torDir, "work").mkdirs()
         try {
-            tor.wipeState()
+            withTimeout(5_000) { tor.wipeState() }
             fail("se esperaba IOException")
         } catch (e: IOException) {
             // esperado
         }
         assertFalse(tor.torDir.exists())
-        assertEquals(TorState.Off, tor.state.value)
+        assertEquals(1, driver.stops)
+        // El Tor colgado termina por fin: start() reintenta detenerlo una vez y arranca con normalidad.
+        driver.hangOnStop = false
+        tor.start()
+        assertEquals(2, driver.stops)
+        assertEquals(TorState.Starting(0), tor.state.value) // R13
+        withTimeout(5_000) { while (driver.starts < 2) delay(10) }
+        driver.emit(ready)
+        assertEquals(TorState.Ready, tor.state.value)
+        // Ya no está envenenado: borrar el estado vuelve a funcionar.
+        tor.wipeState()
+    }
+
+    @Test
+    fun poisonedTwiceStaysStuck() = runBlocking<Unit> {
+        startReady()
+        driver.hangOnStop = true
+        withTimeout(5_000) { tor.stop() }
+        // El reintento también agota el plazo: Error "atascado", sin arrancar otro proceso.
+        withTimeout(5_000) { tor.start() }
+        assertEquals(TorState.Error("Tor no se detuvo a tiempo; hay que reiniciar la app", stuck = true), tor.state.value)
+        assertEquals(2, driver.stops)
+        assertEquals("no se volvió a arrancar el proceso", 1, driver.starts)
+        // Cada start() reintenta una sola vez.
+        withTimeout(5_000) { tor.start() }
+        assertTrue((tor.state.value as TorState.Error).stuck)
+        assertEquals(3, driver.stops)
+        assertEquals(1, driver.starts)
+        driver.hangOnStop = false
     }
 
     @Test
@@ -381,9 +403,10 @@ class KmpTorTransportTest {
             // esperado
         }
         assertEquals(TorState.Off, tor.state.value)
+        // Sigue colgado: el reintento de start() también agota el plazo.
+        withTimeout(5_000) { tor.start() }
+        assertTrue((tor.state.value as TorState.Error).stuck)
         driver.hangOnStop = false
-        tor.start()
-        assertTrue(tor.state.value is TorState.Error)
     }
 
     @Test

@@ -47,8 +47,11 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 
-/** Origen de un [EngineStatus.Error]: el almacenamiento cifrado o cualquier otra cosa (Tor). */
-enum class EngineErrorKind { TOR, STORAGE }
+/**
+ * Origen de un [EngineStatus.Error]: el almacenamiento cifrado, Tor atascado ([TorState.Error.stuck]:
+ * hay que cerrar y volver a abrir la app) o cualquier otra cosa (Tor).
+ */
+enum class EngineErrorKind { TOR, STORAGE, TOR_STUCK }
 
 /** Estado visible del motor. */
 sealed interface EngineStatus {
@@ -61,7 +64,7 @@ sealed interface EngineStatus {
      *
      * Regla: [message] es un texto interno (en español, sin claves ni direcciones) para pruebas y
      * diagnóstico, no para la interfaz. Antes de mostrarlo hay que pasarlo a un recurso de cadena (hoy,
-     * según [kind]: `banner_storage_error` o `banner_tor_error`); nunca se muestra tal cual.
+     * según [kind]: `banner_storage_error`, `banner_tor_stuck` o `banner_tor_error`); nunca se muestra tal cual.
      */
     data class Error(val message: String, val kind: EngineErrorKind = EngineErrorKind.TOR) : EngineStatus
 }
@@ -288,6 +291,8 @@ class MessengerEngine(
                 } finally {
                     mutableStatus.value = if (e is StorageStartException) {
                         EngineStatus.Error(STORAGE_ERROR_MESSAGE, EngineErrorKind.STORAGE)
+                    } else if (e is TorStartException) {
+                        EngineStatus.Error(e.message ?: e.javaClass.simpleName, e.kind)
                     } else {
                         EngineStatus.Error(e.message ?: e.javaClass.simpleName)
                     }
@@ -891,7 +896,8 @@ class MessengerEngine(
             }
             when (final) {
                 null -> throw TorStartException("Tor no terminó de arrancar")
-                is TorState.Error -> throw TorStartException(final.message)
+                is TorState.Error ->
+                    throw TorStartException(final.message, if (final.stuck) EngineErrorKind.TOR_STUCK else EngineErrorKind.TOR)
                 TorState.Off -> throw TorStartException("Tor se detuvo durante el arranque")
                 else -> Unit
             }
@@ -1340,7 +1346,7 @@ private inline fun succeeded(block: () -> Unit): Boolean =
     }
 
 /** Fallo al arrancar Tor; el mensaje es el que se muestra en [EngineStatus.Error]. */
-internal class TorStartException(message: String) : Exception(message)
+internal class TorStartException(message: String, val kind: EngineErrorKind = EngineErrorKind.TOR) : Exception(message)
 
 /** Fallo del almacenamiento durante el arranque; [MessengerEngine.start] lo muestra como `Error(…, STORAGE)`. */
 internal class StorageStartException(cause: Throwable) : Exception("Fallo del almacenamiento al arrancar", cause)

@@ -1,8 +1,11 @@
 package org.ghostp2.app
 
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import org.ghostp2.engine.Contact
+import org.ghostp2.engine.ContactStatus
 import org.ghostp2.engine.EngineHarness
 import org.ghostp2.engine.EngineStatus
 import org.ghostp2.engine.Notice
@@ -89,6 +92,28 @@ class AppOpenAndDeleteTest {
                 withTimeout(TIMEOUT) { peer.contacts(0).contacts.first { it.isEmpty() } }
             }
         }
+    }
+
+    @Test
+    fun deleteFinishingAfterWipeAllLeavesNoOutcome() {
+        runBlocking {
+            app.storage.contacts.upsert(
+                Contact("c1", "Ana", ByteArray(32), "x".repeat(56), ByteArray(32), ByteArray(32), ByteArray(32), false, ContactStatus.ACTIVE),
+            )
+        }
+        val gate = CompletableDeferred<Unit>()
+        val reached = CompletableDeferred<Unit>()
+        app.storage.deletionRemoveReached = reached
+        app.storage.deletionRemoveGate = gate
+        // El borrado se queda al final (contacto ya borrado, retirando su entrada del diario)...
+        val delete = app.container.deleteContact("c1", "Ana")
+        runBlocking { withTimeout(TIMEOUT) { reached.await() } }
+        // ...mientras "Borrar todo" empieza y termina.
+        runBlocking { withTimeout(TIMEOUT) { app.container.wipeAll() } }
+        gate.complete(Unit)
+        assertEquals(UnpairDelivery.NOT_DELIVERED, runBlocking { withTimeout(TIMEOUT) { delete.await() } })
+        // Terminó después del borrado general: no deja resultado (ni el nombre) para la lista.
+        assertTrue(runBlocking { app.container.unseenDeleteOutcomes.first() }.isEmpty())
     }
 
     private companion object {

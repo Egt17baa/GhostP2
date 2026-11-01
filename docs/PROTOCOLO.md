@@ -800,12 +800,14 @@ Complementan las del núcleo (§13). GhostP2 no promete más de lo que hay aquí
 - **Estado de Tor en disco**: guardas y caché de consenso revelan, a quien lea el
   almacenamiento de la app, que se ha usado Tor (no con quién).
 - **Tor colgado al detener o borrar**: detener Tor espera como mucho 15 s. Si el proceso no para en
-  ese plazo, `KmpTorTransport` queda "envenenado" hasta que se reinicie el proceso de la app: los
-  arranques siguientes dejan Tor en `Error` sin lanzar otro proceso (el motor muestra el error con
-  "Reintentar", que vuelve a fallar hasta reiniciar), y `wipeState` informa de fallo. "Borrar todo" y
-  "Empezar de cero" borran igualmente su directorio (ese fallo se ignora, como el resto de Tor), y un
-  Tor aún vivo podría volver a escribir ahí parte de su estado (guardas, consenso; nunca claves, que no
-  se escriben) hasta que muera. No se reintenta la parada ni se avisa de forma específica.
+  ese plazo, `KmpTorTransport` queda "envenenado": no lanza otro proceso y `wipeState` informa de
+  fallo (sin volver a esperar). Cada arranque posterior ("Activar", "Reintentar") reintenta una vez
+  detener el Tor colgado con el mismo plazo: si termina, arranca con normalidad; si no, Tor queda en
+  `Error` con `stuck` y el motor en `Error` de tipo `TOR_STUCK`, con el aviso "Tor no responde. Cierra
+  GhostP2 desde Recientes y vuelve a abrirlo." (siempre distinto de `Off`, R13). Solo reiniciar el
+  proceso de la app lo arregla seguro. "Borrar todo" y "Empezar de cero" borran igualmente su
+  directorio (ese fallo se ignora, como el resto de Tor), y un Tor aún vivo podría volver a escribir
+  ahí parte de su estado (guardas, consenso; nunca claves, que no se escriben) hasta que muera.
 - **Eventos atrasados de Tor**: el estado de Tor se deriva de los eventos del runtime de kmp-tor, que no
   dicen de qué arranque son. Tras detener y volver a arrancar enseguida, un evento atrasado del
   arranque anterior puede dar `Ready` antes de tiempo (las operaciones fallan con `IOException` y se

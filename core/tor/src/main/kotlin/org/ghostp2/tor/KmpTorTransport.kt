@@ -48,7 +48,7 @@ import io.matthewnelson.kmp.tor.runtime.TorState as RuntimeState
  *   por defecto (activado). Ningún mensaje de error de esta clase incluye claves ni direcciones.
  *
  * Si Tor no se detiene en el plazo de [stop] (15 s), la instancia queda "envenenada" ([poisoned]):
- * [start] devuelve `Error` y [wipeState] lanza hasta que se reinicie el proceso.
+ * [wipeState] lanza y cada [start] reintenta una vez detenerlo; si tampoco, `Error` con `stuck`.
  *
  * Debe haber **una sola instancia por proceso** (kmp-tor comparte el runtime por directorio de trabajo).
  * Sus corrutinas propias cuelgan de un `SupervisorJob() + Dispatchers.Default` (regla R7); [stop] espera
@@ -86,20 +86,18 @@ class KmpTorTransport internal constructor(
     private var startJob: Job? = null
 
     /**
-     * "Envenenado": un `stopDaemon` agotó su plazo y el proceso de Tor puede seguir vivo. Desde entonces
-     * [start] deja el estado en `Error` sin arrancar nada y [wipeState] informa de fallo, hasta que se
-     * reinicie el proceso de la app (solo vive en memoria).
+     * "Envenenado": un `stopDaemon` agotó su plazo y el proceso de Tor puede seguir vivo. Mientras dure,
+     * no se arranca otro Tor y [wipeState] informa de fallo. Cada [start] reintenta una vez detenerlo
+     * con el mismo plazo: si termina, se arranca con normalidad; si no, el estado queda en `Error` con
+     * `stuck` (la interfaz pide cerrar y volver a abrir la app). Solo vive en memoria.
      */
     private var poisoned = false
 
     override suspend fun start() {
         lifecycle.withLock {
-            if (poisoned) {
-                mutableState.value = TorState.Error(STOP_TIMED_OUT)
-                return
-            }
             if (running && mutableState.value !is TorState.Error) return
             if (running) stopLocked() // desde Error: limpiar el intento anterior y volver a empezar
+            if (poisoned && !recoverLocked()) return
             val myRun = synchronized(lock) {
                 running = true
                 processSeen = false
@@ -108,7 +106,7 @@ class KmpTorTransport internal constructor(
                 ++run
             }
             val d = try {
-                driver ?: withContext(Dispatchers.IO) { driverFactory(::onRuntimeState) }.also { driver = it }
+                withContext(Dispatchers.IO) { obtainDriver() }
             } catch (e: Exception) {
                 failRun(myRun)
                 return
@@ -246,14 +244,51 @@ class KmpTorTransport internal constructor(
         }
     }
 
+    private fun obtainDriver(): TorDriver =
+        driver ?: driverFactory(::onRuntimeState).also { driver = it }
+
+    /**
+     * Con el transporte envenenado: reintenta una vez detener Tor (mismo plazo que [stop]). `true` si
+     * terminó (ya no está envenenado); si no, `false` con el estado en `Error` "atascado". Mientras
+     * tanto el estado es `Starting(0)` (R13: [start] nunca deja `Off`).
+     */
+    private suspend fun recoverLocked(): Boolean {
+        mutableState.value = TorState.Starting(0)
+        val d = try {
+            withContext(Dispatchers.IO) { obtainDriver() }
+        } catch (e: CancellationException) {
+            mutableState.value = stuckError()
+            throw e
+        } catch (e: Exception) {
+            mutableState.value = stuckError()
+            return false
+        }
+        val finished = try {
+            withTimeoutOrNull(stopTimeoutMillis) { runCatching { d.stopDaemon() } }
+        } catch (e: CancellationException) {
+            mutableState.value = stuckError()
+            throw e
+        }
+        if (finished == null) {
+            mutableState.value = stuckError()
+            return false
+        }
+        poisoned = false
+        return true
+    }
+
+    private fun stuckError() = TorState.Error(STOP_TIMED_OUT, stuck = true)
+
     private suspend fun stopLocked() {
         synchronized(lock) {
             running = false
             run++
         }
         // Interrumpe también un arranque en curso. Acotado: un Tor colgado no bloquea al motor, pero
-        // envenena el transporte (ver [poisoned]). Un fallo que no sea por tiempo no envenena.
-        driver?.let { d ->
+        // envenena el transporte (ver [poisoned]). Un fallo que no sea por tiempo no envenena. Ya
+        // envenenado no hay nada en marcha: no se vuelve a esperar (solo [start] lo reintenta).
+        val d = driver
+        if (d != null && !poisoned) {
             val finished = withTimeoutOrNull(stopTimeoutMillis) { runCatching { d.stopDaemon() } }
             if (finished == null) poisoned = true
         }

@@ -7,7 +7,11 @@ sealed interface TorState {
     data object Off : TorState
     data class Starting(val percent: Int) : TorState
     data object Ready : TorState
-    data class Error(val message: String) : TorState
+    /**
+     * Fallo de Tor. [stuck]: un Tor anterior no se detuvo y sigue sin responder; no se arrancará otro
+     * hasta reiniciar el proceso de la app (el motor lo muestra como [EngineErrorKind.TOR_STUCK]).
+     */
+    data class Error(val message: String, val stuck: Boolean = false) : TorState
 }
 
 /**

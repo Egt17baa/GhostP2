@@ -228,6 +228,22 @@ class EngineStartTest {
     }
 
     @Test
+    fun stuckTorIsATorStuckError() = runBlocking {
+        val tor = ControlledTor(FakeTorNetwork())
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        try {
+            val engine = MessengerEngine(tor, InMemoryIdentityRepository(), InMemoryContactRepository(), scope)
+            val starting = scope.launch { engine.start() }
+            tor.awaitStarted()
+            tor.mutableState.value = TorState.Error("atascado", stuck = true)
+            withTimeout(5_000) { starting.join() }
+            assertEquals(EngineStatus.Error("atascado", EngineErrorKind.TOR_STUCK), engine.status.value)
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
     fun torStartExceptionSetsErrorStatus() = runBlocking {
         val tor = ControlledTor(FakeTorNetwork()).apply { failOnStart = IOException("binario ausente") }
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)

@@ -1,5 +1,6 @@
 package org.ghostp2.app.ui.chat
 
+import androidx.annotation.StringRes
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -266,7 +267,7 @@ private fun Messages(
 }
 
 /**
- * Una burbuja: para la accesibilidad, un solo elemento ("Tú: hola. ✓ entregado", "Ana: qué tal") con el
+ * Una burbuja: para la accesibilidad, un solo elemento ("Tú: hola. entregado", "Ana: qué tal") con el
  * remitente, el contenido y el estado. La miniatura de una foto se puede pulsar y queda aparte.
  */
 @Composable
@@ -279,7 +280,7 @@ private fun Bubble(item: ChatItem, contactName: String, photoContent: @Composabl
         is ChatContent.Photo -> stringResource(R.string.chat_photo)
         is ChatContent.PhotoDiscarded -> stringResource(R.string.chat_photo_discarded)
     }
-    val description = label.text?.let { stringResource(R.string.chat_bubble_status, sender, content, stringResource(it)) }
+    val description = label.text?.let { stringResource(R.string.chat_bubble_status, sender, content, stringResource(spokenStatus(it))) }
         ?: stringResource(R.string.chat_bubble, sender, content)
     Column(
         Modifier.fillMaxWidth().semantics(mergeDescendants = true) { contentDescription = description },
@@ -308,6 +309,11 @@ private fun Bubble(item: ChatItem, contactName: String, photoContent: @Composabl
         }
     }
 }
+
+/** Etiqueta de estado para la accesibilidad: sin el "✓", que TalkBack leería como un símbolo. */
+@StringRes
+private fun spokenStatus(@StringRes text: Int): Int =
+    if (text == R.string.chat_status_delivered) R.string.chat_status_delivered_spoken else text
 
 /** El texto del mensaje; tachado si se descartó (spec §6.7). */
 private fun messageText(text: String, struck: Boolean): AnnotatedString =

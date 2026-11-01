@@ -407,6 +407,7 @@ class AppContainer internal constructor(
             try {
                 engine.wipeAll()
             } finally {
+                clearDeleteOutcomes()
                 mutableStorage.update { StorageState.Unknown }
                 probeLocked()
             }
@@ -424,6 +425,7 @@ class AppContainer internal constructor(
                 store.forceReset()
                 runCatching { tor.wipeState() }
             } finally {
+                clearDeleteOutcomes()
                 mutableStorage.update { StorageState.Unknown }
                 probeLocked()
             }
@@ -464,7 +466,7 @@ class AppContainer internal constructor(
                     synchronized(control) { foregroundChatId = null }
                     mutableLastDiagnostic.value = null
                     // Los resultados de borrado sin mostrar llevan nombres de contactos borrados.
-                    deleteOutcomes.value = emptyMap()
+                    clearDeleteOutcomes()
                     mutableStorage.update { StorageState.Unknown }
                     probeLocked()
                     // Aún con el cerrojo: un start() pedido durante el borrado ve otra generación y no arranca.
@@ -480,12 +482,31 @@ class AppContainer internal constructor(
      * (el contacto ya no existe al terminar): el resultado queda en [unseenDeleteOutcomes] hasta que se
      * muestre ([deleteOutcomeShown]); solo se guarda el último por id, en memoria.
      */
-    fun deleteContact(contactId: String, name: String): Deferred<UnpairDelivery> =
-        scope.async {
+    fun deleteContact(contactId: String, name: String): Deferred<UnpairDelivery> {
+        // Un borrado que termina tras "Borrar todo", "Empezar de cero" o borrar el archivo dañado no deja
+        // resultado (llevaría el nombre de un contacto ya borrado de todo).
+        val generation = synchronized(control) { wipeGeneration to outcomeEpoch }
+        return scope.async {
             engine.deleteContact(contactId).also { delivery ->
-                deleteOutcomes.update { it + (contactId to DeleteOutcome(contactId, name, delivery)) }
+                synchronized(control) {
+                    if ((wipeGeneration to outcomeEpoch) == generation) {
+                        deleteOutcomes.update { it + (contactId to DeleteOutcome(contactId, name, delivery)) }
+                    }
+                }
             }
         }
+    }
+
+    /** Sube con cada borrado general ([clearDeleteOutcomes]); con [control]. */
+    private var outcomeEpoch = 0L
+
+    /** Olvida los resultados de borrado sin mostrar y descarta los que terminen después. */
+    private fun clearDeleteOutcomes() {
+        synchronized(control) {
+            outcomeEpoch++
+            deleteOutcomes.value = emptyMap()
+        }
+    }
 
     /** Último resultado de borrado por id de contacto, aún sin mostrar. */
     private val deleteOutcomes = MutableStateFlow<Map<String, DeleteOutcome>>(emptyMap())

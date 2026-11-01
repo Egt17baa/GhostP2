@@ -33,6 +33,7 @@
     <string name="banner_stopped">GhostP2 está desactivado</string>
     <string name="banner_starting">Conectando a la red Tor… %1$d %%</string>
     <string name="banner_tor_error">Sin conexión con Tor</string>
+    <string name="banner_tor_stuck">Tor no responde. Cierra GhostP2 desde Recientes y vuelve a abrirlo.</string>
     <string name="banner_storage_error">No se pudieron leer o guardar tus datos cifrados</string>
     <string name="banner_unexpected">Error inesperado</string>
 
@@ -148,6 +149,7 @@
     <!-- Chat -->
     <string name="chat_status_sending">enviando…</string>
     <string name="chat_status_delivered">✓ entregado</string>
+    <string name="chat_status_delivered_spoken">entregado</string>
     <string name="chat_status_not_connected">No entregado: tu contacto no está conectado. Descartado</string>
     <string name="chat_status_failed">No entregado. Descartado</string>
     <string name="chat_engine_stopped">Activa GhostP2 para enviar</string>

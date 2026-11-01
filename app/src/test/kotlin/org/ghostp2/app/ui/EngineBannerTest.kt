@@ -70,6 +70,16 @@ class EngineBannerTest {
     }
 
     @Test
+    fun stuckTorSaysToReopenTheApp() {
+        show(EngineStatus.Error("x", EngineErrorKind.TOR_STUCK))
+        compose.onNodeWithText("Tor no responde. Cierra GhostP2 desde Recientes y vuelve a abrirlo.").assertExists()
+        assertAbsent("Sin conexión con Tor")
+        // Reintentar sigue disponible: cada intento vuelve a probar a detener el Tor colgado.
+        compose.onNodeWithText("Reintentar").performClick()
+        assertEquals(1, activations)
+    }
+
+    @Test
     fun storageErrorOffersRetry() {
         show(EngineStatus.Error("x", EngineErrorKind.STORAGE))
         compose.onNodeWithText("No se pudieron leer o guardar tus datos cifrados").assertExists()

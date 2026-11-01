@@ -34,6 +34,9 @@ fun EngineBanner(status: EngineStatus, startFailed: Boolean, onActivate: () -> U
             Banner(stringResource(R.string.banner_starting, status.percent), secondary = onDisconnect)
         status is EngineStatus.Error && status.kind == EngineErrorKind.STORAGE ->
             Banner(stringResource(R.string.banner_storage_error), primary = retry to onActivate)
+        // Un Tor anterior no se detuvo: solo se arregla reiniciando el proceso (reintentar lo vuelve a probar).
+        status is EngineStatus.Error && status.kind == EngineErrorKind.TOR_STUCK ->
+            Banner(stringResource(R.string.banner_tor_stuck), primary = retry to onActivate, secondary = onDisconnect)
         status is EngineStatus.Error ->
             Banner(stringResource(R.string.banner_tor_error), primary = retry to onActivate, secondary = onDisconnect)
         else -> Unit // Online: nada

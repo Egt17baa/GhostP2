@@ -134,7 +134,7 @@ class ContactDetailViewModel(private val container: AppContainer, private val co
     init {
         viewModelScope.launch {
             // Fuera del hilo principal: lee el almacenamiento y calcula con las claves.
-            safetyNumber.value = withContext(Dispatchers.Default) { readSafetyNumber() }
+            safetyNumber.value = withContext(Dispatchers.IO) { readSafetyNumber() }
         }
     }
 
@@ -209,7 +209,8 @@ class ContactDetailViewModel(private val container: AppContainer, private val co
      * Borra el contacto avisándole ([AppContainer.deleteContact], en el scope del contenedor: salir de
      * la pantalla no lo corta). Una sola vez; el resultado llega a [deleteResult] y se da por mostrado
      * ([AppContainer.deleteOutcomeShown]). Si se sale antes de que llegue, lo enseña la lista.
-     * Un `Deferred` cancelado con este ViewModel aún activo (no por salir) cuenta como fallo.
+     * Un `Deferred` cancelado con este ViewModel aún activo (no por salir) cuenta como fallo si el
+     * contacto sigue guardado, y como [UnpairDelivery.NOT_DELIVERED] si ya no está.
      */
     fun delete() {
         if (ownDelete.value) return
@@ -226,14 +227,29 @@ class ContactDetailViewModel(private val container: AppContainer, private val co
                 mutableDeleteResult.value = result.await()
                 container.deleteOutcomeShown(contactId)
             } catch (e: CancellationException) {
-                // Salir de la pantalla cancela esta corrutina: se propaga. Si no, se canceló el borrado.
+                // Salir de la pantalla cancela esta corrutina: se propaga. Si no, se canceló el borrado:
+                // si el contacto ya no está, se borró sin confirmar el aviso; si sigue, es un fallo.
                 if (!isActive) throw e
-                deleteFailed()
+                if (contactGone()) {
+                    mutableDeleteResult.value = UnpairDelivery.NOT_DELIVERED
+                    container.deleteOutcomeShown(contactId)
+                } else {
+                    deleteFailed()
+                }
             } catch (e: Exception) {
                 // El almacenamiento no pudo borrarlo: se avisa y se puede reintentar.
                 deleteFailed()
             }
         }
+    }
+
+    /** El contacto ya no está guardado; si no se puede leer, `false` (se trata como fallo). */
+    private suspend fun contactGone(): Boolean = try {
+        container.contacts.all().none { it.id == contactId }
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        false
     }
 
     private fun deleteFailed() {

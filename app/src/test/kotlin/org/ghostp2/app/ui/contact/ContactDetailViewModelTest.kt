@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModelStore
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
@@ -273,6 +274,24 @@ class ContactDetailViewModelTest {
         eventually(TIMEOUT) { vm.deleteResult.value != null }
         assertEquals(UnpairDelivery.NOT_DELIVERED, vm.deleteResult.value)
         assertNull(vm.actionError.value)
+    }
+
+    @Test
+    fun cancelledDeleteAfterTheContactIsGoneIsNotDelivered() {
+        runBlocking { app.storage.contacts.upsert(contact("c1")) }
+        // El borrado se cancela al final, con el contacto ya borrado (al retirar su entrada del diario).
+        val gate = CompletableDeferred<Unit>()
+        app.storage.deletionRemoveGate = gate
+        gate.completeExceptionally(CancellationException("cancelado"))
+        val vm = viewModel("c1")
+        eventually(TIMEOUT) { vm.state.value != null }
+        vm.delete()
+        eventually(TIMEOUT) { vm.deleteResult.value != null }
+        assertEquals(UnpairDelivery.NOT_DELIVERED, vm.deleteResult.value)
+        assertNull(vm.actionError.value)
+        assertTrue(runBlocking { app.storage.contacts.all() }.isEmpty())
+        // Mostrado aquí: la lista no lo enseña.
+        assertTrue(runBlocking { app.container.unseenDeleteOutcomes.first() }.isEmpty())
     }
 
     @Test
