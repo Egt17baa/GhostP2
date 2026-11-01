@@ -218,6 +218,11 @@ apksigner sign --ks prueba.jks --out app-arm64-v8a-release.apk \
 | 78 | Repite los pasos 24, 32 y 37–40 (texto, descarte y foto guardada sin GPS). | Igual. |
 | 79 | Repite los pasos 46, 59 y 73–74 (bloqueo, Desconectar y Borrar todo). | Igual: nada falla por R8 (minificación). |
 
+> **Nota:** mientras una pantalla aparece o desaparece (menos de un segundo), la app ignora los
+> toques en "Volver" y en las filas, para que un doble toque no abra pantallas duplicadas.
+> Si un toque no hace nada justo al cambiar de pantalla, vuelve a tocar: no es un fallo.
+> El gesto de atrás del sistema funciona siempre.
+
 ## Lo que esta prueba no cubre
 
 - **Identidad cambiada** ("La identidad de <nombre> ha cambiado"): hace falta que un solo lado

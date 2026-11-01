@@ -442,8 +442,9 @@ Reglas acordadas mientras se ejecutaba el plan (el detalle está en `docs/PROTOC
 
 Aplazado por la revisión final (lo arreglado en esa revisión ya no figura aquí):
 
-- Task 6: acotar mejor las búsquedas de nodos en las pruebas de la lista; `onClickLabel` en las filas.
-- Task 9: mostrar en la lista el resultado de borrar un contacto; no conservar en el ViewModel el último nombre; reintento del número de seguridad; `Deferred` cancelado (M7); prueba de `deleteWithEngineStopped`.
+- Task 6: acotar mejor las búsquedas de nodos en las pruebas de la lista; `onClickLabel` en las filas; prueba de error a mitad del flujo de contactos; prueba de parar el motor con un contacto.
+- Task 9: mostrar en la lista el resultado de borrar un contacto; conservar en el ViewModel el último nombre; reintento del número de seguridad; `Deferred` cancelado (M7); prueba de `deleteWithEngineStopped`.
+- CI: fijar también a SHA las acciones del trabajo `test`.
 - Task 10: semántica accesible de las burbujas (unidas, con el remitente); suavizar el comentario de `leaveNaming`; formato del contador.
 - Task 15: buscar `gms`/`firebase` en el dex del APK; comprobar el resumen del certificado firmante contra una variable del repositorio; mover los `-dontwarn` a las consumer-rules de `core/tor`; regla "pasar `Error.message` a un recurso antes de mostrarlo".
 - Task 3: (b) fijar el destino de los sinks antes de suscribirse; (d) nota sobre sinks de una sola instancia; marca de `KmpTorTransport` "envenenado" tras agotar el plazo de `stop`.
