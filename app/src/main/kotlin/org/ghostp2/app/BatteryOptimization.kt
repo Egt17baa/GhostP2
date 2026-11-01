@@ -5,7 +5,9 @@ import android.content.Context
 import android.content.Intent
 import android.os.PowerManager
 import android.provider.Settings
+import androidx.annotation.StringRes
 import androidx.core.net.toUri
+import java.util.Locale
 
 /**
  * Exención de la optimización de batería (spec §6.9): sin ella, Doze corta las conexiones de Tor y no
@@ -22,4 +24,17 @@ object BatteryOptimization {
     @SuppressLint("BatteryLife")
     fun requestIntent(context: Context): Intent =
         Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, "package:${context.packageName}".toUri())
+
+    /**
+     * Ayuda para el ahorro de energía propio del fabricante ([android.os.Build.MANUFACTURER]), que la
+     * exención de Android no desactiva: dónde dejar GhostP2 sin restricciones. Sin distinguir mayúsculas.
+     */
+    @StringRes
+    fun manufacturerHint(manufacturer: String): Int = when (manufacturer.trim().lowercase(Locale.ROOT)) {
+        "xiaomi", "redmi", "poco" -> R.string.battery_hint_xiaomi
+        "samsung" -> R.string.battery_hint_samsung
+        "huawei", "honor" -> R.string.battery_hint_huawei
+        "oneplus", "oppo", "realme" -> R.string.battery_hint_oppo
+        else -> R.string.battery_hint_generic
+    }
 }

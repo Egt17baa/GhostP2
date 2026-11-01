@@ -21,12 +21,14 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.retryWhen
 import kotlinx.coroutines.launch
 import org.ghostp2.app.AppContainer
 import org.ghostp2.app.StorageState
+import org.ghostp2.app.ui.onboarding.OnboardingRoute
 import org.ghostp2.data.AppSettings
 
 /** Lo que la interfaz pide a la actividad: servicio, permiso de notificaciones y exención de batería. */
@@ -39,8 +41,8 @@ class ActivityActions(
 
 /**
  * Raíz de la interfaz. Sin comprobar el almacenamiento: lo comprueba y muestra la carga; si falla:
- * [StorageErrorScreen]; con los ajustes aún sin leer: solo la carga; después, el `NavHost` (inicio en
- * [Routes.CONTACTS]).
+ * [StorageErrorScreen]; con los ajustes aún sin leer: solo la carga; mientras `onboardingDone` sea falso:
+ * la bienvenida; después, el `NavHost` (inicio en [Routes.CONTACTS]).
  */
 @Composable
 fun GhostRoot(container: AppContainer, actions: ActivityActions) {
@@ -69,6 +71,8 @@ private fun ReadyRoot(container: AppContainer, actions: ActivityActions) {
     var round by remember { mutableIntStateOf(0) }
     var exhaustedRounds by remember { mutableIntStateOf(0) }
     var exhausted by remember { mutableStateOf(false) }
+    var finishing by remember { mutableStateOf(false) }
+    val ui = rememberCoroutineScope()
     val settingsFlow = remember(container, round) {
         container.settings.settings
             .retryWhen { _, attempt ->
@@ -99,8 +103,24 @@ private fun ReadyRoot(container: AppContainer, actions: ActivityActions) {
         }
         return
     }
-    if (settings == null) {
+    val current = settings
+    if (current == null) {
         Loading()
+        return
+    }
+    if (!current.onboardingDone) {
+        OnboardingRoute(actions, onFinish = {
+            if (!finishing) {
+                finishing = true
+                ui.launch {
+                    try {
+                        finishOnboarding(container, actions)
+                    } finally {
+                        finishing = false
+                    }
+                }
+            }
+        })
         return
     }
 
@@ -128,6 +148,22 @@ private fun RootBanner(container: AppContainer, actions: ActivityActions) {
         onActivate = { ui.launch { if (container.checkStorage() == StorageState.Ok) actions.activate() } },
         onDisconnect = actions.disconnect,
     )
+}
+
+/**
+ * "Activar GhostP2" de la bienvenida: la marca como hecha y después activa. Si no se puede guardar, se
+ * vuelve a comprobar el almacenamiento (si falla, la raíz muestra [StorageErrorScreen]) y no se activa.
+ */
+private suspend fun finishOnboarding(container: AppContainer, actions: ActivityActions) {
+    try {
+        container.settings.update { it.copy(onboardingDone = true) }
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        container.checkStorage()
+        return
+    }
+    actions.activate()
 }
 
 @Composable

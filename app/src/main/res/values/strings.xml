@@ -48,4 +48,27 @@
     <string name="store_reset_confirm_again_text">Tus contactos tendrán que volver a emparejarse contigo.</string>
     <string name="store_reset_confirm">Borrar todo</string>
     <string name="store_reset_failed">No se pudo borrar: inténtalo de nuevo</string>
+    <!-- Bienvenida -->
+    <string name="onboarding_welcome_title">Bienvenido a GhostP2</string>
+    <string name="onboarding_welcome_no_servers">Sin servidores ni cuentas: tu móvil habla directamente con el de tu contacto a través de Tor.</string>
+    <string name="onboarding_welcome_memory">Los mensajes solo están en la memoria: nunca se guardan en el móvil.</string>
+    <string name="onboarding_welcome_discard">Si tu contacto no está conectado, el mensaje no se entrega y se descarta. No hay cola ni reenvío.</string>
+    <string name="onboarding_welcome_both_active">Para hablar, los dos tenéis que tener GhostP2 activo.</string>
+    <string name="onboarding_welcome_tor_slow">Conectar por la red Tor tarda: al activar GhostP2 puede pasar un minuto o más hasta estar en línea.</string>
+    <string name="onboarding_notifications_title">Notificaciones</string>
+    <string name="onboarding_notifications_text">GhostP2 avisa de los mensajes nuevos sin mostrar su contenido y muestra una notificación fija mientras está activo. Sin este permiso no verás esos avisos.</string>
+    <string name="onboarding_notifications_allow">Permitir notificaciones</string>
+    <string name="onboarding_battery_title">Batería</string>
+    <string name="onboarding_battery_text">Con el ahorro de batería, Android corta la conexión con Tor cuando la pantalla se apaga y no te llegan mensajes. Quítalo para GhostP2.</string>
+    <string name="onboarding_battery_allow">Quitar el ahorro de batería</string>
+    <string name="onboarding_battery_done">El ahorro de batería de Android ya no limita a GhostP2.</string>
+    <string name="onboarding_next">Siguiente</string>
+    <string name="onboarding_finish">Activar GhostP2</string>
+
+    <!-- Ahorro de energía de cada fabricante -->
+    <string name="battery_hint_xiaomi">En Xiaomi, Redmi y POCO: Ajustes › Aplicaciones › GhostP2 › Ahorro de batería › «Sin restricciones», y activa también «Inicio automático».</string>
+    <string name="battery_hint_samsung">En Samsung: Ajustes › Aplicaciones › GhostP2 › Batería › «Sin restricciones», y comprueba que GhostP2 no está en Ajustes › Batería › Límites de uso en segundo plano.</string>
+    <string name="battery_hint_huawei">En Huawei y Honor: Ajustes › Batería › Inicio de aplicaciones › GhostP2: desactiva «Gestionar automáticamente» y permite la ejecución en segundo plano.</string>
+    <string name="battery_hint_oppo">En OnePlus, OPPO y realme: Ajustes › Aplicaciones › GhostP2 › Uso de batería: permite la actividad en segundo plano y desactiva la optimización.</string>
+    <string name="battery_hint_generic">Si tu móvil tiene su propio ahorro de energía, búscalo en Ajustes › Batería y deja GhostP2 sin restricciones.</string>
 </resources>

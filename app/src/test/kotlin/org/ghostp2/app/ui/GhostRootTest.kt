@@ -15,6 +15,9 @@ import org.ghostp2.data.StoreUnavailableException
 import org.ghostp2.engine.EngineErrorKind
 import org.ghostp2.engine.EngineStatus
 import org.junit.After
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
@@ -46,6 +49,12 @@ class GhostRootTest {
         requestBatteryExemption = {},
         requestNotifications = {},
     )
+
+    @Before
+    fun setUp() {
+        // Salvo en onboardingShownUntilDone, la bienvenida ya está hecha.
+        runBlocking { app.storage.settings.update { it.copy(onboardingDone = true) } }
+    }
 
     @After
     fun tearDown() {
@@ -89,7 +98,8 @@ class GhostRootTest {
 
         compose.waitUntil(TIMEOUT) { container.storage.value == StorageState.Ok }
         assertEquals(1, app.storage.forceResets)
-        waitForText("GhostP2 está desactivado")
+        // Se ha borrado todo, ajustes incluidos: vuelve la bienvenida.
+        waitForText("Bienvenido a GhostP2")
     }
 
     @Test
@@ -157,6 +167,25 @@ class GhostRootTest {
         app.storage.settings.failure = null
         compose.onNodeWithText("Reintentar").performClick()
         waitForText("GhostP2 está desactivado")
+    }
+
+    @Test
+    fun onboardingShownUntilDone() {
+        runBlocking { app.storage.settings.update { it.copy(onboardingDone = false) } }
+        show()
+
+        waitForText("Bienvenido a GhostP2")
+        compose.onAllNodesWithText("GhostP2 está desactivado").assertCountEquals(0)
+        // En Robolectric (API 35) faltan el permiso de notificaciones y la exención de batería.
+        compose.onNodeWithText("Siguiente").performClick()
+        compose.onNodeWithText("Siguiente").performClick()
+        assertEquals(0, activations)
+        assertFalse(runBlocking { app.storage.settings.get() }.onboardingDone)
+
+        compose.onNodeWithText("Activar GhostP2").performClick()
+        compose.waitUntil(TIMEOUT) { activations == 1 }
+        assertTrue(runBlocking { app.storage.settings.get() }.onboardingDone)
+        compose.waitUntil(TIMEOUT) { compose.onAllNodesWithText("Bienvenido a GhostP2").fetchSemanticsNodes().isEmpty() }
     }
 
     private companion object {
