@@ -117,6 +117,10 @@ class KmpTorTransport internal constructor(
         withContext(NonCancellable) {
             lifecycle.withLock {
                 stopLocked()
+                // El siguiente start() vuelve a pedir el driver a la fábrica, con torDir recién vacío.
+                // kmp-tor conserva el entorno y el runtime por directorio, pero en cada arranque vuelve
+                // a crear los directorios, a escribir geoip si falta y a generar la configuración.
+                driver = null
                 val deleted = withContext(Dispatchers.IO) { !torDir.exists() || torDir.deleteRecursively() }
                 if (!deleted) throw IOException("No se pudo borrar el estado de Tor")
             }

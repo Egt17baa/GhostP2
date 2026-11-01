@@ -305,6 +305,44 @@ class KmpTorTransportTest {
         assertNotEquals(TorState.Off, tor.state.value)
     }
 
+    @Test
+    fun startAfterWipeStateUsesAFreshDriver() = runBlocking<Unit> {
+        val drivers = mutableListOf<FakeDriver>()
+        val counted = KmpTorTransport(File(dir, "tor2")) { onState ->
+            FakeDriver().also { it.onState = onState; drivers += it }
+        }
+        try {
+            counted.start()
+            drivers[0].emit(ready)
+            assertEquals(TorState.Ready, counted.state.value)
+            counted.wipeState()
+            assertEquals(TorState.Off, counted.state.value)
+            counted.start()
+            assertNotEquals(TorState.Off, counted.state.value) // R13
+            assertEquals("la fábrica se llama otra vez tras borrar el estado", 2, drivers.size)
+            withTimeout(5_000) { drivers[1].startEntered.await() }
+            assertEquals(1, drivers[1].starts)
+            drivers[1].emit(ready)
+            assertEquals(TorState.Ready, counted.state.value)
+        } finally {
+            counted.stop()
+        }
+    }
+
+    @Test
+    fun wipeStateDuringStartingStopsTheRun() = runBlocking<Unit> {
+        tor.start()
+        driver.emit(bootstrapping(40))
+        assertEquals(TorState.Starting(40), tor.state.value)
+        File(tor.torDir, "work/data").mkdirs()
+        tor.wipeState()
+        assertEquals(TorState.Off, tor.state.value)
+        assertFalse(tor.torDir.exists())
+        assertEquals(1, driver.stops)
+        driver.emit(ready) // eventos tardíos del arranque interrumpido no cambian nada
+        assertEquals(TorState.Off, tor.state.value)
+    }
+
     private suspend fun expectIOException(block: suspend () -> Any) {
         try {
             block()

@@ -11,6 +11,7 @@ import io.matthewnelson.kmp.tor.runtime.core.util.executeAsync
 import io.matthewnelson.kmp.tor.runtime.core.util.toInetAddress
 import java.io.File
 import java.net.InetSocketAddress
+import java.util.IdentityHashMap
 import io.matthewnelson.kmp.tor.runtime.TorState as RuntimeState
 
 /**
@@ -34,6 +35,12 @@ internal interface TorDriver {
  * Crea el `TorRuntime` en `torDir/work` y `torDir/cache` con [applyGhostConfig] y entrega los cambios de
  * estado a `onState`. Sin observadores de logs; el de `ERROR` es obligatorio en kmp-tor (sin él, una
  * `UncaughtException` tumba la app) y no registra nada.
+ *
+ * kmp-tor 2.6.0 guarda en memoria, para todo el proceso, el entorno por (`workDirectory`,
+ * `cacheDirectory`) y el runtime por entorno: un segundo driver sobre el mismo `torDir` (p. ej. tras
+ * [KmpTorTransport.wipeState]) recibe el mismo runtime. Los observadores se comparan por identidad, así
+ * que se suscriben **una sola vez por runtime**; los drivers siguientes solo cambian el destino de los
+ * eventos `STATE`.
  */
 internal class KmpTorDriver(torDir: File, onState: (RuntimeState) -> Unit) : TorDriver {
     private val runtime: TorRuntime
@@ -51,10 +58,17 @@ internal class KmpTorDriver(torDir: File, onState: (RuntimeState) -> Unit) : Tor
         runtime = TorRuntime.Builder(environment) {
             config { _ -> applyGhostConfig() }
         }
-        runtime.subscribe(
-            RuntimeEvent.ERROR.observer(OBSERVER_TAG) { },
-            RuntimeEvent.STATE.observer(OBSERVER_TAG) { onState(it) },
-        )
+        val sink = synchronized(sinks) {
+            sinks.getOrPut(runtime) {
+                StateSink().also { sink ->
+                    runtime.subscribe(
+                        RuntimeEvent.ERROR.observer(OBSERVER_TAG) { },
+                        RuntimeEvent.STATE.observer(OBSERVER_TAG) { sink.target(it) },
+                    )
+                }
+            }
+        }
+        sink.target = onState
     }
 
     override suspend fun startDaemon() {
@@ -70,7 +84,15 @@ internal class KmpTorDriver(torDir: File, onState: (RuntimeState) -> Unit) : Tor
     override fun socksAddress(): InetSocketAddress? =
         runtime.listeners().socks.firstOrNull()?.let { InetSocketAddress(it.address.toInetAddress(), it.port.value) }
 
+    /** Destino actual de los eventos `STATE` de un runtime ya suscrito. */
+    private class StateSink {
+        @Volatile var target: (RuntimeState) -> Unit = {}
+    }
+
     private companion object {
         const val OBSERVER_TAG = "ghostp2"
+
+        /** Runtimes ya suscritos (kmp-tor no los libera nunca: tampoco hace falta liberarlos aquí). */
+        val sinks = IdentityHashMap<TorRuntime, StateSink>()
     }
 }
