@@ -9,6 +9,11 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- Solo para escanear el QR de una invitación (R23); se pide al abrir "Escanear". -->
     <uses-permission android:name="android.permission.CAMERA" />
+    <!-- Sin cámara también funciona (se pega el texto). CAMERA implica `android.hardware.camera`
+         obligatoria si no se declara aquí como opcional. -->
+    <uses-feature
+        android:name="android.hardware.camera"
+        android:required="false" />
     <uses-feature
         android:name="android.hardware.camera.any"
         android:required="false" />

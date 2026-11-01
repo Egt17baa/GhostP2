@@ -61,15 +61,34 @@ class QrDecodingTest {
     }
 
     @Test
-    fun analyzerClosesTheImageWhenReadingFails() {
-        val analyzer = QrAnalyzer { }
+    fun analyzerSkipsAClosedImageWithoutThrowing() {
+        val seen = mutableListOf<String>()
+        val analyzer = QrAnalyzer { seen += it }
         val broken = FakeImage(ByteArray(0), failPlanes = true)
-        try {
-            analyzer.analyze(broken.proxy)
-        } catch (_: IllegalStateException) {
-            // Se propaga, pero la imagen se cierra.
-        }
+        // Lanzar en el hilo del analizador cerraría la app: el fotograma se salta y se cierra.
+        analyzer.analyze(broken.proxy)
         assertEquals(1, broken.closes)
+
+        // El analizador sigue funcionando con el siguiente fotograma.
+        val good = FakeImage(planeWithQr(INVITATION))
+        analyzer.analyze(good.proxy)
+        assertEquals(listOf(INVITATION), seen)
+        assertEquals(1, good.closes)
+    }
+
+    @Test
+    fun zxingRuntimeFailuresDecodeToNull() {
+        // Plano más corto de lo dicho (ArrayIndexOutOfBounds dentro de ZXing).
+        assertNull(decodeQrLuminance(ByteArray(10), WIDTH, HEIGHT, ROW_STRIDE))
+        // Fila más estrecha que la imagen (IllegalArgumentException del origen de luminancia).
+        assertNull(decodeQrLuminance(ByteArray(ROW_STRIDE * HEIGHT), WIDTH, HEIGHT, WIDTH - 1))
+        // Tamaños sin sentido.
+        assertNull(decodeQrLuminance(ByteArray(0), 0, 0, 0))
+
+        // Un plano corto también se salta en el analizador (sin lanzar) y la imagen se cierra.
+        val short = FakeImage(ByteArray(100))
+        QrAnalyzer { }.analyze(short.proxy)
+        assertEquals(1, short.closes)
     }
 
     /** Plano Y de 640×480 con `rowStride` 704: fondo gris, QR con margen y relleno ajeno tras cada fila. */

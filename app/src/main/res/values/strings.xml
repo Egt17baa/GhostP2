@@ -98,6 +98,9 @@
     <string name="add_cancelled">La invitación se ha cancelado</string>
     <string name="add_create_another">Crear otra</string>
     <string name="scan_no_permission">Sin permiso de cámara. Puedes pegar la invitación</string>
+    <string name="scan_blocked">El permiso de cámara está bloqueado. Puedes darlo en los ajustes de GhostP2 o pegar la invitación</string>
+    <string name="scan_open_settings">Abrir ajustes</string>
+    <string name="scan_no_camera">Este móvil no tiene cámara. Puedes pegar la invitación</string>
     <string name="scan_camera_failed">No se pudo abrir la cámara. Puedes pegar la invitación</string>
     <string name="scan_hint">Apunta la cámara al código QR de tu contacto</string>
     <string name="add_paste_label">Invitación</string>

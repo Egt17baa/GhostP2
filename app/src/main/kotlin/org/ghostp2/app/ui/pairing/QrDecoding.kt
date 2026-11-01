@@ -19,17 +19,21 @@ private val QR_HINTS: Map<DecodeHintType, Any> = mapOf(
 
 /**
  * Texto del QR que haya en el plano de luminancia [data] (`width`×`height`, cada fila empieza cada
- * [rowStride] bytes); `null` si no hay QR o está dañado. No guarda ni registra nada del fotograma.
+ * [rowStride] bytes); `null` si no hay QR, está dañado o ZXing falla con él. No guarda ni registra
+ * nada del fotograma.
  */
-fun decodeQrLuminance(data: ByteArray, width: Int, height: Int, rowStride: Int): String? {
-    val source = PlanarYUVLuminanceSource(data, rowStride, height, 0, 0, width, height, false)
-    return try {
+fun decodeQrLuminance(data: ByteArray, width: Int, height: Int, rowStride: Int): String? =
+    try {
+        val source = PlanarYUVLuminanceSource(data, rowStride, height, 0, 0, width, height, false)
         QRCodeReader().decode(BinaryBitmap(HybridBinarizer(source)), QR_HINTS).text
     } catch (_: ReaderException) {
         // Sin QR, ilegible o con la suma de comprobación mal: se prueba con el siguiente fotograma.
         null
+    } catch (_: RuntimeException) {
+        // ZXing también puede fallar con excepciones sin comprobar ante datos raros (o un plano más
+        // corto de lo dicho): es "sin QR", nunca un cierre del hilo del analizador.
+        null
     }
-}
 
 /**
  * La invitación de GhostP2 que lleva [text] (sin los espacios de los extremos), o `null` si no empieza
@@ -42,7 +46,8 @@ private const val INVITATION_PREFIX = "ghostp2:"
 /**
  * Busca la invitación en los fotogramas de la cámara (en el hilo del analizador, nunca en el principal).
  * Copia el plano Y en un búfer propio reutilizado, que se borra tras cada fotograma (lleva el secreto si
- * enfoca una invitación), y avisa a [onInvitation] una sola vez. El `ImageProxy` siempre se cierra.
+ * enfoca una invitación), y avisa a [onInvitation] una sola vez. El `ImageProxy` siempre se cierra y
+ * un fotograma ilegible se salta sin lanzar (una excepción en el hilo del analizador cerraría la app).
  */
 class QrAnalyzer(private val onInvitation: (String) -> Unit) : ImageAnalysis.Analyzer {
     private val reported = AtomicBoolean(false)
@@ -51,7 +56,12 @@ class QrAnalyzer(private val onInvitation: (String) -> Unit) : ImageAnalysis.Ana
     override fun analyze(image: ImageProxy) {
         image.use {
             if (reported.get()) return
-            val plane = it.planes[0]
+            val plane = try {
+                it.planes[0]
+            } catch (_: IllegalStateException) {
+                // Imagen ya cerrada por CameraX: se salta el fotograma (lanzar cerraría la app).
+                return
+            }
             val rowStride = plane.rowStride
             val size = rowStride * it.height
             if (buffer.size < size) buffer = ByteArray(size)
