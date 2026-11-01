@@ -2,6 +2,7 @@ package org.ghostp2.app.photo
 
 import android.graphics.Bitmap
 import android.graphics.Color
+import androidx.compose.ui.graphics.asAndroidBitmap
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -100,7 +101,80 @@ class PhotoBitmapsTest {
             decodeSampled(copy, side)
         })
         assertNull(bitmaps.thumbnail("a", live))
-        assertNull(bitmaps.cachedIds().singleOrNull())
+        assertTrue(bitmaps.cachedIds().isEmpty())
+    }
+
+    @Test
+    fun zeroingIsNotRememberedAsFailure() {
+        // Puesta a cero durante la decodificación: no se marca como fallida (con bytes intactos se reintenta).
+        var calls = 0
+        var zeroing: ByteArray? = null
+        val bitmaps = PhotoBitmaps(decode = { copy, side ->
+            calls++
+            zeroing?.fill(0)
+            decodeSampled(copy, side)
+        })
+        val first = jpeg()
+        zeroing = first
+        assertNull(bitmaps.thumbnail("a", first))
+        zeroing = null
+        assertNotNull(bitmaps.thumbnail("a", jpeg()))
+        assertEquals(2, calls)
+    }
+
+    @Test
+    fun outOfMemoryIsTransient() {
+        var calls = 0
+        val bitmaps = PhotoBitmaps(decode = { _, _ ->
+            calls++
+            if (calls == 1) throw OutOfMemoryError()
+            Bitmap.createBitmap(4, 4, Bitmap.Config.ARGB_8888)
+        })
+        val bytes = jpeg()
+        assertNull(bitmaps.thumbnail("a", bytes))
+        assertNotNull(bitmaps.thumbnail("a", bytes))
+        assertEquals(2, calls)
+    }
+
+    @Test
+    fun onlyRetainedIdsAreCached() {
+        val bitmaps = PhotoBitmaps(decode = Counting())
+        val bytes = jpeg()
+        bitmaps.retain(setOf("b"))
+        // "a" ya no está viva (p. ej. se recortó mientras se decodificaba): se devuelve, pero no se guarda.
+        assertNotNull(bitmaps.thumbnail("a", bytes))
+        assertNotNull(bitmaps.thumbnail("b", bytes))
+        assertEquals(setOf("b"), bitmaps.cachedIds())
+        bitmaps.clear()
+        assertNotNull(bitmaps.thumbnail("b", bytes))
+        assertTrue(bitmaps.cachedIds().isEmpty())
+    }
+
+    @Test
+    fun droppedBitmapsAreErased() {
+        val red = { _: ByteArray, _: Int -> Bitmap.createBitmap(10, 10, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.RED) } }
+        val bitmaps = PhotoBitmaps(decode = red)
+        val bytes = jpeg()
+        val a = bitmaps.thumbnail("a", bytes)!!.asAndroidBitmap()
+        val b = bitmaps.thumbnail("b", bytes)!!.asAndroidBitmap()
+        bitmaps.retain(setOf("b"))
+        assertEquals(0, a.getPixel(0, 0))
+        assertEquals(Color.RED, b.getPixel(0, 0))
+        bitmaps.clear()
+        assertEquals(0, b.getPixel(0, 0))
+        // Sin reciclar: Compose podría estar aún pintándolos.
+        assertFalse(a.isRecycled || b.isRecycled)
+        // Una expulsión de la LRU por tamaño no los borra (pueden seguir en pantalla).
+        val small = PhotoBitmaps(maxBytes = 400, decode = red)
+        val first = small.thumbnail("x", bytes)!!.asAndroidBitmap()
+        small.thumbnail("y", bytes)
+        assertEquals(setOf("y"), small.cachedIds())
+        assertEquals(Color.RED, first.getPixel(0, 0))
+    }
+
+    @Test
+    fun realDecodeIsMutable() {
+        assertTrue(decodeSampled(jpeg(), 10)!!.isMutable)
     }
 
     @Test
@@ -126,7 +200,7 @@ class PhotoBitmapsTest {
         assertNull(bitmaps.thumbnail("a", bytes))
         assertNull(bitmaps.thumbnail("a", bytes))
         assertEquals(1, calls)
-        // Un decodificador que devuelve un bitmap vacío tampoco vale.
+        // Un decodificador que lanza una excepción da `null` (sin cerrar la app).
         val empty = PhotoBitmaps(decode = { _, _ -> throw IllegalStateException() })
         assertNull(empty.thumbnail("a", bytes))
     }

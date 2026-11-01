@@ -6,10 +6,13 @@ import android.util.LruCache
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.asImageBitmap
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
 
 /**
  * Decodifica un JPEG submuestreado: `inSampleSize` (potencia de 2) sube mientras el lado mayor siga
- * siendo ≥ [sidePx]. `null` si no es una imagen decodificable o no cabe en memoria (nunca lanza).
+ * siendo ≥ [sidePx]. El bitmap es mutable (para poder borrar sus píxeles al soltarlo). `null` si no es
+ * una imagen decodificable; un `OutOfMemoryError` se propaga (es pasajero: quien llama decide).
  */
 internal fun decodeSampled(bytes: ByteArray, sidePx: Int): Bitmap? {
     if (sidePx <= 0) return null
@@ -20,12 +23,30 @@ internal fun decodeSampled(bytes: ByteArray, sidePx: Int): Bitmap? {
         val longest = maxOf(bounds.outWidth, bounds.outHeight)
         var sample = 1
         while (longest / (sample * 2) >= sidePx) sample *= 2
-        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, BitmapFactory.Options().apply { inSampleSize = sample })
+        BitmapFactory.decodeByteArray(
+            bytes,
+            0,
+            bytes.size,
+            BitmapFactory.Options().apply {
+                inSampleSize = sample
+                inMutable = true
+            },
+        )
     } catch (_: RuntimeException) {
         null
-    } catch (_: OutOfMemoryError) {
-        null
     }
+}
+
+/**
+ * Hilos para decodificar fotos (miniaturas y visor): como mucho 2 a la vez, para acotar la memoria de
+ * las decodificaciones en curso.
+ */
+internal val PhotoDecodeDispatcher: CoroutineDispatcher = Dispatchers.Default.limitedParallelism(2)
+
+/** Borra los píxeles de un bitmap que se suelta (sin reciclarlo: Compose podría estar aún pintándolo). */
+internal fun ImageBitmap.erase() {
+    val bitmap = asAndroidBitmap()
+    if (!bitmap.isRecycled && bitmap.isMutable) bitmap.eraseColor(0)
 }
 
 /**
@@ -59,12 +80,16 @@ internal fun hasJpegHeader(bytes: ByteArray): Boolean =
 /**
  * Bitmaps de las fotos del chat, solo en memoria (nunca en disco). [thumbnail] decodifica cada elemento
  * una sola vez y lo guarda en una caché LRU por id de elemento, limitada a [maxBytes] bytes de píxeles
- * (`Bitmap.byteCount`); los fallos también se recuerdan (no se reintenta en cada recomposición). [full]
- * no usa caché (visor). Es seguro llamarla desde cualquier hilo; conviene fuera del principal.
+ * (`Bitmap.byteCount`). Solo se recuerdan como fallidas las fotos que el decodificador rechaza con los
+ * bytes intactos (no se reintentan en cada recomposición); una falta de memoria o una puesta a cero no
+ * las marca. [full] no usa caché (visor). Es seguro llamarla desde cualquier hilo; conviene hacerlo en
+ * [PhotoDecodeDispatcher].
  *
  * Un `null` significa que la foto no se puede mostrar: el motor la puso a cero ("Foto descartada para
- * liberar memoria") o no es una imagen válida. Nunca se devuelve una imagen decodificada de bytes que
- * se estaban poniendo a cero: se comprueba la cabecera tras copiar y otra vez tras decodificar.
+ * liberar memoria"), no es una imagen válida o no cabe ahora en memoria. Nunca se devuelve una imagen
+ * decodificada de bytes que se estaban poniendo a cero: se comprueba la cabecera tras copiar y otra vez
+ * tras decodificar. Los bitmaps que sueltan [retain], [clear] o una puesta a cero se borran
+ * (`eraseColor(0)`); los que expulsa la LRU por tamaño, no (pueden seguir en pantalla).
  */
 class PhotoBitmaps(
     maxBytes: Int = 32 * 1024 * 1024,
@@ -74,29 +99,51 @@ class PhotoBitmaps(
         override fun sizeOf(key: String, value: ImageBitmap): Int = value.asAndroidBitmap().byteCount
     }
 
-    // Ids cuya decodificación falló (protegido por sí mismo).
+    // Protegen `failed` y `retained`, y hacen atómicos el `put` y `retain`/`clear` frente a la caché.
+    private val lock = Any()
+
+    // Ids que el decodificador rechazó con los bytes intactos.
     private val failed = HashSet<String>()
+
+    // Último conjunto de [retain] (`null` ⇒ aún no se llamó: se admite cualquier id).
+    private var retained: Set<String>? = null
+
+    /** Resultado de una lectura: imagen, rechazo del decodificador (bytes intactos) o fallo pasajero. */
+    private sealed interface Read {
+        class Image(val image: ImageBitmap) : Read
+
+        data object Rejected : Read
+
+        /** Bytes puestos a cero, o sin memoria ahora: no se marca como fallida. */
+        data object Unavailable : Read
+    }
 
     /**
      * Miniatura del elemento [itemId] (lado mayor ≥ [sidePx] tras submuestrear) o `null` si no se puede
-     * mostrar. Con la foto ya en caché solo se comprueba que el array vivo no se haya puesto a cero.
+     * mostrar. Con la foto ya en caché solo se comprueba que el array vivo no se haya puesto a cero. Solo
+     * se guarda en caché si [itemId] sigue en el último [retain] y la cabecera sigue intacta.
      */
     fun thumbnail(itemId: String, jpeg: ByteArray, sidePx: Int = 1024): ImageBitmap? {
         if (!hasJpegHeader(jpeg)) {
-            // Puesta a cero por el motor: se suelta también su bitmap.
-            cache.remove(itemId)
+            // Puesta a cero por el motor: se suelta (y se borra) también su bitmap.
+            synchronized(lock) { cache.remove(itemId) }?.erase()
             return null
         }
         cache.get(itemId)?.let { return it }
-        if (synchronized(failed) { itemId in failed }) return null
-        val image = read(jpeg, sidePx)
-        if (image == null) {
-            // Si fue por la puesta a cero, el elemento pasará a "descartada" y no se volverá a pedir.
-            synchronized(failed) { failed += itemId }
-            return null
+        if (synchronized(lock) { itemId in failed }) return null
+        return when (val result = read(jpeg, sidePx)) {
+            is Read.Image -> {
+                synchronized(lock) {
+                    if (retained.let { it == null || itemId in it } && hasJpegHeader(jpeg)) cache.put(itemId, result.image)
+                }
+                result.image
+            }
+            Read.Rejected -> {
+                synchronized(lock) { failed += itemId }
+                null
+            }
+            Read.Unavailable -> null
         }
-        cache.put(itemId, image)
-        return image
     }
 
     /**
@@ -106,18 +153,26 @@ class PhotoBitmaps(
     fun cached(itemId: String, jpeg: ByteArray): ImageBitmap? = if (hasJpegHeader(jpeg)) cache.get(itemId) else null
 
     /** Imagen completa (lado mayor ≥ [sidePx] tras submuestrear), sin caché; `null` si no se puede mostrar. */
-    fun full(jpeg: ByteArray, sidePx: Int): ImageBitmap? = read(jpeg, sidePx)
+    fun full(jpeg: ByteArray, sidePx: Int): ImageBitmap? = (read(jpeg, sidePx) as? Read.Image)?.image
 
-    /** Suelta los bitmaps (y los fallos recordados) de los elementos que no estén en [ids]. */
+    /** Suelta (y borra) los bitmaps y los fallos recordados de los elementos que no estén en [ids]. */
     fun retain(ids: Set<String>) {
-        cache.snapshot().keys.filterNot { it in ids }.forEach { cache.remove(it) }
-        synchronized(failed) { failed.retainAll(ids) }
+        val dropped = synchronized(lock) {
+            retained = ids.toSet()
+            failed.retainAll(ids)
+            cache.snapshot().keys.filterNot { it in ids }.mapNotNull { cache.remove(it) }
+        }
+        dropped.forEach { it.erase() }
     }
 
-    /** Suelta todo. */
+    /** Suelta (y borra) todo; después no se guarda nada más en caché. */
     fun clear() {
-        cache.evictAll()
-        synchronized(failed) { failed.clear() }
+        val dropped = synchronized(lock) {
+            retained = emptySet()
+            failed.clear()
+            cache.snapshot().values.also { cache.evictAll() }
+        }
+        dropped.forEach { it.erase() }
     }
 
     /** Ids con bitmap en caché (pruebas). */
@@ -126,19 +181,26 @@ class PhotoBitmaps(
     /** Bytes de píxeles en caché (pruebas). */
     internal fun cachedBytes(): Int = cache.size()
 
-    private fun read(jpeg: ByteArray, sidePx: Int): ImageBitmap? {
-        val bitmap = withIntactCopy(jpeg) { copy ->
-            try {
-                decode(copy, sidePx)
-            } catch (_: RuntimeException) {
-                null
-            } catch (_: OutOfMemoryError) {
-                null
+    private fun read(jpeg: ByteArray, sidePx: Int): Read {
+        val bitmap = try {
+            withIntactCopy(jpeg) { copy ->
+                try {
+                    decode(copy, sidePx) ?: Unit
+                } catch (_: RuntimeException) {
+                    Unit
+                }
             }
-        } ?: return null
-        // Validación del resultado: dimensiones reales y el array vivo aún intacto (si el motor lo puso a
-        // cero mientras se decodificaba, la foto ya está descartada y no se muestra).
-        if (bitmap.width <= 0 || bitmap.height <= 0 || !hasJpegHeader(jpeg)) return null
-        return bitmap.asImageBitmap()
+        } catch (_: OutOfMemoryError) {
+            return Read.Unavailable
+        }
+        // Validación del resultado: el array vivo aún intacto (si el motor lo puso a cero antes o mientras
+        // se decodificaba, la foto ya está descartada y no se muestra) y dimensiones reales.
+        if (!hasJpegHeader(jpeg)) {
+            (bitmap as? Bitmap)?.asImageBitmap()?.erase()
+            return Read.Unavailable
+        }
+        if (bitmap !is Bitmap) return Read.Rejected
+        if (bitmap.width <= 0 || bitmap.height <= 0) return Read.Rejected
+        return Read.Image(bitmap.asImageBitmap())
     }
 }

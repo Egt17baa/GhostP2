@@ -63,11 +63,11 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.ghostp2.app.R
 import org.ghostp2.app.photo.PhotoBitmaps
+import org.ghostp2.app.photo.PhotoDecodeDispatcher
 import org.ghostp2.app.ui.GhostTextField
 import org.ghostp2.core.protocol.PeerSession
 import org.ghostp2.engine.ChatContent
@@ -77,6 +77,9 @@ import org.ghostp2.engine.Presence
 
 /** A partir de cuántos caracteres Unicode se muestra el contador ("7 501 / 8 000"). */
 internal const val COUNTER_THRESHOLD = 7_500
+
+/** Lado mayor mínimo de las miniaturas del chat (submuestreadas hasta < 2× esto). */
+internal const val THUMBNAIL_SIDE_PX = 768
 
 /**
  * Chat con un contacto. Barra superior: nombre y presencia, "Volver" y un menú con "Ver contacto"
@@ -298,7 +301,7 @@ fun PhotoContent(item: ChatItem, bitmaps: PhotoBitmaps, onOpen: () -> Unit) {
         jpeg,
     ) {
         if (value is Thumbnail.Loading) {
-            value = withContext(Dispatchers.Default) { bitmaps.thumbnail(item.id, jpeg) }?.let { Thumbnail.Ready(it) } ?: Thumbnail.Discarded
+            value = withContext(PhotoDecodeDispatcher) { bitmaps.thumbnail(item.id, jpeg, THUMBNAIL_SIDE_PX) }?.let { Thumbnail.Ready(it) } ?: Thumbnail.Discarded
         }
     }
     when (val current = thumbnail) {

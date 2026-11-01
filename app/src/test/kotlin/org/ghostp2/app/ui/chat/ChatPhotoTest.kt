@@ -3,9 +3,11 @@ package org.ghostp2.app.ui.chat
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.net.Uri
+import android.provider.DocumentsContract
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.SemanticsProperties
@@ -30,6 +32,7 @@ import org.ghostp2.app.TestGhostApp
 import org.ghostp2.app.eventually
 import org.ghostp2.app.pairWithPeer
 import org.ghostp2.app.photo.PhotoBitmaps
+import org.ghostp2.app.photo.PhotoSaverTest
 import org.ghostp2.engine.ChatContent
 import org.ghostp2.engine.ChatItem
 import org.ghostp2.engine.DeliveryStatus
@@ -44,6 +47,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.Shadows.shadowOf
@@ -253,12 +257,44 @@ class ChatPhotoTest {
             val id = pairedOnline(peer)
             val vm = viewModel(id)
             eventually(TIMEOUT) { vm.state.value?.engineOnline == true }
-            vm.bitmaps.thumbnail("ajena", realJpeg())
-            assertTrue("ajena" in vm.bitmaps.cachedIds())
-            // Cualquier cambio de la conversación vuelve a recortar la caché a las fotos vivas.
-            vm.draft = "hola"
-            assertTrue(vm.send())
-            eventually(TIMEOUT) { "ajena" !in vm.bitmaps.cachedIds() }
+            // Un id que no está en la conversación no se guarda en caché (se devuelve, pero no se retiene).
+            assertTrue(vm.bitmaps.thumbnail("ajena", realJpeg()) != null)
+            assertTrue("ajena" !in vm.bitmaps.cachedIds())
+            // Una foto viva sí; al borrar el chat se suelta.
+            val photoId = app.container.engine.sendPhoto(id, realJpeg())
+            eventually(TIMEOUT) { vm.state.value?.items?.any { it.id == photoId } == true }
+            val live = vm.state.value!!.items.single { it.id == photoId }.content as ChatContent.Photo
+            assertTrue(vm.bitmaps.thumbnail(photoId, live.jpeg) != null)
+            assertTrue(photoId in vm.bitmaps.cachedIds())
+            vm.clear()
+            eventually(TIMEOUT) { photoId !in vm.bitmaps.cachedIds() }
+        }
+    }
+
+    @Test
+    fun viewerSaveOfGonePhotoDeletesDocument() {
+        val provider = Robolectric.buildContentProvider(PhotoSaverTest.RecordingProvider::class.java).create("org.ghostp2.pruebas.visor").get()
+        val target = DocumentsContract.buildDocumentUri("org.ghostp2.pruebas.visor", "foto")
+        val vm = ViewModelProvider.create(store, viewModelFactory { initializer { PhotoViewerViewModel(app.container, "nadie", "nada") } })[PhotoViewerViewModel::class]
+        eventually(TIMEOUT) { vm.photo.value == ViewerPhoto.Gone }
+        vm.save(app.contentResolver, target)
+        eventually(TIMEOUT) { vm.saveResult.value == SaveResult.FAILED }
+        assertEquals(listOf(target), provider.deleted)
+    }
+
+    @Test
+    fun viewerErasesImageWhenPhotoGoes() {
+        EngineHarness(1, network = app.network).use { peer ->
+            val id = pairedOnline(peer)
+            val photoId = app.container.engine.sendPhoto(id, realJpeg())
+            val vm = ViewModelProvider.create(store, viewModelFactory { initializer { PhotoViewerViewModel(app.container, id, photoId) } })[PhotoViewerViewModel::class]
+            eventually(TIMEOUT) { vm.photo.value is ViewerPhoto.Ready }
+            val bitmap = (vm.photo.value as ViewerPhoto.Ready).image.asAndroidBitmap()
+            assertTrue(bitmap.getPixel(0, 0) != 0)
+            app.container.engine.clearConversation(id)
+            eventually(TIMEOUT) { vm.photo.value == ViewerPhoto.Gone }
+            eventually(TIMEOUT) { bitmap.getPixel(0, 0) == 0 }
+            assertFalse(bitmap.isRecycled)
         }
     }
 

@@ -35,7 +35,6 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -46,13 +45,16 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.mapLatest
+import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.ghostp2.app.AppContainer
 import org.ghostp2.app.R
 import org.ghostp2.app.photo.PhotoBitmaps
+import org.ghostp2.app.photo.PhotoDecodeDispatcher
 import org.ghostp2.app.photo.PhotoSaver
+import org.ghostp2.app.photo.erase
 import org.ghostp2.engine.ChatContent
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -102,6 +104,9 @@ class PhotoViewerViewModel(
     private fun content(): ChatContent? =
         engine.conversations.value[contactId]?.firstOrNull { it.id == itemId }?.content
 
+    // La imagen que se está mostrando (para borrarla al soltarla).
+    private var shown: ImageBitmap? = null
+
     val photo: StateFlow<ViewerPhoto> =
         engine.conversations
             .map { all -> all[contactId]?.firstOrNull { it.id == itemId }?.content }
@@ -114,8 +119,15 @@ class PhotoViewerViewModel(
                     else -> ViewerPhoto.Gone
                 }
             }
-            .flowOn(Dispatchers.Default)
+            .flowOn(PhotoDecodeDispatcher)
+            .onEach { next ->
+                // La imagen anterior se suelta: se borran sus píxeles (de Ready a Discarded o Gone).
+                synchronized(this) { shown.also { shown = (next as? ViewerPhoto.Ready)?.image } }
+                    ?.takeIf { it !== (next as? ViewerPhoto.Ready)?.image }
+                    ?.erase()
+            }
             .stateIn(viewModelScope, SharingStarted.Eagerly, ViewerPhoto.Loading)
+
 
     private val mutableSaveResult = MutableStateFlow<SaveResult?>(null)
 
@@ -130,7 +142,13 @@ class PhotoViewerViewModel(
         val jpeg = (content() as? ChatContent.Photo)?.jpeg
         viewModelScope.launch {
             val ok = withContext(NonCancellable) {
-                if (jpeg == null) false else PhotoSaver.save(resolver, target, jpeg)
+                if (jpeg == null) {
+                    // La foto ya no está al volver del selector: se borra el documento vacío.
+                    PhotoSaver.discard(resolver, target)
+                    false
+                } else {
+                    PhotoSaver.save(resolver, target, jpeg)
+                }
             }
             mutableSaveResult.value = if (ok) SaveResult.SAVED else SaveResult.FAILED
         }
@@ -139,6 +157,10 @@ class PhotoViewerViewModel(
     /** El resultado de [saveResult] ya se mostró. */
     fun saveResultShown() {
         mutableSaveResult.value = null
+    }
+
+    override fun onCleared() {
+        synchronized(this) { shown.also { shown = null } }?.erase()
     }
 
     private companion object {
