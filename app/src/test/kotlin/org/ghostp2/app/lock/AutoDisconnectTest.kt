@@ -297,6 +297,91 @@ class AutoDisconnectTest {
         assertFalse(auto.returnHome.value)
     }
 
+    /**
+     * m1: la app se abre en un proceso nuevo antes de que llegue el reinicio STICKY retrasado y el plazo
+     * guardado ya venció: se desconecta al volver y el reinicio pendiente se detiene sin arrancar.
+     */
+    @Test
+    fun openingWithExpiredStoredDeadlineDisconnectsAndStopsThePendingRestart() {
+        store.armed = Armed(BOOT, now() - 1, 2)
+        val reopened = autoDisconnect()
+        reopened.configure(2)
+        reopened.onStart()
+        assertEquals(1, calls)
+        assertNull(store.armed)
+        assertTrue(reopened.returnHome.value)
+        reopened.returnedHome()
+        // El reinicio STICKY que seguía pendiente: se detiene (quien llama no arranca nada).
+        assertTrue(reopened.resumeAfterRestart())
+        assertFalse(reopened.returnHome.value)
+        assertEquals(1, calls)
+        // Solo ese reinicio pendiente.
+        assertFalse(reopened.resumeAfterRestart())
+        advance(minutes(30))
+        assertEquals(1, calls)
+    }
+
+    /** m1, en el otro orden: el reinicio STICKY llega primero y se detiene; abrir la app no corta otra vez. */
+    @Test
+    fun restartFirstThenOpeningDisconnectsOnce() {
+        store.armed = Armed(BOOT, now() - 1, 2)
+        val restarted = autoDisconnect()
+        assertTrue(restarted.resumeAfterRestart())
+        restarted.onStart()
+        assertEquals(0, calls)
+        assertNull(store.armed)
+        assertTrue(restarted.returnHome.value)
+    }
+
+    /** m1: abrir la app en un proceso nuevo antes de que venza el plazo guardado lo borra sin cortar. */
+    @Test
+    fun openingBeforeStoredDeadlineClearsIt() {
+        store.armed = Armed(BOOT, now() + minutes(1), 2)
+        val reopened = autoDisconnect()
+        reopened.onStart()
+        assertNull(store.armed)
+        assertFalse(reopened.resumeAfterRestart())
+        advance(minutes(30))
+        asleep += minutes(30)
+        assertEquals(0, calls)
+        assertFalse(reopened.returnHome.value)
+    }
+
+    /** m1: al abrir la app, un plazo guardado se comprueba igual que en el reinicio STICKY. */
+    @Test
+    fun openingIgnoresImplausibleStoredDeadline() {
+        val implausible = listOf(
+            Armed(BOOT - 1, now() - 1, 2),
+            Armed(BOOT, now() + minutes(5), 2),
+            Armed(BOOT, now() - 1, 0),
+            Armed(BOOT, now() - 1, 3),
+        )
+        implausible.forEach {
+            store.armed = it
+            val reopened = autoDisconnect()
+            reopened.onStart()
+            assertNull(store.armed)
+            assertFalse(reopened.resumeAfterRestart())
+        }
+        boot = null
+        store.armed = Armed(BOOT, now() - 1, 2)
+        autoDisconnect().onStart()
+        assertNull(store.armed)
+        assertEquals(0, calls)
+    }
+
+    /** m3: unos minutos guardados que no son de [org.ghostp2.data.AppSettings.DISCONNECT_MINUTES] no valen. */
+    @Test
+    fun storedMinutesOutsideTheChoicesAreIgnored() {
+        listOf(Armed(BOOT, now() - 1, 3), Armed(BOOT, now() + minutes(1), 1_000_000)).forEach {
+            store.armed = it
+            assertFalse(autoDisconnect().resumeAfterRestart())
+            assertNull(store.armed)
+        }
+        advance(minutes(30))
+        assertEquals(0, calls)
+    }
+
     private class MemoryStore : ArmedStore {
         var armed: Armed? = null
 

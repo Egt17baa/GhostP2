@@ -601,6 +601,64 @@ class GhostServiceTest {
         assertNull(armedFile().load())
     }
 
+    /**
+     * m1: el plazo venció con el proceso muerto y el usuario abre la app (proceso nuevo) antes de que
+     * llegue el reinicio `START_STICKY` retrasado: la app desconecta y ese reinicio se detiene sin pasar
+     * a primer plano, sin motor ni Tor y sin ninguna notificación.
+     */
+    @Test
+    fun openingTheAppBeforeAnExpiredStickyRestartStopsIt() {
+        shadowOf(app).grantPermissions(Manifest.permission.POST_NOTIFICATIONS)
+        withStoredDeadline()
+        armedFile().save(Armed(BOOT, SystemClock.elapsedRealtime() - 1, 2))
+
+        // La actividad primero.
+        app.container.autoDisconnect.onStart()
+        assertNull(armedFile().load())
+        assertTrue(app.container.autoDisconnect.returnHome.value)
+
+        val controller = Robolectric.buildService(GhostService::class.java).create()
+        val service = controller.get()
+        service.onStartCommand(null, 0, 1)
+
+        assertTrue(shadowOf(service).isStoppedBySelf)
+        assertFalse(service.inForeground)
+        assertNull(shadowOf(service).lastForegroundNotification)
+        assertTrue(networkCallbacks().isEmpty())
+        controller.destroy()
+        Thread.sleep(300)
+        shadowOf(Looper.getMainLooper()).idle()
+        assertEquals(EngineStatus.Stopped, engine.status.value)
+        assertEquals(TorState.Off, app.tor.state.value)
+        assertTrue(notificationManager().allNotifications.isEmpty())
+    }
+
+    /** m1, en el otro orden: el reinicio STICKY vencido llega antes y abrir la app después no corta otra vez. */
+    @Test
+    fun expiredStickyRestartBeforeOpeningTheAppStopsOnce() {
+        shadowOf(app).grantPermissions(Manifest.permission.POST_NOTIFICATIONS)
+        withStoredDeadline()
+        armedFile().save(Armed(BOOT, SystemClock.elapsedRealtime() - 1, 2))
+        val controller = Robolectric.buildService(GhostService::class.java).create()
+        val service = controller.get()
+
+        // El servicio primero.
+        service.onStartCommand(null, 0, 1)
+        assertTrue(shadowOf(service).isStoppedBySelf)
+        controller.destroy()
+
+        app.container.autoDisconnect.onStart()
+        assertNull(shadowOf(app).nextStoppedService)
+        assertNull(armedFile().load())
+        assertTrue(app.container.autoDisconnect.returnHome.value)
+        Thread.sleep(300)
+        shadowOf(Looper.getMainLooper()).idle()
+        assertFalse(service.inForeground)
+        assertEquals(EngineStatus.Stopped, engine.status.value)
+        assertEquals(TorState.Off, app.tor.state.value)
+        assertTrue(notificationManager().allNotifications.isEmpty())
+    }
+
     /** Un plazo guardado en otro arranque del móvil (`elapsedRealtime` empezó de cero) no se usa. */
     @Test
     fun stickyRestartIgnoresDeadlineFromAnotherBoot() {
@@ -673,13 +731,14 @@ class GhostServiceTest {
 
     /**
      * Con «A los 2 minutos», motor en línea y una conversación: sale de la app y vuelve cuando ya pasaron
-     * 2 minutos (el temporizador no llega a dispararse). Comprueba que se pidió parar el servicio y lo
-     * destruye, como haría el sistema.
+     * 2 minutos (el temporizador no llega a despertar: solo la comprobación de `onStart` puede cortar).
+     * Comprueba que se pidió parar el servicio una sola vez y lo destruye, como haría el sistema.
      */
     private fun autoDisconnectWithAConversation(): ServiceController<GhostService> {
         runBlocking { app.storage.settings.update { it.copy(disconnectAfterMinutes = 2) } }
         val auto = app.container.autoDisconnect
         eventually { auto.minutes == 2 }
+        auto.pollMillis = Long.MAX_VALUE
         val controller = startService()
         eventually { engine.status.value == EngineStatus.Online }
         receiveMessage("Ana")
@@ -689,11 +748,11 @@ class GhostServiceTest {
         ShadowSystemClock.advanceBy(Duration.ofMinutes(2))
         auto.onStart()
 
-        // El reloj adelantado también despierta el temporizador, que puede cortar en otro hilo justo
-        // antes de onStart: se espera a la parada venga de donde venga.
-        assertEquals(GhostService::class.java.name, nextStoppedService()?.component?.className)
+        assertEquals(GhostService::class.java.name, shadowOf(app).nextStoppedService?.component?.className)
         controller.destroy()
         eventually { engine.status.value == EngineStatus.Stopped && app.tor.state.value == TorState.Off }
+        Thread.sleep(300)
+        assertNull(shadowOf(app).nextStoppedService)
         return controller
     }
 

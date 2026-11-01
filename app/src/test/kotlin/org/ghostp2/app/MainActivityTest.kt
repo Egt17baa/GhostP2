@@ -136,6 +136,8 @@ class MainActivityTest {
         runBlocking { app.storage.settings.update { it.copy(onboardingDone = true, lockEnabled = false, disconnectAfterMinutes = 2) } }
         val controller = Robolectric.buildActivity(MainActivity::class.java).setup()
         eventually { app.container.autoDisconnect.minutes == 2 }
+        // El temporizador no despierta durante la prueba: solo la comprobación de onStart puede cortar.
+        app.container.autoDisconnect.pollMillis = Long.MAX_VALUE
         assertTrue(runBlocking { app.container.start().await() })
         assertEquals(EngineStatus.Online, app.container.engine.status.value)
 
@@ -166,8 +168,11 @@ class MainActivityTest {
         controller.pause().stop()
         ShadowSystemClock.advanceBy(Duration.ofMinutes(3))
         controller.restart()
-        assertEquals(GhostService::class.java.name, nextStoppedService()?.component?.className)
+        assertEquals(GhostService::class.java.name, shadowOf(app).nextStoppedService?.component?.className)
         eventually { app.container.engine.status.value == EngineStatus.Stopped }
+        // Una sola parada.
+        Thread.sleep(300)
+        assertNull(shadowOf(app).nextStoppedService)
         assertEquals(TorState.Off, app.tor.state.value)
         controller.resume().pause().stop().destroy()
     }

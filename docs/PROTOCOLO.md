@@ -679,8 +679,10 @@ contacto ofrece "Borrar contacto" (con confirmación; al terminar dice si el avi
   con "Activar" (aunque se saliera desde un chat o una foto). El plazo armado se guarda (§14.9) con
   `Settings.Global.BOOT_COUNT`: si Android mata el proceso y lo recrea con `START_STICKY`, el
   servicio, si el plazo ya venció, se detiene sin arrancar el motor ni dejar notificación y, si no,
-  lo vuelve a armar por lo que queda. Se borra al volver a la app, al cortar, con "Desconectar" y
-  al pasar a "Nunca"; un plazo de otro arranque del móvil no vale, y el arranque al encender (R20)
+  lo vuelve a armar por lo que queda. Si se abre la app en un proceso nuevo antes de ese reinicio,
+  mira el plazo guardado con las mismas comprobaciones: si ya venció desconecta, y el reinicio
+  pendiente se detiene igual sin arrancar nada. Se borra al volver a la app, al cortar, con
+  "Desconectar" y al pasar a "Nunca"; un plazo de otro arranque del móvil no vale, y el arranque al encender (R20)
   nunca lo usa. Sin `BOOT_COUNT` no se guarda (y un reinicio STICKY no lo retoma). Volver antes del
   plazo (también desde el selector de fotos, el de "Guardar" o los diálogos del sistema) no corta
   nada. No toca contactos ni identidad.

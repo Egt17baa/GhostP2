@@ -10,6 +10,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import org.ghostp2.data.AppSettings
 
 /**
  * "Desconectar al salir de la app" (R29). Vive lo que el proceso, en el [org.ghostp2.app.AppContainer],
@@ -19,7 +20,8 @@ import kotlinx.coroutines.launch
  *   temporizador en [scope]; al vencer llama a [disconnect]. El temporizador espera en tramos cortos y
  *   en cada despertar mira [clock]: con el móvil dormido corta en el primer despertar tras el plazo.
  * - [onStart] lo cancela y, si el plazo ya venció según [clock], llama a [disconnect] antes de nada. El
- *   plazo es el que había al armarlo, no el actual.
+ *   plazo es el que había al armarlo, no el actual. En un proceso nuevo (sin salida en memoria) mira el
+ *   plazo guardado, con las mismas comprobaciones que [resumeAfterRestart].
  * - [disconnect] se llama como mucho una vez por salida. Tras un corte, [returnHome] queda a `true`
  *   hasta [returnedHome]: la interfaz vuelve a la lista con "Activar".
  * - El plazo armado se guarda en [store] con el número de arranque del móvil ([boot]): si Android mata
@@ -55,6 +57,13 @@ class AutoDisconnect(
     /** Cambia con cada salida: un temporizador de una salida anterior no desconecta. */
     private var exit = 0L
 
+    /**
+     * [onStart] cortó por un plazo guardado ya vencido (proceso nuevo): el reinicio STICKY que Android
+     * aún tenga pendiente se detiene sin arrancar ([resumeAfterRestart] devuelve `true` una vez). Solo
+     * en memoria: es para este proceso.
+     */
+    private var expiredOnStart = false
+
     private val mutableReturnHome = MutableStateFlow(false)
 
     /** Hubo un corte y la interfaz aún no ha vuelto a la lista. */
@@ -85,8 +94,16 @@ class AutoDisconnect(
         val expired = synchronized(this) {
             val since = stoppedAt
             val after = afterMillis
-            disarm()
-            since != null && after > 0 && clock() - since >= after
+            if (since == null) {
+                // Proceso nuevo: la salida, si la hubo, solo está guardada.
+                val now = clock()
+                val stored = plausibleStored(now)
+                disarm()
+                (stored != null && now >= stored.deadline).also { if (it) expiredOnStart = true }
+            } else {
+                disarm()
+                after > 0 && clock() - since >= after
+            }
         }
         if (expired) cut()
     }
@@ -108,29 +125,45 @@ class AutoDisconnect(
      * Reinicio `START_STICKY` (el proceso es nuevo y la actividad no ha pasado por aquí). Con un plazo
      * guardado de este arranque del móvil: si ya venció devuelve `true` (quien llama para el servicio y
      * el motor sin arrancarlos; [disconnect] no se llama); si no, lo vuelve a armar por lo que queda.
+     * Si [onStart] ya cortó por un plazo guardado vencido, el reinicio pendiente también devuelve `true`.
      */
     fun resumeAfterRestart(): Boolean {
         val expired = synchronized(this) {
-            if (stoppedAt != null) return false
-            val armed = persisted { store.load() }
-            val now = clock()
-            val bootCount = boot()
-            val after = (armed?.minutes ?: 0) * MILLIS_PER_MINUTE
-            val since = armed?.let { it.deadline - after }
-            if (armed == null || bootCount == null || armed.boot != bootCount || after <= 0 || since == null || since > now) {
-                persist { store.clear() }
-                return false
+            if (expiredOnStart) {
+                // Ya se cortó (y se pidió volver a la lista) al abrir la app.
+                expiredOnStart = false
+                return true
             }
+            if (stoppedAt != null) return false
+            val now = clock()
+            val armed = plausibleStored(now) ?: return false
+            val after = armed.minutes * MILLIS_PER_MINUTE
             if (now >= armed.deadline) {
                 disarm()
                 true
             } else {
-                arm(since, after)
+                arm(armed.deadline - after, after)
                 false
             }
         }
         if (expired) mutableReturnHome.value = true
         return expired
+    }
+
+    /**
+     * Con `this` tomado: el plazo guardado si es de este arranque del móvil ([boot]), con unos minutos de
+     * [AppSettings.DISCONNECT_MINUTES] distintos de "Nunca" y armado no después de [now]; si no, lo borra
+     * y devuelve `null`.
+     */
+    private fun plausibleStored(now: Long): Armed? {
+        val armed = persisted { store.load() }
+        val bootCount = boot()
+        val plausible = armed != null && bootCount != null && armed.boot == bootCount &&
+            armed.minutes > 0 && armed.minutes in AppSettings.DISCONNECT_MINUTES &&
+            armed.deadline - armed.minutes * MILLIS_PER_MINUTE <= now
+        if (plausible) return armed
+        persist { store.clear() }
+        return null
     }
 
     /** Con `this` tomado y sin temporizador: arma la salida actual desde [since]. */
