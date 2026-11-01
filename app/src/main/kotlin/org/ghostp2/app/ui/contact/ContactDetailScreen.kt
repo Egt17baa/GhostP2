@@ -54,7 +54,9 @@ private class LastState {
  * verificación", "Cambiar el nombre" (diálogo con [renameDraft], `null` ⇒ cerrado), "Borrar chat" y
  * "Borrar contacto" (los dos con confirmación). Con [busy] (guardando) o borrando, las acciones quedan
  * desactivadas. Con [deleteResult] se muestra el resultado del aviso y "Aceptar" llama a [onDeleteDone].
- * [state] `null` sin estado previo ⇒ cargando. Los diálogos abiertos son simple `remember` (sin contenido).
+ * [state] `null` sin estado previo ⇒ cargando. [lastName] (del ViewModel, en memoria) nombra al
+ * contacto en el título y en el aviso aunque esta composición no lo llegara a ver (p. ej. tras girar la
+ * pantalla con el contacto ya borrado). Los diálogos abiertos son simple `remember` (sin contenido).
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -75,15 +77,17 @@ fun ContactDetailScreen(
     onClearChat: () -> Unit,
     onDelete: () -> Unit,
     onDeleteDone: () -> Unit,
+    lastName: String? = null,
 ) {
     val last = remember { LastState() }
     if (state != null) last.value = state
     val shown = state ?: last.value
+    val name = shown?.name ?: lastName.orEmpty()
 
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(shown?.name.orEmpty()) },
+                title = { Text(name) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.action_back))
@@ -113,7 +117,6 @@ fun ContactDetailScreen(
     }
 
     if (deleteResult != null) {
-        val name = shown?.name.orEmpty()
         val message = when (deleteResult) {
             UnpairDelivery.DELIVERED -> stringResource(R.string.contact_delete_delivered, name)
             UnpairDelivery.NOT_DELIVERED -> stringResource(R.string.contact_delete_not_delivered, name)

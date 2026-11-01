@@ -10,10 +10,12 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import org.ghostp2.app.AppContainer
+import org.ghostp2.app.DeleteOutcome
 import org.ghostp2.engine.Contact
 import org.ghostp2.engine.ContactStatus
 import org.ghostp2.engine.Presence
@@ -70,11 +72,11 @@ sealed interface ContactsUiState {
 
 /**
  * Lista de contactos: los guardados ([AppContainer.contacts]) con la presencia y los borrados en curso del
- * motor del contenedor. Solo en memoria; se recoge mientras la pantalla está visible (y 5 s más, para
+ * motor del contenedor, y el último resultado de borrado que no mostró su detalle ([deleteNotice]). Solo en memoria; se recoge mientras la pantalla está visible (y 5 s más, para
  * los giros de pantalla).
  */
 @OptIn(ExperimentalCoroutinesApi::class)
-class ContactsViewModel(container: AppContainer) : ViewModel() {
+class ContactsViewModel(private val container: AppContainer) : ViewModel() {
     /** Cada [retry] vuelve a suscribirse a los contactos. */
     private val attempt = MutableStateFlow(0)
 
@@ -95,6 +97,19 @@ class ContactsViewModel(container: AppContainer) : ViewModel() {
     /** "Reintentar" tras [ContactsUiState.Failed]. */
     fun retry() {
         attempt.update { it + 1 }
+    }
+
+    /**
+     * Resultado de un borrado de contacto que no mostró su detalle (se salió antes de que llegara), o
+     * `null`: la lista lo enseña una vez y lo confirma con [deleteNoticeShown].
+     */
+    val deleteNotice: StateFlow<DeleteOutcome?> = container.unseenDeleteOutcomes
+        .map { it.firstOrNull() }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), null)
+
+    /** El aviso del borrado de [contactId] ya se ha mostrado. */
+    fun deleteNoticeShown(contactId: String) {
+        container.deleteOutcomeShown(contactId)
     }
 
     private companion object {

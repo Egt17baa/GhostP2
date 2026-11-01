@@ -56,7 +56,13 @@ sealed interface EngineStatus {
     data class StartingTor(val percent: Int) : EngineStatus
     data object Online : EngineStatus
 
-    /** Fallo al arrancar o con el motor en marcha; [kind] es `STORAGE` solo si falló el almacenamiento. */
+    /**
+     * Fallo al arrancar o con el motor en marcha; [kind] es `STORAGE` solo si falló el almacenamiento.
+     *
+     * Regla: [message] es un texto interno (en español, sin claves ni direcciones) para pruebas y
+     * diagnóstico, no para la interfaz. Antes de mostrarlo hay que pasarlo a un recurso de cadena (hoy,
+     * según [kind]: `banner_storage_error` o `banner_tor_error`); nunca se muestra tal cual.
+     */
     data class Error(val message: String, val kind: EngineErrorKind = EngineErrorKind.TOR) : EngineStatus
 }
 

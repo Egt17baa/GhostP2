@@ -4,12 +4,14 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.ViewModelStore
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import org.ghostp2.app.DeleteOutcome
 import org.ghostp2.app.TestGhostApp
 import org.ghostp2.app.eventually
 import org.ghostp2.app.pairWithPeer
@@ -17,6 +19,7 @@ import org.ghostp2.engine.Contact
 import org.ghostp2.engine.ContactStatus
 import org.ghostp2.engine.EngineHarness
 import org.ghostp2.engine.Presence
+import org.ghostp2.engine.UnpairDelivery
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -45,6 +48,7 @@ class ContactsViewModelTest {
     private fun viewModel(): ContactsViewModel {
         val vm = ViewModelProvider.create(store, viewModelFactory { initializer { ContactsViewModel(app.container) } })[ContactsViewModel::class]
         collectors.launch { vm.state.collect {} }
+        collectors.launch { vm.deleteNotice.collect {} }
         return vm
     }
 
@@ -123,6 +127,71 @@ class ContactsViewModelTest {
         app.storage.contactsFailure = null
         vm.retry()
         eventually(TIMEOUT) { vm.state.value == ContactsUiState.Loaded(emptyList()) }
+    }
+
+    @Test
+    fun failureAfterLoadedGivesFailedAndRetryLoads() {
+        val later = CompletableDeferred<Exception>()
+        app.storage.contactsLaterFailure = later
+        runBlocking { app.storage.contacts.upsert(contact("a", "Ana")) }
+        val vm = viewModel()
+        eventually(TIMEOUT) { (vm.state.value as? ContactsUiState.Loaded)?.rows?.map { it.name } == listOf("Ana") }
+
+        // El flujo falla a mitad, con la lista ya cargada: "Reintentar", nunca una lista vacía ni la vieja.
+        later.complete(IOException("x"))
+        eventually(TIMEOUT) { vm.state.value == ContactsUiState.Failed }
+
+        app.storage.contactsLaterFailure = null
+        vm.retry()
+        eventually(TIMEOUT) { (vm.state.value as? ContactsUiState.Loaded)?.rows?.map { it.name } == listOf("Ana") }
+    }
+
+    @Test
+    fun stoppingTheEngineTurnsTheRowBackToDisconnected() {
+        assertTrue(runBlocking { app.container.start().await() })
+        EngineHarness(1, network = app.network).use { peer ->
+            val vm = viewModel()
+            runBlocking {
+                peer.startAll()
+                pairWithPeer(app, peer, TIMEOUT)
+            }
+            eventually(TIMEOUT) {
+                (vm.state.value as? ContactsUiState.Loaded)?.rows?.singleOrNull()?.presence == Presence.ONLINE
+            }
+            runBlocking { app.container.engine.stop() }
+            // Sin presencia (motor parado): la fila se muestra "desconectado" y sigue en la lista.
+            eventually(TIMEOUT) {
+                (vm.state.value as? ContactsUiState.Loaded)?.rows?.singleOrNull()?.presence == null
+            }
+            val row = (vm.state.value as ContactsUiState.Loaded).rows.single()
+            assertEquals(false, row.deleting)
+            assertEquals(false, row.identityChanged)
+        }
+    }
+
+    @Test
+    fun deleteResultLeftForTheListIsShownOnce() {
+        runBlocking { app.storage.contacts.upsert(contact("a", "Ana")) }
+        val vm = viewModel()
+        // Borrado sin detalle que espere el resultado (se salió antes de que llegara).
+        assertEquals(UnpairDelivery.NOT_DELIVERED, runBlocking { app.container.deleteContact("a", "Ana").await() })
+        eventually(TIMEOUT) { vm.deleteNotice.value != null }
+        assertEquals(DeleteOutcome("a", "Ana", UnpairDelivery.NOT_DELIVERED), vm.deleteNotice.value)
+        vm.deleteNoticeShown("a")
+        eventually(TIMEOUT) { vm.deleteNotice.value == null }
+    }
+
+    @Test
+    fun deleteResultWatchedByADetailIsNotShownInTheList() {
+        runBlocking { app.storage.contacts.upsert(contact("a", "Ana")) }
+        val vm = viewModel()
+        app.container.watchDeleteOutcome("a")
+        runBlocking { app.container.deleteContact("a", "Ana").await() }
+        eventually(TIMEOUT) { (vm.state.value as? ContactsUiState.Loaded)?.rows?.isEmpty() == true }
+        assertEquals(null, vm.deleteNotice.value)
+        // El detalle se cierra sin haberlo mostrado: ahora sí lo enseña la lista.
+        app.container.unwatchDeleteOutcome("a")
+        eventually(TIMEOUT) { vm.deleteNotice.value?.contactId == "a" }
     }
 
     private companion object {

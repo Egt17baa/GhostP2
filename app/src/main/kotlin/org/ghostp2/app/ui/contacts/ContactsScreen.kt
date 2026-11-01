@@ -23,17 +23,26 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.launch
+import org.ghostp2.app.DeleteOutcome
 import org.ghostp2.app.R
 import org.ghostp2.app.ui.Routes
 import org.ghostp2.engine.Presence
+import org.ghostp2.engine.UnpairDelivery
 
 /**
  * Adónde lleva pulsar una fila: con la identidad cambiada, al detalle del contacto (hay que volver a
@@ -43,7 +52,9 @@ fun openRoute(row: ContactRow): String = if (row.identityChanged) Routes.contact
 
 /**
  * Lista de contactos con [banner] (el aviso del motor) encima. Barra superior: "Añadir contacto",
- * "Ajustes" y, si [onDisconnect] no es `null` (motor `Online`), "Desconectar".
+ * "Ajustes" y, si [onDisconnect] no es `null` (motor `Online`), "Desconectar". [deleteNotice] (el
+ * resultado de un borrado que no se vio en el detalle) se muestra una vez en una snackbar y se confirma
+ * con [onDeleteNoticeShown].
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -55,8 +66,27 @@ fun ContactsScreen(
     onSettings: () -> Unit,
     onRetry: () -> Unit,
     onDisconnect: (() -> Unit)? = null,
+    deleteNotice: DeleteOutcome? = null,
+    onDeleteNoticeShown: (String) -> Unit = {},
 ) {
+    val snackbar = remember { SnackbarHostState() }
+    val ui = rememberCoroutineScope()
+    val noticeText = deleteNotice?.let {
+        when (it.delivery) {
+            UnpairDelivery.DELIVERED -> stringResource(R.string.contact_delete_delivered, it.name)
+            UnpairDelivery.NOT_DELIVERED -> stringResource(R.string.contact_delete_not_delivered, it.name)
+        }
+    }
+    LaunchedEffect(deleteNotice) {
+        if (deleteNotice != null && noticeText != null) {
+            // En el ámbito de la pantalla (como en el chat): confirmarlo no cierra la snackbar.
+            snackbar.currentSnackbarData?.dismiss()
+            ui.launch { snackbar.showSnackbar(noticeText) }
+            onDeleteNoticeShown(deleteNotice.contactId)
+        }
+    }
     Scaffold(
+        snackbarHost = { SnackbarHost(snackbar) },
         topBar = {
             TopAppBar(
                 title = { Text(stringResource(R.string.app_name)) },
@@ -114,6 +144,8 @@ private fun ContactItem(row: ContactRow, onOpen: (ContactRow) -> Unit) {
             else -> stringResource(R.string.contacts_offline)
         }
     }
+    // Lo que anuncia la accesibilidad al pulsar: adónde lleva la fila (ver [openRoute]).
+    val openLabel = stringResource(if (row.identityChanged) R.string.chat_view_contact else R.string.contacts_open_chat)
     ListItem(
         headlineContent = { Text(row.name) },
         supportingContent = {
@@ -127,8 +159,12 @@ private fun ContactItem(row: ContactRow, onOpen: (ContactRow) -> Unit) {
         } else {
             null
         },
-        // Mientras se borra no se puede abrir.
-        modifier = if (row.deleting) Modifier else Modifier.clickable { onOpen(row) },
+        // Mientras se borra no se puede abrir; la fila se lee igualmente como un solo elemento.
+        modifier = if (row.deleting) {
+            Modifier.semantics(mergeDescendants = true) {}
+        } else {
+            Modifier.clickable(onClickLabel = openLabel) { onOpen(row) }
+        },
     )
 }
 

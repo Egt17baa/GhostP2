@@ -212,6 +212,7 @@ private fun ReadyRoot(container: AppContainer, actions: ActivityActions, navCont
         composable(Routes.CONTACTS) {
             val vm = ghostViewModel(container) { ContactsViewModel(it) }
             val state by vm.state.collectAsStateWithLifecycle()
+            val deleteNotice by vm.deleteNotice.collectAsStateWithLifecycle()
             val status by container.engine.status.collectAsStateWithLifecycle()
             ContactsScreen(
                 state = state,
@@ -221,6 +222,8 @@ private fun ReadyRoot(container: AppContainer, actions: ActivityActions, navCont
                 onSettings = dropUnlessResumed { navController.open(Routes.SETTINGS) },
                 onRetry = vm::retry,
                 onDisconnect = actions.disconnect.takeIf { status == EngineStatus.Online },
+                deleteNotice = deleteNotice,
+                onDeleteNoticeShown = vm::deleteNoticeShown,
             )
         }
         composable(Routes.ADD) {
@@ -283,6 +286,7 @@ private fun ReadyRoot(container: AppContainer, actions: ActivityActions, navCont
             val renameError by vm.renameError.collectAsStateWithLifecycle()
             val actionError by vm.actionError.collectAsStateWithLifecycle()
             val deleteResult by vm.deleteResult.collectAsStateWithLifecycle()
+            val lastName by vm.lastName.collectAsStateWithLifecycle()
             // Contacto que ya no existe sin borrarlo desde aquí (p. ej. nos borró él): a la lista.
             LaunchedEffect(gone) { if (gone) navController.popBackStack(Routes.CONTACTS, inclusive = false) }
             ContactDetailScreen(
@@ -303,6 +307,7 @@ private fun ReadyRoot(container: AppContainer, actions: ActivityActions, navCont
                 onClearChat = vm::clearChat,
                 onDelete = vm::delete,
                 onDeleteDone = { navController.popBackStack(Routes.CONTACTS, inclusive = false) },
+                lastName = lastName,
             )
         }
         composable(Routes.CHAT) { entry ->
@@ -420,8 +425,9 @@ private fun appVersion(context: Context): String =
 
 /**
  * Sale de nombrar al contacto [id] hacia su chat. Se vacía la pila hasta la lista (nombrar y, si se
- * llegó desde "Volver a emparejar", el detalle y el chat viejos): queda lista → chat. Una sola vez
- * aunque se pulse dos veces.
+ * llegó desde "Volver a emparejar", el detalle y el chat viejos): queda lista → chat. Una segunda
+ * llamada con ese chat ya arriba no apila otro (`launchSingleTop`); en "Más tarde", `dropUnlessResumed`
+ * descarta además las pulsaciones durante la transición.
  */
 private fun NavController.leaveNaming(id: String) {
     navigate(Routes.chat(id)) {

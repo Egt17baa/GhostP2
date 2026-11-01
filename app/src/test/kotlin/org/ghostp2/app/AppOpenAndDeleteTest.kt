@@ -80,7 +80,7 @@ class AppOpenAndDeleteTest {
                 val (peerInMine, mineInPeer) = pairWithPeer(app, peer, TIMEOUT)
                 withTimeout(TIMEOUT) { engine.presence.first { it[peerInMine] == Presence.ONLINE } }
 
-                val result = withTimeout(TIMEOUT) { app.container.deleteContact(peerInMine).await() }
+                val result = withTimeout(TIMEOUT) { app.container.deleteContact(peerInMine, "Contacto").await() }
 
                 assertEquals(UnpairDelivery.DELIVERED, result)
                 assertTrue(app.storage.contacts.all().isEmpty())

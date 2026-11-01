@@ -40,6 +40,7 @@ class ContactDetailScreenTest {
     private var renameError by mutableStateOf<Int?>(null)
     private var actionError by mutableStateOf<Int?>(null)
     private var deleteResult by mutableStateOf<UnpairDelivery?>(null)
+    private var lastName by mutableStateOf<String?>(null)
 
     private fun show() = compose.setContent {
         ContactDetailScreen(
@@ -59,6 +60,7 @@ class ContactDetailScreenTest {
             onClearChat = { events += "clearChat" },
             onDelete = { events += "delete" },
             onDeleteDone = { events += "deleteDone" },
+            lastName = lastName,
         )
     }
 
@@ -144,6 +146,16 @@ class ContactDetailScreenTest {
         compose.onNodeWithText(text(R.string.contact_delete_delivered, "Ana")).assertExists()
         compose.onNodeWithText(text(R.string.action_ok)).performClick()
         assertEquals(listOf("deleteDone"), events)
+    }
+
+    @Test
+    fun resultWithoutAPreviousStateUsesTheViewModelName() {
+        // Como tras girar la pantalla con el contacto ya borrado: esta composición nunca lo vio.
+        state = null
+        lastName = "Ana"
+        deleteResult = UnpairDelivery.DELIVERED
+        show()
+        compose.onNodeWithText(text(R.string.contact_delete_delivered, "Ana")).assertExists()
     }
 
     @Test

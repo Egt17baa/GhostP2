@@ -3,6 +3,7 @@ package org.ghostp2.app.ui.chat
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
@@ -67,6 +68,8 @@ class ChatScreenTest {
 
     private fun text(id: Int, vararg args: Any) = app.getString(id, *args)
 
+    private fun counter(length: Int, max: Int) = text(R.string.chat_counter, formatCount(length), formatCount(max))
+
     /** Desplaza la lista hasta el mensaje [text] (la lista perezosa solo compone lo visible). */
     private fun scrollTo(text: String) {
         compose.onNode(hasScrollAction()).performScrollToNode(hasText(text))
@@ -74,7 +77,8 @@ class ChatScreenTest {
 
     private fun isStruck(message: String): Boolean {
         scrollTo(message)
-        return compose.onNodeWithText(message).fetchSemanticsNode().config[SemanticsProperties.Text].single()
+        // En el árbol sin unir: la burbuja une el texto con su etiqueta de estado.
+        return compose.onNodeWithText(message, useUnmergedTree = true).fetchSemanticsNode().config[SemanticsProperties.Text].single()
             .spanStyles.any { it.item.textDecoration == TextDecoration.LineThrough }
     }
 
@@ -165,14 +169,55 @@ class ChatScreenTest {
     fun counterAppearsPastTheThreshold() {
         draft = "x".repeat(COUNTER_FROM)
         show()
-        compose.onAllNodesWithText("${COUNTER_FROM} / ${PeerSession.MAX_TEXT_CHARS}").assertCountEquals(0)
+        compose.onAllNodesWithText(counter(COUNTER_FROM, PeerSession.MAX_TEXT_CHARS)).assertCountEquals(0)
         draft = "x".repeat(COUNTER_FROM + 1)
-        compose.onNodeWithText("${COUNTER_FROM + 1} / ${PeerSession.MAX_TEXT_CHARS}").assertExists()
+        // Con separador de miles (espacio duro), como "7 501 / 8 000".
+        compose.onNodeWithText("7\u00A0501 / 8\u00A0000").assertExists()
         compose.onNodeWithContentDescription(text(R.string.chat_send)).assertIsEnabled()
         // Por encima del límite (en caracteres Unicode) no se puede enviar.
         draft = "😀".repeat(PeerSession.MAX_TEXT_CHARS + 1)
-        compose.onNodeWithText("${PeerSession.MAX_TEXT_CHARS + 1} / ${PeerSession.MAX_TEXT_CHARS}").assertExists()
+        compose.onNodeWithText(counter(PeerSession.MAX_TEXT_CHARS + 1, PeerSession.MAX_TEXT_CHARS)).assertExists()
         compose.onNodeWithContentDescription(text(R.string.chat_send)).assertIsNotEnabled()
+    }
+
+    @Test
+    fun counterIsAPoliteLiveRegion() {
+        draft = "x".repeat(COUNTER_FROM + 1)
+        show()
+        val node = compose.onNodeWithText(counter(COUNTER_FROM + 1, PeerSession.MAX_TEXT_CHARS)).fetchSemanticsNode()
+        assertEquals(LiveRegionMode.Polite, node.config[SemanticsProperties.LiveRegion])
+    }
+
+    @Test
+    fun counterFormatGroupsThousands() {
+        assertEquals("999", formatCount(999))
+        assertEquals("7\u00A0501", formatCount(7_501))
+        assertEquals("8\u00A0000", formatCount(8_000))
+        assertEquals("1\u00A0234\u00A0567", formatCount(1_234_567))
+    }
+
+    @Test
+    fun bubblesAreOneAccessibleNodeWithSenderAndStatus() {
+        state = ana(
+            items = listOf(
+                out("a", "hola", DeliveryStatus.Delivered),
+                out("b", "no estaba", DeliveryStatus.Failed(FailReason.NOT_CONNECTED)),
+                ChatItem("c", Direction.IN, ChatContent.Text("qué tal"), DeliveryStatus.Received, 0),
+            ),
+        )
+        show()
+        scrollTo("hola")
+        compose.onNodeWithContentDescription(text(R.string.chat_bubble_status, text(R.string.chat_sender_me), "hola", text(R.string.chat_status_delivered)))
+            .assertExists()
+        scrollTo("no estaba")
+        compose.onNodeWithContentDescription(
+            text(R.string.chat_bubble_status, "Tú", "no estaba", text(R.string.chat_status_not_connected)),
+        ).assertExists()
+        // Recibido: el remitente es el contacto y no hay estado.
+        scrollTo("qué tal")
+        val received = compose.onNodeWithContentDescription(text(R.string.chat_bubble, "Ana", "qué tal")).fetchSemanticsNode()
+        // Un solo nodo: el texto del mensaje va unido en él.
+        assertEquals(listOf("qué tal"), received.config[SemanticsProperties.Text].map { it.text })
     }
 
     @Test

@@ -55,6 +55,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -74,9 +78,25 @@ import org.ghostp2.engine.ChatContent
 import org.ghostp2.engine.ChatItem
 import org.ghostp2.engine.Direction
 import org.ghostp2.engine.Presence
+import java.text.DecimalFormat
+import java.text.DecimalFormatSymbols
+import java.util.Locale
 
-/** A partir de cuántos caracteres Unicode se muestra el contador ("7 501 / 8 000"). */
+/**
+ * A partir de cuántos caracteres Unicode se muestra el contador ("7 501 / 8 000", con [formatCount]).
+ * Es una región activa educada: la accesibilidad anuncia los cambios sin interrumpir.
+ */
 internal const val COUNTER_THRESHOLD = 7_500
+
+/**
+ * [n] con los miles separados por un espacio duro (U+00A0, no parte la línea): "7 501", "8 000". La
+ * norma del español para cifras; el formato de `es` de Java no agrupa las de cuatro cifras.
+ */
+internal fun formatCount(n: Int): String {
+    val symbols = DecimalFormatSymbols(Locale.ROOT).apply { groupingSeparator = '\u00A0' }
+    // DecimalFormat no es seguro entre hilos: uno por llamada.
+    return DecimalFormat("#,##0", symbols).format(n)
+}
 
 /** Líneas visibles como mucho en el campo del mensaje. */
 private const val CHAT_INPUT_MAX_LINES = 6
@@ -177,7 +197,7 @@ fun ChatScreen(
             Box(Modifier.padding(padding).fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
         } else {
             Column(Modifier.padding(padding).fillMaxSize().imePadding()) {
-                Messages(state.items, photoContent, Modifier.weight(1f))
+                Messages(state.items, state.name, photoContent, Modifier.weight(1f))
                 Notices(state, onOpenContact)
                 if (preparingPhotos > 0) NoticeText(stringResource(R.string.chat_photo_preparing))
                 Input(state, draft, onDraftChange, onSend, photoButton)
@@ -212,7 +232,12 @@ private fun presenceText(state: ChatUiState): String = when {
 }
 
 @Composable
-private fun Messages(items: List<ChatItem>, photoContent: @Composable (ChatItem) -> Unit, modifier: Modifier = Modifier) {
+private fun Messages(
+    items: List<ChatItem>,
+    contactName: String,
+    photoContent: @Composable (ChatItem) -> Unit,
+    modifier: Modifier = Modifier,
+) {
     val list = rememberLazyListState()
     // Al llegar uno nuevo (o al abrir), al último. Por id: un cambio de estado no desplaza.
     val lastId = items.lastOrNull()?.id
@@ -236,15 +261,30 @@ private fun Messages(items: List<ChatItem>, photoContent: @Composable (ChatItem)
         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        items(items, key = { it.id }) { item -> Bubble(item, photoContent) }
+        items(items, key = { it.id }) { item -> Bubble(item, contactName, photoContent) }
     }
 }
 
+/**
+ * Una burbuja: para la accesibilidad, un solo elemento ("Tú: hola. ✓ entregado", "Ana: qué tal") con el
+ * remitente, el contenido y el estado. La miniatura de una foto se puede pulsar y queda aparte.
+ */
 @Composable
-private fun Bubble(item: ChatItem, photoContent: @Composable (ChatItem) -> Unit) {
+private fun Bubble(item: ChatItem, contactName: String, photoContent: @Composable (ChatItem) -> Unit) {
     val mine = item.direction == Direction.OUT
     val label = statusLabel(item.status)
-    Column(Modifier.fillMaxWidth(), horizontalAlignment = if (mine) Alignment.End else Alignment.Start) {
+    val sender = if (mine) stringResource(R.string.chat_sender_me) else contactName
+    val content = when (val c = item.content) {
+        is ChatContent.Text -> c.text
+        is ChatContent.Photo -> stringResource(R.string.chat_photo)
+        is ChatContent.PhotoDiscarded -> stringResource(R.string.chat_photo_discarded)
+    }
+    val description = label.text?.let { stringResource(R.string.chat_bubble_status, sender, content, stringResource(it)) }
+        ?: stringResource(R.string.chat_bubble, sender, content)
+    Column(
+        Modifier.fillMaxWidth().semantics(mergeDescendants = true) { contentDescription = description },
+        horizontalAlignment = if (mine) Alignment.End else Alignment.Start,
+    ) {
         Surface(
             color = if (mine) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
             shape = MaterialTheme.shapes.medium,
@@ -377,10 +417,11 @@ private fun Input(
     Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp)) {
         if (length > COUNTER_THRESHOLD) {
             Text(
-                stringResource(R.string.chat_counter, length, PeerSession.MAX_TEXT_CHARS),
+                stringResource(R.string.chat_counter, formatCount(length), formatCount(PeerSession.MAX_TEXT_CHARS)),
                 style = MaterialTheme.typography.labelSmall,
                 color = if (fits) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error,
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp)
+                    .semantics { liveRegion = LiveRegionMode.Polite },
                 textAlign = TextAlign.End,
             )
         }

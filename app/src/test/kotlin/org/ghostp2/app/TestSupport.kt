@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.flow.updateAndGet
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
@@ -31,6 +32,7 @@ import org.ghostp2.engine.InMemoryIdentityRepository
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.robolectric.Shadows.shadowOf
+import java.io.IOException
 import java.util.concurrent.atomic.AtomicInteger
 
 /** Aplicación de pruebas: el mismo [GhostApp] con [FakeTor] y almacenamiento en memoria en su [AppContainer]. */
@@ -52,8 +54,9 @@ class TestGhostApp : GhostApp() {
 /**
  * Almacenamiento en memoria; [failure] hace fallar la lectura de la identidad (como un archivo ilegible),
  * [saveFailure] solo su escritura (la comprobación pasa, pero el motor no puede guardar la identidad),
- * [contactsFailure] el flujo de contactos al empezar a recogerlo y [contactWriteDelayMillis] retrasa
- * cada escritura de contacto.
+ * [contactsFailure] el flujo de contactos al empezar a recogerlo ([contactsLaterFailure], más tarde),
+ * [contactReadFailures] las próximas lecturas de contactos, [contactDeleteFailure] el borrado de un
+ * contacto y [contactWriteDelayMillis] retrasa cada escritura de contacto.
  */
 class TestStorage : AppStorage {
     @Volatile var failure: Exception? = null
@@ -99,10 +102,34 @@ class TestStorage : AppStorage {
     /** Retraso de cada escritura de contacto (para cancelar a mitad de un guardado). */
     @Volatile var contactWriteDelayMillis = 0L
 
+    /** Si no es nulo, el flujo de contactos falla (tras emitir) cuando se complete con un error. */
+    @Volatile var contactsLaterFailure: CompletableDeferred<Exception>? = null
+
+    /** Cuántas de las próximas lecturas con [ContactRepository.all] fallan con `IOException`. */
+    val contactReadFailures = AtomicInteger()
+
+    /** Hace fallar el borrado de un contacto (no se borra). */
+    @Volatile var contactDeleteFailure: Exception? = null
+
     override val contacts: ContactRepository = object : ContactRepository by memoryContacts {
         override val contacts: Flow<List<Contact>> = flow {
             contactsFailure?.let { throw it }
-            emitAll(memoryContacts.contacts)
+            val later = contactsLaterFailure
+            if (later == null) {
+                emitAll(memoryContacts.contacts)
+            } else {
+                emitAll(merge(memoryContacts.contacts, flow<List<Contact>> { throw later.await() }))
+            }
+        }
+
+        override suspend fun all(): List<Contact> {
+            if (contactReadFailures.getAndUpdate { if (it > 0) it - 1 else 0 } > 0) throw IOException("lectura")
+            return memoryContacts.all()
+        }
+
+        override suspend fun delete(id: String) {
+            contactDeleteFailure?.let { throw it }
+            memoryContacts.delete(id)
         }
 
         override suspend fun upsert(contact: Contact) {

@@ -4,15 +4,19 @@ import androidx.annotation.StringRes
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.ghostp2.app.AppContainer
@@ -85,6 +89,13 @@ class ContactDetailViewModel(private val container: AppContainer, private val co
         lookup.map { (it as? Lookup.Read)?.state }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     /**
+     * Último nombre visto del contacto (solo en memoria), `null` si no se llegó a leer: tras borrarlo
+     * (o al girar la pantalla con el contacto ya borrado) el aviso del resultado aún puede nombrarlo.
+     */
+    val lastName: StateFlow<String?> =
+        state.filterNotNull().map { it.name }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
+
+    /**
      * El contacto no existe (o ya no) sin haberlo borrado desde aquí (p. ej. él nos borró): la pantalla
      * vuelve a la lista. Tras un borrado propio no se activa: se muestra [deleteResult].
      */
@@ -117,17 +128,33 @@ class ContactDetailViewModel(private val container: AppContainer, private val co
     /** Resultado del borrado pedido desde aquí: si el contacto recibió el aviso. */
     val deleteResult: StateFlow<UnpairDelivery?> = mutableDeleteResult.asStateFlow()
 
+    /** Este detalle espera el resultado de su borrado (la lista no lo enseña mientras tanto). */
+    private var watchingDelete = false
+
     init {
         viewModelScope.launch {
-            safetyNumber.value = try {
-                engine.safetyNumber(contactId)
+            // Fuera del hilo principal: lee el almacenamiento y calcula con las claves.
+            safetyNumber.value = withContext(Dispatchers.Default) { readSafetyNumber() }
+        }
+    }
+
+    /**
+     * Número de seguridad; un fallo pasajero (p. ej. una lectura del almacenamiento) se reintenta una
+     * vez tras [SAFETY_RETRY_MILLIS]. Contacto desconocido o un segundo fallo ⇒ `null` (sin registrar nada).
+     */
+    private suspend fun readSafetyNumber(): String? {
+        repeat(SAFETY_ATTEMPTS) { attempt ->
+            try {
+                return engine.safetyNumber(contactId)
             } catch (e: CancellationException) {
                 throw e
+            } catch (e: NoSuchElementException) {
+                return null // definitivo: no es un contacto guardado
             } catch (e: Exception) {
-                // Contacto desconocido o almacenamiento ilegible: sin número (y sin registrar nada).
-                null
+                if (attempt < SAFETY_ATTEMPTS - 1) delay(SAFETY_RETRY_MILLIS)
             }
         }
+        return null
     }
 
     /** Abre el diálogo de renombrar con el nombre actual. */
@@ -180,24 +207,48 @@ class ContactDetailViewModel(private val container: AppContainer, private val co
 
     /**
      * Borra el contacto avisándole ([AppContainer.deleteContact], en el scope del contenedor: salir de
-     * la pantalla no lo corta). Una sola vez; el resultado llega a [deleteResult].
+     * la pantalla no lo corta). Una sola vez; el resultado llega a [deleteResult] y se da por mostrado
+     * ([AppContainer.deleteOutcomeShown]). Si se sale antes de que llegue, lo enseña la lista.
+     * Un `Deferred` cancelado con este ViewModel aún activo (no por salir) cuenta como fallo.
      */
     fun delete() {
         if (ownDelete.value) return
+        val name = state.value?.name ?: lastName.value ?: return
         mutableActionError.value = null
         ownDelete.value = true
-        val result = container.deleteContact(contactId)
+        if (!watchingDelete) {
+            watchingDelete = true
+            container.watchDeleteOutcome(contactId)
+        }
+        val result = container.deleteContact(contactId, name)
         viewModelScope.launch {
             try {
                 mutableDeleteResult.value = result.await()
+                container.deleteOutcomeShown(contactId)
             } catch (e: CancellationException) {
-                throw e
+                // Salir de la pantalla cancela esta corrutina: se propaga. Si no, se canceló el borrado.
+                if (!isActive) throw e
+                deleteFailed()
             } catch (e: Exception) {
                 // El almacenamiento no pudo borrarlo: se avisa y se puede reintentar.
-                mutableActionError.value = R.string.contact_delete_failed
-                ownDelete.value = false
+                deleteFailed()
             }
         }
+    }
+
+    private fun deleteFailed() {
+        mutableActionError.value = R.string.contact_delete_failed
+        ownDelete.value = false
+        if (watchingDelete) {
+            watchingDelete = false
+            container.unwatchDeleteOutcome(contactId)
+        }
+    }
+
+    override fun onCleared() {
+        // Si el resultado aún no ha llegado, lo enseñará la lista de contactos.
+        if (watchingDelete) container.unwatchDeleteOutcome(contactId)
+        watchingDelete = false
     }
 
     /** Escritura persistente que termina aunque se salga de la pantalla; `false` si ya hay otra en curso. */
@@ -216,6 +267,11 @@ class ContactDetailViewModel(private val container: AppContainer, private val co
             }
         }
         return true
+    }
+
+    private companion object {
+        const val SAFETY_ATTEMPTS = 2
+        const val SAFETY_RETRY_MILLIS = 500L
     }
 
     @StringRes

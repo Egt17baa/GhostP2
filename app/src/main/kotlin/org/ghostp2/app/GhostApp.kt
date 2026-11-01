@@ -17,9 +17,11 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.retryWhen
 import kotlinx.coroutines.flow.update
@@ -161,6 +163,9 @@ sealed interface StorageState {
         const val FAILURES_BEFORE_RESET = 3
     }
 }
+
+/** Resultado de un borrado de contacto pedido desde la interfaz; [name] es el que tenía al borrarlo. */
+data class DeleteOutcome(val contactId: String, val name: String, val delivery: UnpairDelivery)
 
 /**
  * Inyección de dependencias manual: el único [TorTransport] y el único almacenamiento del proceso y el
@@ -458,6 +463,8 @@ class AppContainer internal constructor(
                     clearOwnClip(appContext)
                     synchronized(control) { foregroundChatId = null }
                     mutableLastDiagnostic.value = null
+                    // Los resultados de borrado sin mostrar llevan nombres de contactos borrados.
+                    deleteOutcomes.value = emptyMap()
                     mutableStorage.update { StorageState.Unknown }
                     probeLocked()
                     // Aún con el cerrojo: un start() pedido durante el borrado ve otra generación y no arranca.
@@ -469,10 +476,47 @@ class AppContainer internal constructor(
 
     /**
      * Borra el contacto avisándole ([MessengerEngine.deleteContact]) en el scope del proceso: salir de
-     * la pantalla no corta la entrega (hasta 2 min) ni el borrado local.
+     * la pantalla no corta la entrega (hasta 2 min) ni el borrado local. [name] es el nombre que tenía
+     * (el contacto ya no existe al terminar): el resultado queda en [unseenDeleteOutcomes] hasta que se
+     * muestre ([deleteOutcomeShown]); solo se guarda el último por id, en memoria.
      */
-    fun deleteContact(contactId: String): Deferred<UnpairDelivery> =
-        scope.async { engine.deleteContact(contactId) }
+    fun deleteContact(contactId: String, name: String): Deferred<UnpairDelivery> =
+        scope.async {
+            engine.deleteContact(contactId).also { delivery ->
+                deleteOutcomes.update { it + (contactId to DeleteOutcome(contactId, name, delivery)) }
+            }
+        }
+
+    /** Último resultado de borrado por id de contacto, aún sin mostrar. */
+    private val deleteOutcomes = MutableStateFlow<Map<String, DeleteOutcome>>(emptyMap())
+
+    /** Ids cuyo resultado mostrará un detalle abierto (con cuántos detalles lo esperan). */
+    private val watchedDeletes = MutableStateFlow<Map<String, Int>>(emptyMap())
+
+    /**
+     * Resultados de borrado sin mostrar que ningún detalle abierto va a mostrar (se salió del detalle
+     * antes de que llegaran), en orden de llegada: la lista de contactos los enseña una vez.
+     */
+    val unseenDeleteOutcomes: Flow<List<DeleteOutcome>> =
+        combine(deleteOutcomes, watchedDeletes) { outcomes, watched -> outcomes.values.filter { it.contactId !in watched } }
+
+    /** Un detalle abierto mostrará el resultado del borrado de [contactId]: la lista no lo enseña. */
+    fun watchDeleteOutcome(contactId: String) {
+        watchedDeletes.update { it + (contactId to (it[contactId] ?: 0) + 1) }
+    }
+
+    /** Ese detalle ya no lo mostrará (se cerró o el borrado falló). */
+    fun unwatchDeleteOutcome(contactId: String) {
+        watchedDeletes.update { current ->
+            val n = (current[contactId] ?: 0) - 1
+            if (n > 0) current + (contactId to n) else current - contactId
+        }
+    }
+
+    /** El resultado del borrado de [contactId] ya se ha mostrado (en el detalle o en la lista). */
+    fun deleteOutcomeShown(contactId: String) {
+        deleteOutcomes.update { it - contactId }
+    }
 
     /**
      * La app se ha abierto (o ha vuelto a primer plano): con el motor en marcha, corta las esperas de
