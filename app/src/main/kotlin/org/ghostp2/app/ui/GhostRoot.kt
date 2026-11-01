@@ -1,0 +1,106 @@
+package org.ghostp2.app.ui
+
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.rememberNavController
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.retryWhen
+import kotlinx.coroutines.launch
+import org.ghostp2.app.AppContainer
+import org.ghostp2.app.StorageState
+import org.ghostp2.data.AppSettings
+
+/** Lo que la interfaz pide a la actividad: servicio, permiso de notificaciones y exención de batería. */
+class ActivityActions(
+    val activate: () -> Unit,
+    val disconnect: () -> Unit,
+    val requestBatteryExemption: () -> Unit,
+    val requestNotifications: () -> Unit,
+)
+
+/**
+ * Raíz de la interfaz. Sin comprobar el almacenamiento: lo comprueba y muestra la carga; si falla:
+ * [StorageErrorScreen]; con los ajustes aún sin leer: solo la carga; después, el `NavHost` (inicio en
+ * [Routes.CONTACTS]).
+ */
+@Composable
+fun GhostRoot(container: AppContainer, actions: ActivityActions) {
+    val storage by container.storage.collectAsState()
+    LaunchedEffect(Unit) { if (container.storage.value == StorageState.Unknown) container.checkStorage() }
+
+    Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+        when (val state = storage) {
+            StorageState.Unknown -> Loading()
+            StorageState.Ok -> ReadyRoot(container, actions)
+            StorageState.Corrupted, is StorageState.Unavailable, is StorageState.Failed ->
+                Box(Modifier.safeDrawingPadding()) { StorageErrorScreen(container, state) }
+        }
+    }
+}
+
+/** Almacenamiento comprobado: espera a los ajustes y después navega. */
+@Composable
+private fun ReadyRoot(container: AppContainer, actions: ActivityActions) {
+    val settingsFlow = remember(container) {
+        container.settings.settings
+            // Un fallo al leer vuelve a comprobar el almacenamiento: si sigue mal, la raíz pasa a
+            // StorageErrorScreen (y este flujo deja de recogerse); si no, se reintenta en un momento.
+            .retryWhen { _, _ ->
+                (container.checkStorage() == StorageState.Ok).also { retry -> if (retry) delay(SETTINGS_RETRY_MILLIS) }
+            }
+            .catch { /* Se muestra StorageErrorScreen; nunca se cierra la app. */ }
+    }
+    val settings by settingsFlow.collectAsState(initial = null as AppSettings?)
+    if (settings == null) {
+        Loading()
+        return
+    }
+
+    val navController = rememberNavController()
+    NavHost(navController = navController, startDestination = Routes.CONTACTS) {
+        composable(Routes.CONTACTS) {
+            // Provisional: la lista de contactos (Task 6) pone aquí su pantalla con este aviso.
+            Column(Modifier.safeDrawingPadding()) { RootBanner(container, actions) }
+        }
+    }
+}
+
+/**
+ * [EngineBanner] del motor del contenedor. "Activar" y "Reintentar" comprueban antes el almacenamiento:
+ * si falla, la raíz muestra [StorageErrorScreen] en lugar de arrancar.
+ */
+@Composable
+private fun RootBanner(container: AppContainer, actions: ActivityActions) {
+    val status by container.engine.status.collectAsState()
+    val startFailed by container.startFailed.collectAsState()
+    val ui = rememberCoroutineScope()
+    EngineBanner(
+        status = status,
+        startFailed = startFailed,
+        onActivate = { ui.launch { if (container.checkStorage() == StorageState.Ok) actions.activate() } },
+        onDisconnect = actions.disconnect,
+    )
+}
+
+@Composable
+private fun Loading() {
+    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
+}
+
+private const val SETTINGS_RETRY_MILLIS = 1_000L

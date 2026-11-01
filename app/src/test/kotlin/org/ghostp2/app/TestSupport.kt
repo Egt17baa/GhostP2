@@ -32,9 +32,13 @@ class TestGhostApp : GhostApp() {
     override fun createContainer(): AppContainer = AppContainer(this, tor, storage)
 }
 
-/** Almacenamiento en memoria; [failure] hace fallar la lectura de la identidad (como un archivo ilegible). */
+/**
+ * Almacenamiento en memoria; [failure] hace fallar la lectura de la identidad (como un archivo ilegible) y
+ * [saveFailure] solo su escritura (la comprobación pasa, pero el motor no puede guardar la identidad).
+ */
 class TestStorage : AppStorage {
     @Volatile var failure: Exception? = null
+    @Volatile var saveFailure: Exception? = null
     @Volatile var forceResets = 0
 
     private val memoryIdentities = InMemoryIdentityRepository()
@@ -46,7 +50,7 @@ class TestStorage : AppStorage {
         }
 
         override suspend fun save(identity: Identity) {
-            failure?.let { throw it }
+            (failure ?: saveFailure)?.let { throw it }
             memoryIdentities.save(identity)
         }
 

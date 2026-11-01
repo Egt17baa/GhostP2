@@ -21,73 +21,25 @@
     <string name="notification_contact_public">Aviso de un contacto</string>
     <string name="notification_unknown_contact">un contacto</string>
 
-    <!-- Pantalla de diagnóstico (temporal, la sustituye el plan 3) -->
-    <string name="diag_title">GhostP2 · diagnóstico</string>
-    <string name="diag_activate">Activar</string>
-    <string name="diag_disconnect">Desconectar</string>
-    <string name="diag_retry">Reintentar</string>
-    <string name="diag_status_stopped">Estado: detenido</string>
-    <string name="diag_status_starting">Estado: arrancando Tor (%1$d %%)</string>
-    <string name="diag_status_online">Estado: en línea</string>
-    <string name="diag_status_error">Estado: error · %1$s</string>
-    <string name="diag_my_onion">Mi .onion: %1$s</string>
-    <string name="diag_my_onion_none">Mi .onion: sin publicar</string>
-    <string name="diag_contacts">Contactos: %1$d (en línea: %2$d)</string>
-    <string name="diag_battery_ok">Optimización de batería: desactivada para GhostP2</string>
-    <string name="diag_battery_on">Optimización de batería: activa (puede cortar la conexión)</string>
-    <string name="diag_battery_request">Permitir en segundo plano</string>
-    <string name="diag_create_invitation">Crear invitación</string>
-    <string name="diag_paste_invitation">Pegar invitación</string>
-    <string name="diag_invitation_preparing">Preparando la invitación…</string>
-    <string name="diag_invitation_waiting">Comparte este texto (caduca en 10 min):</string>
-    <string name="diag_invitation_paired">Emparejado. Número de seguridad: %1$s</string>
-    <string name="diag_invitation_expired">La invitación ha caducado</string>
-    <string name="diag_invitation_cancelled">Invitación cancelada</string>
-    <string name="diag_invitation_failed">No se pudo: %1$s</string>
-    <string name="diag_copy">Copiar</string>
-    <string name="diag_cancel">Cancelar</string>
-    <string name="diag_accept">Aceptar invitación</string>
-    <string name="diag_invitation_hint">Texto de la invitación</string>
-    <string name="diag_accepting">Emparejando…</string>
-    <string name="diag_clipboard_label">Invitación de GhostP2</string>
-    <string name="diag_presence_online">en línea</string>
-    <string name="diag_presence_connecting">conectando</string>
-    <string name="diag_presence_offline">desconectado</string>
-    <string name="diag_presence_identity_changed">identidad cambiada</string>
-    <string name="diag_chat_with">Chat con %1$s</string>
-    <string name="diag_close">Cerrar</string>
-    <string name="diag_message_hint">Mensaje</string>
-    <string name="diag_send">Enviar</string>
-    <string name="diag_photo">[foto]</string>
-    <string name="diag_photo_discarded">[foto descartada para liberar memoria]</string>
-    <string name="diag_sending">enviando…</string>
-    <string name="diag_delivered">entregado</string>
-    <string name="diag_failed">no enviado</string>
-    <string name="diag_send_only_online">Solo se puede enviar con GhostP2 en línea</string>
+    <!-- Acciones comunes -->
+    <string name="action_activate">Activar</string>
+    <string name="action_disconnect">Desconectar</string>
+    <string name="action_retry">Reintentar</string>
+    <string name="action_cancel">Cancelar</string>
 
-    <string name="diag_open_chat">Chat</string>
-    <string name="diag_clear_chat">Borrar chat</string>
-    <string name="diag_delete_contact">Borrar</string>
-    <string name="diag_delete_confirm_title">¿Borrar a %1$s?</string>
-    <string name="diag_delete_confirm_text">Se le avisará (si es posible, durante hasta 2 min) y se borrará de tus contactos. Para volver a hablar tendréis que emparejaros de nuevo.</string>
-    <string name="diag_delete_delivered">%1$s borrado. Ha recibido el aviso.</string>
-    <string name="diag_delete_not_delivered">%1$s borrado. No se le pudo avisar.</string>
-    <string name="diag_delete_failed">No se pudo borrar el contacto</string>
-    <string name="diag_send_failed">No se pudo enviar</string>
-    <string name="diag_contacts_error">No se pudieron leer tus contactos</string>
-    <string name="diag_unexpected">Ha ocurrido un error inesperado. Tus datos no se han tocado.</string>
-    <string name="diag_last_notice_publication">Último aviso: no se pudo actualizar la publicación de tu .onion (se sigue reintentando)</string>
-    <plurals name="diag_last_notice_client_auth">
-        <item quantity="one">Último aviso: no se pudo registrar en Tor la autorización de %1$d contacto; no podrás llamarle hasta reiniciar</item>
-        <item quantity="many">Último aviso: no se pudo registrar en Tor la autorización de %1$d contactos; no podrás llamarles hasta reiniciar</item>
-        <item quantity="other">Último aviso: no se pudo registrar en Tor la autorización de %1$d contactos; no podrás llamarles hasta reiniciar</item>
-    </plurals>
+    <!-- Aviso del estado del motor -->
+    <string name="banner_stopped">GhostP2 está desactivado</string>
+    <string name="banner_starting">Conectando a la red Tor… %1$d %%</string>
+    <string name="banner_tor_error">Sin conexión con Tor</string>
+    <string name="banner_storage_error">No se pudieron leer o guardar tus datos cifrados</string>
+    <string name="banner_unexpected">Error inesperado</string>
 
     <!-- Errores del almacenamiento cifrado -->
     <string name="store_corrupted">No se pudieron leer tus datos cifrados</string>
     <string name="store_corrupted_detail">Tu identidad y tus contactos no se pueden recuperar en este dispositivo.</string>
     <string name="store_unavailable">No se pudo acceder a tus datos cifrados</string>
     <string name="store_unavailable_detail">Puede ser un fallo pasajero. Tus datos siguen intactos.</string>
+    <string name="store_failed">Ha ocurrido un error inesperado. Tus datos no se han tocado.</string>
     <string name="store_unavailable_persistent">El fallo se repite. Si no se soluciona, puedes empezar de cero (se borra todo).</string>
     <string name="store_reset">Empezar de cero</string>
     <string name="store_reset_confirm_title">¿Empezar de cero?</string>

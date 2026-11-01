@@ -1,3 +1,5 @@
+import com.android.build.api.variant.HostTestBuilder
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -58,6 +60,14 @@ kotlin {
     jvmToolchain(17)
 }
 
+// Pruebas locales (Robolectric) solo en debug: el manifiesto de release no declara la actividad de
+// ui-test-manifest que necesita createComposeRule(), y el código probado es el mismo en ambas variantes.
+androidComponents {
+    beforeVariants(selector().withBuildType("release")) { variant ->
+        variant.hostTests[HostTestBuilder.UNIT_TEST_TYPE]?.enable = false
+    }
+}
+
 dependencies {
     implementation(project(":core:data"))
     implementation(project(":core:tor"))
@@ -67,8 +77,22 @@ dependencies {
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.compose.ui)
     implementation(libs.androidx.compose.material3)
+    implementation(libs.androidx.compose.material.icons.core)
+    implementation(libs.androidx.navigation.compose)
+    implementation(libs.androidx.lifecycle.viewmodel.compose)
+    implementation(libs.androidx.biometric)
+    implementation(libs.androidx.fragment)
+    implementation(libs.androidx.camera.camera2)
+    implementation(libs.androidx.camera.lifecycle)
+    implementation(libs.androidx.camera.view)
+    implementation(libs.zxing.core)
+    implementation(libs.androidx.exifinterface)
+    // Actividad vacía para createComposeRule() en las pruebas de Robolectric; nunca entra en el APK de release.
+    debugImplementation(libs.androidx.compose.ui.test.manifest)
 
     testImplementation(libs.junit4)
+    testImplementation(platform(libs.androidx.compose.bom))
+    testImplementation(libs.androidx.compose.ui.test.junit4)
     testImplementation(libs.robolectric)
     // FakeTor y repositorios en memoria del motor, inyectados mediante AppContainer.
     testImplementation(testFixtures(project(":core:engine")))
