@@ -1,13 +1,22 @@
 package org.ghostp2.app
 
+import android.Manifest
 import android.os.Looper
 import android.view.WindowManager.LayoutParams.FLAG_SECURE
 import androidx.appcompat.app.AlertDialog
+import androidx.compose.ui.test.ExperimentalTestApi
+import androidx.compose.ui.test.hasText
+import androidx.compose.ui.test.junit4.v2.createEmptyComposeRule
+import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
 import androidx.fragment.app.FragmentActivity
 import kotlinx.coroutines.runBlocking
 import org.junit.After
+import org.ghostp2.engine.EngineStatus
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.Robolectric
@@ -16,9 +25,13 @@ import org.robolectric.RuntimeEnvironment
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 
+@OptIn(ExperimentalTestApi::class)
 @RunWith(RobolectricTestRunner::class)
 @Config(application = TestGhostApp::class)
 class MainActivityTest {
+    @get:Rule
+    val compose = createEmptyComposeRule()
+
     private val app = RuntimeEnvironment.getApplication() as TestGhostApp
 
     @After
@@ -48,6 +61,44 @@ class MainActivityTest {
         shadowOf(Looper.getMainLooper()).idle()
     }
 
+    /**
+     * Android puede negar el arranque del servicio en primer plano (`IllegalStateException`, en API 31+
+     * `ForegroundServiceStartNotAllowedException`): la app no se cierra y el aviso sigue ofreciendo Activar.
+     */
+    @Test
+    fun refusedServiceStartDoesNotCrash() {
+        runBlocking { app.storage.settings.update { it.copy(onboardingDone = true, lockEnabled = false) } }
+        shadowOf(app).grantPermissions(Manifest.permission.POST_NOTIFICATIONS)
+        val controller = Robolectric.buildActivity(MainActivity::class.java).setup()
+        var starts = 0
+        controller.get().startForeground = {
+            starts++
+            throw IllegalStateException("startForegroundService() not allowed")
+        }
+        compose.waitUntilAtLeastOneExists(hasText("GhostP2 está desactivado"), TIMEOUT)
+        compose.onNodeWithText("Activar").performClick()
+        compose.waitUntil(TIMEOUT) { starts == 1 }
+        compose.waitForIdle()
+        compose.onNodeWithText("Activar").assertExists()
+        assertEquals(EngineStatus.Stopped, app.container.engine.status.value)
+        controller.pause().stop().destroy()
+    }
+
+    /** Con la actividad ya en segundo plano (p. ej. al llegar tarde la respuesta del permiso) no se arranca. */
+    @Test
+    fun noServiceStartWhileInBackground() {
+        val controller = Robolectric.buildActivity(MainActivity::class.java).setup()
+        var starts = 0
+        controller.get().startForeground = { starts++ }
+        controller.pause().stop()
+        controller.get().startGhostService()
+        assertEquals(0, starts)
+        controller.start().resume()
+        controller.get().startGhostService()
+        assertEquals(1, starts)
+        controller.pause().stop().destroy()
+    }
+
     @Test
     fun backgroundLocksThroughActivityLifecycle() {
         runBlocking { app.storage.settings.update { it.copy(onboardingDone = true, lockEnabled = false) } }
@@ -70,5 +121,9 @@ class MainActivityTest {
         controller.start()
         assertTrue(lock.locked.value)
         controller.stop().destroy()
+    }
+
+    private companion object {
+        const val TIMEOUT = 10_000L
     }
 }

@@ -1,6 +1,7 @@
 package org.ghostp2.app
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -10,6 +11,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
+import androidx.lifecycle.Lifecycle
 import org.ghostp2.app.lock.LocalLockPrompt
 import org.ghostp2.app.lock.LockPrompt
 import org.ghostp2.app.ui.ActivityActions
@@ -96,8 +98,22 @@ class MainActivity : FragmentActivity() {
         }
     }
 
-    private fun startGhostService() {
-        ContextCompat.startForegroundService(this, GhostService.startIntent(this))
+    /** Arranca el servicio en primer plano (las pruebas lo sustituyen). */
+    internal var startForeground: (Intent) -> Unit = { ContextCompat.startForegroundService(this, it) }
+
+    /**
+     * Arranca el servicio solo con la actividad a la vista (la respuesta del permiso puede llegar ya en
+     * segundo plano). Si Android lo niega (`IllegalStateException`; en API 31+
+     * `ForegroundServiceStartNotAllowedException`), no se cierra la app: el motor sigue parado y el aviso
+     * sigue ofreciendo "Activar".
+     */
+    internal fun startGhostService() {
+        if (!lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) return
+        try {
+            startForeground(GhostService.startIntent(this))
+        } catch (_: IllegalStateException) {
+            // Nada que hacer: el usuario puede volver a pulsar "Activar".
+        }
     }
 
     private fun disconnect() {
