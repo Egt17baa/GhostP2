@@ -1,0 +1,71 @@
+package org.ghostp2.app.ui.pairing
+
+import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.ImageProxy
+import com.google.zxing.BarcodeFormat
+import com.google.zxing.BinaryBitmap
+import com.google.zxing.DecodeHintType
+import com.google.zxing.PlanarYUVLuminanceSource
+import com.google.zxing.ReaderException
+import com.google.zxing.common.HybridBinarizer
+import com.google.zxing.qrcode.QRCodeReader
+import java.util.concurrent.atomic.AtomicBoolean
+
+private val QR_HINTS: Map<DecodeHintType, Any> = mapOf(
+    DecodeHintType.TRY_HARDER to true,
+    DecodeHintType.POSSIBLE_FORMATS to listOf(BarcodeFormat.QR_CODE),
+    DecodeHintType.CHARACTER_SET to "UTF-8",
+)
+
+/**
+ * Texto del QR que haya en el plano de luminancia [data] (`width`×`height`, cada fila empieza cada
+ * [rowStride] bytes); `null` si no hay QR o está dañado. No guarda ni registra nada del fotograma.
+ */
+fun decodeQrLuminance(data: ByteArray, width: Int, height: Int, rowStride: Int): String? {
+    val source = PlanarYUVLuminanceSource(data, rowStride, height, 0, 0, width, height, false)
+    return try {
+        QRCodeReader().decode(BinaryBitmap(HybridBinarizer(source)), QR_HINTS).text
+    } catch (_: ReaderException) {
+        // Sin QR, ilegible o con la suma de comprobación mal: se prueba con el siguiente fotograma.
+        null
+    }
+}
+
+/**
+ * La invitación de GhostP2 que lleva [text] (sin los espacios de los extremos), o `null` si no empieza
+ * por `ghostp2:` (sin distinguir mayúsculas): un QR ajeno se ignora y no se conecta a nada.
+ */
+fun invitationOrNull(text: String): String? = text.trim().takeIf { it.startsWith(INVITATION_PREFIX, ignoreCase = true) }
+
+private const val INVITATION_PREFIX = "ghostp2:"
+
+/**
+ * Busca la invitación en los fotogramas de la cámara (en el hilo del analizador, nunca en el principal).
+ * Copia el plano Y en un búfer propio reutilizado, que se borra tras cada fotograma (lleva el secreto si
+ * enfoca una invitación), y avisa a [onInvitation] una sola vez. El `ImageProxy` siempre se cierra.
+ */
+class QrAnalyzer(private val onInvitation: (String) -> Unit) : ImageAnalysis.Analyzer {
+    private val reported = AtomicBoolean(false)
+    private var buffer = ByteArray(0)
+
+    override fun analyze(image: ImageProxy) {
+        image.use {
+            if (reported.get()) return
+            val plane = it.planes[0]
+            val rowStride = plane.rowStride
+            val size = rowStride * it.height
+            if (buffer.size < size) buffer = ByteArray(size)
+            try {
+                // `duplicate()`: no se mueve la posición del búfer de CameraX. La última fila puede venir
+                // sin relleno; lo que falte queda a cero.
+                val source = plane.buffer.duplicate()
+                val copied = minOf(source.remaining(), size)
+                source.get(buffer, 0, copied)
+                val invitation = decodeQrLuminance(buffer, it.width, it.height, rowStride)?.let(::invitationOrNull)
+                if (invitation != null && reported.compareAndSet(false, true)) onInvitation(invitation)
+            } finally {
+                buffer.fill(0)
+            }
+        }
+    }
+}

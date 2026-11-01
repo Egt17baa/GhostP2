@@ -52,9 +52,9 @@ import org.ghostp2.engine.InvitationState
 
 /**
  * Añadir contacto, con tres pestañas: "Mi código" (QR y texto de [invitation], "Caduca en mm:ss",
- * "Copiar", "Compartir" y "Crear otra" al caducar, cancelarse o fallar), "Escanear" (llega en la
- * Task 8) y "Pegar" ([GhostTextField] y "Aceptar", con el estado [accept]). Sin el motor [online]:
- * "Activa GhostP2 para añadir contactos" y "Activar".
+ * "Copiar", "Compartir" y "Crear otra" al caducar, cancelarse o fallar), "Escanear" ([QrScanner],
+ * que acepta al leer y pasa a "Pegar") y "Pegar" ([GhostTextField] y "Aceptar", con el estado
+ * [accept]). Sin el motor [online]: "Activa GhostP2 para añadir contactos" y "Activar".
  *
  * Con el motor `Online` y sin invitación (o cancelada al parar el motor) se pide una con
  * [onCreateInvitation]. La pestaña elegida y el texto pegado solo viven en la composición (nada
@@ -106,11 +106,14 @@ fun AddContactScreen(
             }
             when (tab) {
                 TAB_MINE -> MyCode(invitation, onCreateInvitation, clock)
-                // Hueco para el escáner de la Task 8.
-                TAB_SCAN -> Centered {
-                    Text(stringResource(R.string.add_scan_unavailable), textAlign = TextAlign.Center)
-                    OutlinedButton(onClick = { tab = TAB_PASTE }) { Text(stringResource(R.string.add_tab_paste)) }
-                }
+                // Al leer una invitación se acepta y se pasa a "Pegar", que muestra el progreso o el fallo.
+                TAB_SCAN -> QrScanner(
+                    onInvitation = {
+                        onAccept(it)
+                        tab = TAB_PASTE
+                    },
+                    onUsePaste = { tab = TAB_PASTE },
+                )
                 else -> Paste(pasted, { pasted = it }, accept, onAccept)
             }
         }

@@ -97,7 +97,9 @@
     <string name="add_expired">La invitación ha caducado</string>
     <string name="add_cancelled">La invitación se ha cancelado</string>
     <string name="add_create_another">Crear otra</string>
-    <string name="add_scan_unavailable">Escanear con la cámara llegará pronto. Mientras tanto, pega el texto de la invitación.</string>
+    <string name="scan_no_permission">Sin permiso de cámara. Puedes pegar la invitación</string>
+    <string name="scan_camera_failed">No se pudo abrir la cámara. Puedes pegar la invitación</string>
+    <string name="scan_hint">Apunta la cámara al código QR de tu contacto</string>
     <string name="add_paste_label">Invitación</string>
     <string name="add_paste_hint">Pega aquí el texto de la invitación que te ha dado tu contacto.</string>
     <string name="add_accept">Aceptar</string>
