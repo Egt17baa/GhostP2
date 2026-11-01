@@ -28,6 +28,8 @@ import kotlinx.coroutines.flow.retryWhen
 import kotlinx.coroutines.launch
 import org.ghostp2.app.AppContainer
 import org.ghostp2.app.StorageState
+import org.ghostp2.app.ui.chat.ChatScreen
+import org.ghostp2.app.ui.chat.ChatViewModel
 import org.ghostp2.app.ui.contact.ContactDetailScreen
 import org.ghostp2.app.ui.contact.ContactDetailViewModel
 import org.ghostp2.app.ui.contacts.ContactsScreen
@@ -234,19 +236,36 @@ private fun ReadyRoot(container: AppContainer, actions: ActivityActions) {
                 onDeleteDone = { navController.popBackStack(Routes.CONTACTS, inclusive = false) },
             )
         }
+        composable(Routes.CHAT) { entry ->
+            val id = entry.idArg()
+            // El borrador vive en este ViewModel (en memoria): sobrevive a girar el móvil, no a que el sistema mate la app.
+            val vm = ghostViewModel(container) { ChatViewModel(it, id) }
+            val state by vm.state.collectAsStateWithLifecycle()
+            val gone by vm.gone.collectAsStateWithLifecycle()
+            // Contacto borrado (desde el detalle o por él): a la lista.
+            LaunchedEffect(gone) { if (gone) navController.popBackStack(Routes.CONTACTS, inclusive = false) }
+            ChatScreen(
+                state = state,
+                draft = vm.draft,
+                onDraftChange = { vm.draft = it },
+                onSend = { vm.send() },
+                onBack = { navController.popBackStack() },
+                onOpenContact = { navController.navigate(Routes.contact(id)) { launchSingleTop = true } },
+                onClear = vm::clear,
+            )
+        }
     }
 }
 
 /**
- * Sale de nombrar al contacto [id] hacia su chat (sin dejar la pantalla de nombrar en la pila). Mientras
- * el chat no esté en el grafo (Task 10), vuelve a la lista de contactos.
+ * Sale de nombrar al contacto [id] hacia su chat. Se vacía la pila hasta la lista (nombrar y, si se
+ * llegó desde "Volver a emparejar", el detalle y el chat viejos): queda lista → chat. Una sola vez
+ * aunque se pulse dos veces.
  */
 private fun NavController.leaveNaming(id: String) {
-    val chat = Routes.chat(id)
-    if (graph.findNode(chat) != null) {
-        navigate(chat) { popUpTo(Routes.NAME) { inclusive = true } }
-    } else {
-        popBackStack(Routes.CONTACTS, inclusive = false)
+    navigate(Routes.chat(id)) {
+        popUpTo(Routes.CONTACTS)
+        launchSingleTop = true
     }
 }
 

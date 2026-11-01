@@ -141,6 +141,22 @@
     <string name="contact_delete_not_delivered">No se pudo avisar a %1$s; se ha borrado igualmente</string>
     <string name="contact_delete_failed">No se pudo borrar. Inténtalo de nuevo</string>
     <string name="action_ok">Aceptar</string>
+
+    <!-- Chat -->
+    <string name="chat_status_sending">enviando…</string>
+    <string name="chat_status_delivered">✓ entregado</string>
+    <string name="chat_status_not_connected">No entregado: tu contacto no está conectado. Descartado</string>
+    <string name="chat_status_failed">No entregado. Descartado</string>
+    <string name="chat_engine_stopped">Activa GhostP2 para enviar</string>
+    <string name="chat_contact_offline">Tu contacto no está conectado: lo que envíes se descartará</string>
+    <string name="chat_identity_changed">La identidad de %1$s ha cambiado: no se puede enviar hasta volver a emparejar</string>
+    <string name="chat_view_contact">Ver contacto</string>
+    <string name="chat_menu">Más opciones</string>
+    <string name="chat_message_label">Mensaje</string>
+    <string name="chat_send">Enviar</string>
+    <string name="chat_counter">%1$d / %2$d</string>
+    <string name="chat_empty">Aún no hay mensajes. Solo se guardan en la memoria de este móvil</string>
+    <string name="chat_photo">Foto</string>
     <!-- Ahorro de energía de cada fabricante -->
     <string name="battery_hint_xiaomi">En Xiaomi, Redmi y POCO: Ajustes › Aplicaciones › GhostP2 › Ahorro de batería › «Sin restricciones», y activa también «Inicio automático».</string>
     <string name="battery_hint_samsung">En Samsung: Ajustes › Aplicaciones › GhostP2 › Batería › «Sin restricciones», y comprueba que GhostP2 no está en Ajustes › Batería › Límites de uso en segundo plano.</string>

@@ -331,12 +331,15 @@ class GhostRootTest {
             compose.onNodeWithText("Hemos comprobado que coincide").performClick()
             compose.onNodeWithText("Guardar").performClick()
 
-            // Sin chat todavía en el grafo: vuelve a la lista (y "Añadir" ya no está en la pila).
-            waitForText("Ana")
+            // Al chat con Ana; "Volver" lleva a la lista ("Añadir" y "Nombrar" ya no están en la pila).
+            waitForText("Mensaje")
+            compose.onNodeWithText("Ana").assertExists()
             val stored = runBlocking { app.storage.contacts.all() }.single()
             assertEquals("Ana", stored.name)
             assertTrue(stored.verified)
-            compose.onNodeWithText("verificado").assertExists()
+            compose.onNodeWithContentDescription("Volver").performClick()
+            waitForText("verificado")
+            compose.onNodeWithText("Ana").assertExists()
             // Ningún servicio temporal sigue publicado.
             assertTrue(app.network.published.value.values.all { it.requiresClientAuth })
         }
@@ -384,7 +387,9 @@ class GhostRootTest {
             compose.waitUntilAtLeastOneExists(hasText("Comparadlo por otro canal (en persona o por llamada)"), PAIR_TIMEOUT)
             compose.waitUntil(TIMEOUT) { mine !in app.network.published.value }
             compose.onNodeWithText("Más tarde").performClick()
-            waitForText("Contacto nuevo")
+            // Al chat del contacto nuevo.
+            waitForText("Mensaje")
+            compose.onNodeWithText("Contacto nuevo").assertExists()
         }
     }
 
@@ -433,6 +438,56 @@ class GhostRootTest {
         compose.onNodeWithText("Aceptar").performClick()
         waitForText("Aún no tienes contactos")
     }
+
+    @Test
+    fun rowOpensChatWhoseMenuOpensTheContact() {
+        runBlocking { app.storage.contacts.upsert(active("c1", "Ana")) }
+        show()
+        waitForText("Ana")
+        compose.onNodeWithText("Ana").performClick()
+        waitForText("Activa GhostP2 para enviar")
+        compose.onNodeWithContentDescription("Más opciones").performClick()
+        compose.onNodeWithText("Ver contacto").performClick()
+        waitForText("Número de seguridad")
+        // "Volver" regresa al chat.
+        compose.onNodeWithContentDescription("Volver").performClick()
+        waitForText("Activa GhostP2 para enviar")
+    }
+
+    @Test
+    fun sendingToAnUnreachableContactIsDiscarded() {
+        runBlocking { app.storage.contacts.upsert(active("c1", "Ana")) }
+        assertTrue(runBlocking { container.start().await() })
+        show()
+        waitForText("Ana")
+        compose.onNodeWithText("Ana").performClick()
+        waitForText("Tu contacto no está conectado: lo que envíes se descartará")
+        compose.onNodeWithText("Mensaje").performTextInput("hola")
+        compose.onNodeWithContentDescription("Enviar").performClick()
+        waitForText("No entregado: tu contacto no está conectado. Descartado")
+        compose.onNodeWithText("hola").assertExists()
+        assertEquals(1, container.engine.conversations.value["c1"].orEmpty().size)
+    }
+
+    @Test
+    fun contactDeletedFromTheChatsDetailReturnsToTheList() {
+        runBlocking { app.storage.contacts.upsert(active("c1", "Ana")) }
+        show()
+        waitForText("Ana")
+        compose.onNodeWithText("Ana").performClick()
+        waitForText("Activa GhostP2 para enviar")
+        compose.onNodeWithContentDescription("Más opciones").performClick()
+        compose.onNodeWithText("Ver contacto").performClick()
+        waitForText("Borrar contacto")
+        compose.onNodeWithText("Borrar contacto").performScrollTo().performClick()
+        compose.onNodeWithText("Borrar").performClick()
+        waitForText("No se pudo avisar a Ana; se ha borrado igualmente")
+        compose.onNodeWithText("Aceptar").performClick()
+        waitForText("Aún no tienes contactos")
+    }
+
+    private fun active(id: String, name: String) =
+        Contact(id, name, ByteArray(32), "x".repeat(56), ByteArray(32), ByteArray(32), ByteArray(32), false, ContactStatus.ACTIVE)
 
     private fun changed(id: String, name: String) =
         Contact(id, name, ByteArray(32), "x".repeat(56), ByteArray(32), ByteArray(32), ByteArray(32), false, ContactStatus.IDENTITY_CHANGED)
