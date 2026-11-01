@@ -17,10 +17,14 @@ import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import org.ghostp2.app.photo.PhotoEncoder
+import org.ghostp2.app.photo.PhotoQueue
+import org.ghostp2.data.AppSettings
 import org.ghostp2.data.SettingsRepository
 import org.ghostp2.data.StoreCorruptedException
 import org.ghostp2.data.StoreUnavailableException
@@ -28,6 +32,7 @@ import org.ghostp2.data.StoredRepositories
 import org.ghostp2.data.createRepositories
 import org.ghostp2.engine.ContactRepository
 import org.ghostp2.engine.DeletionJournal
+import org.ghostp2.engine.DeliveryStatus
 import org.ghostp2.engine.EngineStatus
 import org.ghostp2.engine.IdentityRepository
 import org.ghostp2.engine.MessengerEngine
@@ -172,6 +177,31 @@ class AppContainer internal constructor(
     /** Ajustes de la app, en el mismo almacenamiento cifrado. */
     val settings: SettingsRepository get() = store.settings
 
+    /**
+     * Cola de fotos salientes (una en vuelo, como mucho 3 entre esperando y en curso). Solo envía con el
+     * motor `Online` (si no, `NOT_ACTIVE`); pasa a la siguiente cuando la anterior deja de estar en
+     * `Sending` o sale del historial. [stop] la vacía.
+     */
+    val photos = PhotoQueue(
+        scope,
+        encode = { uri -> PhotoEncoder.encode(appContext.contentResolver, uri, maxPhotoSidePx()) },
+        send = { contactId, jpeg -> if (engine.status.value == EngineStatus.Online) engine.sendPhoto(contactId, jpeg) else null },
+        awaitFinished = { contactId, itemId ->
+            engine.conversations.first { all ->
+                all[contactId]?.firstOrNull { it.id == itemId }?.status !is DeliveryStatus.Sending
+            }
+        },
+    )
+
+    /** Lado mayor de las fotos según los ajustes; si no se pueden leer, el valor por defecto. */
+    private suspend fun maxPhotoSidePx(): Int = try {
+        settings.get().maxPhotoSidePx
+    } catch (e: CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        AppSettings().maxPhotoSidePx
+    }
+
     private val mutableStorage = MutableStateFlow<StorageState>(StorageState.Unknown)
     val storage: StateFlow<StorageState> = mutableStorage.asStateFlow()
 
@@ -271,6 +301,8 @@ class AppContainer internal constructor(
 
     /** Detiene el motor; antes cancela (y espera) un arranque en curso. */
     fun stop(): Job = synchronized(control) {
+        // Las fotos pendientes no sobreviven a una parada.
+        photos.clear()
         val run = startRun
         startRun = null
         val previousStop = stopJob
@@ -337,6 +369,7 @@ class AppContainer internal constructor(
     }
 
     private suspend fun stopEverything() {
+        photos.clear()
         // Sin servicio no hay notificación fija "activo"; si no estaba en marcha no hace nada.
         appContext.stopService(Intent(appContext, GhostService::class.java))
         stop().join()
