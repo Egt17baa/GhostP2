@@ -121,6 +121,26 @@
     <string name="name_error_too_long">El nombre es demasiado largo. Máximo de caracteres: %1$d</string>
     <string name="name_error_save">No se pudo guardar. Inténtalo de nuevo</string>
 
+
+    <!-- Detalle del contacto -->
+    <string name="contact_not_verified">sin verificar</string>
+    <string name="contact_verify">Marcar como verificado</string>
+    <string name="contact_unverify">Quitar verificación</string>
+    <string name="contact_identity_changed">La identidad de %1$s ha cambiado. Puede que haya reinstalado GhostP2 o que alguien intente suplantarle: volved a emparejar</string>
+    <string name="contact_repair">Volver a emparejar</string>
+    <string name="contact_rename">Cambiar el nombre</string>
+    <string name="contact_clear_chat">Borrar chat</string>
+    <string name="contact_clear_chat_title">¿Borrar el chat con %1$s?</string>
+    <string name="contact_clear_chat_text">Se borrará de la memoria de este móvil</string>
+    <string name="contact_clear_chat_confirm">Borrar el chat</string>
+    <string name="contact_delete">Borrar contacto</string>
+    <string name="contact_delete_title">¿Borrar a %1$s?</string>
+    <string name="contact_delete_text">Se le avisará si está conectado o en los próximos 2 minutos. Se borran sus claves y la conversación.</string>
+    <string name="contact_delete_confirm">Borrar</string>
+    <string name="contact_delete_delivered">%1$s ha recibido el aviso</string>
+    <string name="contact_delete_not_delivered">No se pudo avisar a %1$s; se ha borrado igualmente</string>
+    <string name="contact_delete_failed">No se pudo borrar. Inténtalo de nuevo</string>
+    <string name="action_ok">Aceptar</string>
     <!-- Ahorro de energía de cada fabricante -->
     <string name="battery_hint_xiaomi">En Xiaomi, Redmi y POCO: Ajustes › Aplicaciones › GhostP2 › Ahorro de batería › «Sin restricciones», y activa también «Inicio automático».</string>
     <string name="battery_hint_samsung">En Samsung: Ajustes › Aplicaciones › GhostP2 › Batería › «Sin restricciones», y comprueba que GhostP2 no está en Ajustes › Batería › Límites de uso en segundo plano.</string>

@@ -88,7 +88,7 @@ fun NameContactScreen(
 
 /** Los grupos de 5 cifras en dos filas de tres, en monoespaciada. */
 @Composable
-private fun SafetyNumberGroups(safetyNumber: String) {
+internal fun SafetyNumberGroups(safetyNumber: String) {
     val groups = safetyNumber.split(' ').filter { it.isNotEmpty() }
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         groups.chunked(3).forEach { row ->

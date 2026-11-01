@@ -14,6 +14,7 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextInput
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
@@ -27,6 +28,8 @@ import org.ghostp2.app.TestGhostApp
 import org.ghostp2.data.StoreCorruptedException
 import org.ghostp2.data.StoreUnavailableException
 import org.ghostp2.engine.AcceptResult
+import org.ghostp2.engine.Contact
+import org.ghostp2.engine.ContactStatus
 import org.ghostp2.engine.EngineErrorKind
 import org.ghostp2.engine.EngineHarness
 import org.ghostp2.engine.EngineStatus
@@ -398,6 +401,41 @@ class GhostRootTest {
         waitForText("No se pudo acceder a tus datos cifrados")
         assertEquals(0, activations)
     }
+
+    @Test
+    fun identityChangedRowOpensDetailAndRepairGoesToAdd() {
+        runBlocking { app.storage.contacts.upsert(changed("c1", "Ana")) }
+        show()
+        waitForText("Ana")
+        compose.onNodeWithText("Ana").performClick()
+        waitForText("Volver a emparejar")
+        compose.onNodeWithText("La identidad de Ana ha cambiado", substring = true).assertExists()
+        compose.onNodeWithText("Volver a emparejar").performClick()
+        waitForText("Activa GhostP2 para añadir contactos")
+        // "Volver" regresa al detalle.
+        compose.onNodeWithContentDescription("Volver").performClick()
+        waitForText("Volver a emparejar")
+    }
+
+    @Test
+    fun deletingFromDetailShowsResultAndReturnsToList() {
+        runBlocking { app.storage.contacts.upsert(changed("c1", "Ana")) }
+        show()
+        waitForText("Ana")
+        compose.onNodeWithText("Ana").performClick()
+        waitForText("Borrar contacto")
+        compose.onNodeWithText("Borrar contacto").performScrollTo().performClick()
+        compose.onNodeWithText("¿Borrar a Ana?").assertExists()
+        compose.onNodeWithText("Borrar").performClick()
+        // Motor parado: no hay a quién avisar, pero se borra.
+        waitForText("No se pudo avisar a Ana; se ha borrado igualmente")
+        assertTrue(runBlocking { app.storage.contacts.all() }.isEmpty())
+        compose.onNodeWithText("Aceptar").performClick()
+        waitForText("Aún no tienes contactos")
+    }
+
+    private fun changed(id: String, name: String) =
+        Contact(id, name, ByteArray(32), "x".repeat(56), ByteArray(32), ByteArray(32), ByteArray(32), false, ContactStatus.IDENTITY_CHANGED)
 
     private fun hasRole(role: Role) = SemanticsMatcher.expectValue(SemanticsProperties.Role, role)
 

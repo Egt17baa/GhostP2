@@ -28,6 +28,8 @@ import kotlinx.coroutines.flow.retryWhen
 import kotlinx.coroutines.launch
 import org.ghostp2.app.AppContainer
 import org.ghostp2.app.StorageState
+import org.ghostp2.app.ui.contact.ContactDetailScreen
+import org.ghostp2.app.ui.contact.ContactDetailViewModel
 import org.ghostp2.app.ui.contacts.ContactsScreen
 import org.ghostp2.app.ui.contacts.ContactsViewModel
 import org.ghostp2.app.ui.contacts.openRoute
@@ -199,6 +201,37 @@ private fun ReadyRoot(container: AppContainer, actions: ActivityActions) {
                 saving = saving,
                 onSave = { vm.save(name, verified) },
                 onLater = { navController.leaveNaming(id) },
+            )
+        }
+        composable(Routes.CONTACT) { entry ->
+            val vm = ghostViewModel(container) { ContactDetailViewModel(it, entry.idArg()) }
+            val state by vm.state.collectAsStateWithLifecycle()
+            val gone by vm.gone.collectAsStateWithLifecycle()
+            val busy by vm.busy.collectAsStateWithLifecycle()
+            val renameDraft by vm.renameDraft.collectAsStateWithLifecycle()
+            val renameError by vm.renameError.collectAsStateWithLifecycle()
+            val actionError by vm.actionError.collectAsStateWithLifecycle()
+            val deleteResult by vm.deleteResult.collectAsStateWithLifecycle()
+            // Contacto que ya no existe sin borrarlo desde aquí (p. ej. nos borró él): a la lista.
+            LaunchedEffect(gone) { if (gone) navController.popBackStack(Routes.CONTACTS, inclusive = false) }
+            ContactDetailScreen(
+                state = state,
+                busy = busy,
+                renameDraft = renameDraft,
+                renameError = renameError,
+                actionError = actionError,
+                deleteResult = deleteResult,
+                onBack = { navController.popBackStack() },
+                onStartRename = vm::startRename,
+                onRenameDraftChange = vm::setRenameDraft,
+                onRename = { renameDraft?.let(vm::rename) },
+                onCancelRename = vm::cancelRename,
+                onSetVerified = vm::setVerified,
+                // Emparejar de nuevo con una invitación nueva; el detalle se queda detrás en la pila.
+                onRepair = { navController.navigate(Routes.ADD) },
+                onClearChat = vm::clearChat,
+                onDelete = vm::delete,
+                onDeleteDone = { navController.popBackStack(Routes.CONTACTS, inclusive = false) },
             )
         }
     }
