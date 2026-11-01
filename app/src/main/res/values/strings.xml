@@ -80,6 +80,42 @@
     <string name="contacts_identity_changed">Identidad cambiada · vuelve a emparejar</string>
     <string name="contacts_deleting">Borrando…</string>
 
+    <!-- Añadir contacto -->
+    <string name="action_back">Volver</string>
+    <string name="add_tab_mine">Mi código</string>
+    <string name="add_tab_scan">Escanear</string>
+    <string name="add_tab_paste">Pegar</string>
+    <string name="add_not_online">Activa GhostP2 para añadir contactos</string>
+    <string name="add_preparing">Preparando la invitación…</string>
+    <string name="add_qr_description">Código QR de tu invitación</string>
+    <string name="add_expires_in">Caduca en %1$s</string>
+    <string name="add_mine_hint">Enséñale este código a tu contacto o mándale el texto por un canal de confianza. Solo vale para una persona.</string>
+    <string name="add_copy">Copiar</string>
+    <string name="add_copied">Invitación copiada</string>
+    <string name="add_share">Compartir</string>
+    <string name="add_clip_label">Invitación de GhostP2</string>
+    <string name="add_expired">La invitación ha caducado</string>
+    <string name="add_cancelled">La invitación se ha cancelado</string>
+    <string name="add_create_another">Crear otra</string>
+    <string name="add_scan_unavailable">Escanear con la cámara llegará pronto. Mientras tanto, pega el texto de la invitación.</string>
+    <string name="add_paste_label">Invitación</string>
+    <string name="add_paste_hint">Pega aquí el texto de la invitación que te ha dado tu contacto.</string>
+    <string name="add_accept">Aceptar</string>
+    <string name="add_working">Emparejando…</string>
+
+    <!-- Nombrar al contacto -->
+    <string name="name_title">Contacto nuevo</string>
+    <string name="name_safety_title">Número de seguridad</string>
+    <string name="name_safety_compare">Comparadlo por otro canal (en persona o por llamada)</string>
+    <string name="name_safety_unavailable">No se pudo calcular el número de seguridad</string>
+    <string name="name_label">Nombre</string>
+    <string name="name_verified">Hemos comprobado que coincide</string>
+    <string name="name_save">Guardar</string>
+    <string name="name_later">Más tarde</string>
+    <string name="name_error_blank">Escribe un nombre</string>
+    <string name="name_error_too_long">El nombre es demasiado largo. Máximo de caracteres: %1$d</string>
+    <string name="name_error_save">No se pudo guardar. Inténtalo de nuevo</string>
+
     <!-- Ahorro de energía de cada fabricante -->
     <string name="battery_hint_xiaomi">En Xiaomi, Redmi y POCO: Ajustes › Aplicaciones › GhostP2 › Ahorro de batería › «Sin restricciones», y activa también «Inicio automático».</string>
     <string name="battery_hint_samsung">En Samsung: Ajustes › Aplicaciones › GhostP2 › Batería › «Sin restricciones», y comprueba que GhostP2 no está en Ajustes › Batería › Límites de uso en segundo plano.</string>

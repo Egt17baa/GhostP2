@@ -32,6 +32,10 @@ import org.ghostp2.app.ui.contacts.ContactsScreen
 import org.ghostp2.app.ui.contacts.ContactsViewModel
 import org.ghostp2.app.ui.contacts.openRoute
 import org.ghostp2.app.ui.onboarding.OnboardingRoute
+import org.ghostp2.app.ui.pairing.AddContactScreen
+import org.ghostp2.app.ui.pairing.NameContactScreen
+import org.ghostp2.app.ui.pairing.NameContactViewModel
+import org.ghostp2.app.ui.pairing.PairingViewModel
 import org.ghostp2.data.AppSettings
 import org.ghostp2.engine.EngineStatus
 
@@ -146,6 +150,56 @@ private fun ReadyRoot(container: AppContainer, actions: ActivityActions) {
                 onDisconnect = actions.disconnect.takeIf { status != EngineStatus.Stopped },
             )
         }
+        composable(Routes.ADD) {
+            // La invitación vive lo que este ViewModel: al salir (atrás o al emparejar) se cancela.
+            val vm = ghostViewModel(container) { PairingViewModel(it) }
+            val status by container.engine.status.collectAsStateWithLifecycle()
+            val invitation by vm.invitation.collectAsStateWithLifecycle()
+            val accept by vm.accept.collectAsStateWithLifecycle()
+            val paired by vm.pairedContactId.collectAsStateWithLifecycle()
+            LaunchedEffect(paired) {
+                paired?.let { id ->
+                    // A nombrar al contacto, sin dejar "Añadir" en la pila.
+                    navController.navigate(Routes.name(id)) { popUpTo(Routes.ADD) { inclusive = true } }
+                }
+            }
+            AddContactScreen(
+                online = status == EngineStatus.Online,
+                invitation = invitation,
+                accept = accept,
+                onCreateInvitation = vm::createInvitation,
+                onAccept = vm::accept,
+                onActivate = { ui.launch { if (container.checkStorage() == StorageState.Ok) actions.activate() } },
+                onBack = { navController.popBackStack() },
+            )
+        }
+        composable(Routes.NAME) { entry ->
+            val id = entry.idArg()
+            val vm = ghostViewModel(container) { NameContactViewModel(it, id) }
+            val safetyNumber by vm.safetyNumber.collectAsStateWithLifecycle()
+            val error by vm.error.collectAsStateWithLifecycle()
+            val saved by vm.saved.collectAsStateWithLifecycle()
+            LaunchedEffect(saved) { if (saved) navController.leaveNaming(id) }
+            NameContactScreen(
+                safetyNumber = safetyNumber,
+                error = error,
+                onSave = { name, verified -> vm.save(name, verified) },
+                onLater = { navController.leaveNaming(id) },
+            )
+        }
+    }
+}
+
+/**
+ * Sale de nombrar al contacto [id] hacia su chat (sin dejar la pantalla de nombrar en la pila). Mientras
+ * el chat no esté en el grafo (Task 10), vuelve a la lista de contactos.
+ */
+private fun NavController.leaveNaming(id: String) {
+    val chat = Routes.chat(id)
+    if (graph.findNode(chat) != null) {
+        navigate(chat) { popUpTo(Routes.NAME) { inclusive = true } }
+    } else {
+        popBackStack(Routes.CONTACTS, inclusive = false)
     }
 }
 

@@ -10,7 +10,9 @@ import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTextInput
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -20,7 +22,9 @@ import org.ghostp2.app.StorageState
 import org.ghostp2.app.TestGhostApp
 import org.ghostp2.data.StoreCorruptedException
 import org.ghostp2.data.StoreUnavailableException
+import org.ghostp2.engine.AcceptResult
 import org.ghostp2.engine.EngineErrorKind
+import org.ghostp2.engine.EngineHarness
 import org.ghostp2.engine.EngineStatus
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -258,9 +262,11 @@ class GhostRootTest {
         waitForText("Aún no tienes contactos")
         compose.onNodeWithText("GhostP2 está desactivado").assertExists()
         compose.onAllNodesWithContentDescription("Desconectar").assertCountEquals(0)
-        // Sin la pantalla de añadir todavía en el grafo: no hace nada (ni cierra la app).
+        // Añadir contacto con el motor parado: pide activarlo; "Volver" regresa a la lista.
         compose.onNodeWithText("Añadir contacto").performClick()
-        compose.onNodeWithText("Aún no tienes contactos").assertExists()
+        waitForText("Activa GhostP2 para añadir contactos")
+        compose.onNodeWithContentDescription("Volver").performClick()
+        waitForText("Aún no tienes contactos")
 
         compose.onNodeWithText("Activar").performClick()
         compose.waitUntil(TIMEOUT) { container.engine.status.value == EngineStatus.Online }
@@ -287,7 +293,64 @@ class GhostRootTest {
         waitForText("chat a/b")
     }
 
+    @Test
+    fun addContactPairsThenNamesAndLeavesNoInvitation() {
+        show()
+        waitForText("Aún no tienes contactos")
+        compose.onNodeWithText("Activar").performClick()
+        compose.waitUntil(TIMEOUT) { container.engine.status.value == EngineStatus.Online }
+        compose.onNodeWithContentDescription("Añadir contacto").performClick()
+
+        // "Mi código": se crea la invitación y se ve su texto.
+        val invitation = hasText("ghostp2:", substring = true)
+        compose.waitUntilAtLeastOneExists(invitation, PAIR_TIMEOUT)
+        val text = compose.onNode(invitation).fetchSemanticsNode().config[SemanticsProperties.Text].single().text
+        compose.onNodeWithText("Caduca en", substring = true).assertExists()
+
+        EngineHarness(1, network = app.network).use { peer ->
+            runBlocking { peer.startAll() }
+            assertTrue(runBlocking { peer.engine(0).acceptInvitation(text) } is AcceptResult.Paired)
+
+            // Emparejado: a nombrar, con el número de seguridad del motor.
+            compose.waitUntilAtLeastOneExists(hasText("Comparadlo por otro canal (en persona o por llamada)"), PAIR_TIMEOUT)
+            val id = runBlocking { app.storage.contacts.all() }.single().id
+            val safety = runBlocking { container.engine.safetyNumber(id) }
+            compose.waitUntilAtLeastOneExists(hasText(safety.split(' ').first()), TIMEOUT)
+
+            compose.onNodeWithText("Guardar").performClick()
+            waitForText("Escribe un nombre")
+            compose.onNodeWithText("Nombre").performTextInput("Ana")
+            compose.onNodeWithText("Hemos comprobado que coincide").performClick()
+            compose.onNodeWithText("Guardar").performClick()
+
+            // Sin chat todavía en el grafo: vuelve a la lista (y "Añadir" ya no está en la pila).
+            waitForText("Ana")
+            val stored = runBlocking { app.storage.contacts.all() }.single()
+            assertEquals("Ana", stored.name)
+            assertTrue(stored.verified)
+            compose.onNodeWithText("verificado").assertExists()
+            // Ningún servicio temporal sigue publicado.
+            assertTrue(app.network.published.value.values.all { it.requiresClientAuth })
+        }
+    }
+
+    @Test
+    fun leavingAddContactCancelsTheInvitation() {
+        show()
+        waitForText("Aún no tienes contactos")
+        compose.onNodeWithText("Activar").performClick()
+        compose.waitUntil(TIMEOUT) { container.engine.status.value == EngineStatus.Online }
+        compose.onNodeWithContentDescription("Añadir contacto").performClick()
+        compose.waitUntilAtLeastOneExists(hasText("ghostp2:", substring = true), PAIR_TIMEOUT)
+        assertTrue(app.network.published.value.values.any { !it.requiresClientAuth })
+
+        compose.onNodeWithContentDescription("Volver").performClick()
+        waitForText("Aún no tienes contactos")
+        compose.waitUntil(TIMEOUT) { app.network.published.value.values.none { !it.requiresClientAuth } }
+    }
+
     private companion object {
+        const val PAIR_TIMEOUT = 30_000L
         const val TIMEOUT = 10_000L
     }
 }
