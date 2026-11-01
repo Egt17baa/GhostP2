@@ -50,6 +50,13 @@ private class UnreadableContentException : Exception("Contenido descifrado no de
 @OptIn(ExperimentalSerializationApi::class)
 private val STORE_CBOR = Cbor { ignoreUnknownKeys = true }
 
+/**
+ * El mismo CBOR sin `ignoreUnknownKeys`: solo para saber si el archivo leído tenía campos desconocidos
+ * (falla con este y se lee con [STORE_CBOR]).
+ */
+@OptIn(ExperimentalSerializationApi::class)
+private val STRICT_CBOR = Cbor { ignoreUnknownKeys = false }
+
 /** Causa de un archivo que no empieza por una versión de formato conocida. */
 private class UnknownFormatException : Exception("Versión de formato desconocida")
 
@@ -65,6 +72,10 @@ private class UnknownFormatException : Exception("Versión de formato desconocid
  * - Escritura atómica: `<file>.tmp` + `fsync` + `rename` sobre el destino. Un `.tmp` huérfano (corte a
  *   mitad de escritura) se ignora y se borra en el primer acceso.
  * - Sin archivo ⇒ `default`. Un valor para el que `isEmpty` es cierto no se escribe: se borra el archivo.
+ *   Excepción conservadora: si el archivo leído tenía campos desconocidos (de una versión más nueva), en
+ *   vez de borrarlo se escribe el valor "vacío" (esta versión no puede saber si esos campos eran datos).
+ *   Esa escritura ya no tiene campos desconocidos: el siguiente valor vacío sí borra el archivo, y
+ *   [reset] lo borra siempre.
  * - Toda lectura-modificación-escritura pasa por un único [Mutex]; [data] publica tras cada commit, en
  *   orden, nunca una instantánea anterior después de otra más reciente.
  * - Archivo no auténtico o indecodificable ⇒ [StoreCorruptedException] (también en [update], que entonces
@@ -93,6 +104,9 @@ class EncryptedStore<T>(
     private val latest = MutableStateFlow<Loaded<T>?>(null)
     private var orphanChecked = false
 
+    /** El archivo en disco tiene campos que esta versión no conoce (protegido por [mutex]). */
+    private var diskHasUnknownFields = false
+
     /**
      * Último valor confirmado: se siembra desde el disco al empezar a recolectar y después emite tras
      * cada commit (conflado: un colector lento solo ve el más reciente). Falla con
@@ -108,6 +122,10 @@ class EncryptedStore<T>(
     /**
      * Aplica `transform` al valor actual y lo guarda; devuelve el valor nuevo. Si `transform` lanza o
      * la escritura falla, no cambia nada. Si devuelve el mismo objeto, no se escribe.
+     *
+     * `transform` se ejecuta con el cerrojo del almacén tomado, que no es reentrante: debe ser una
+     * función pura del valor actual y nunca llamar a este almacén ni a los repositorios que lo usan
+     * (se bloquearía para siempre).
      */
     suspend fun update(transform: (T) -> T): T = mutex.withLock {
         val current = loadLocked()
@@ -132,6 +150,7 @@ class EncryptedStore<T>(
             withContext(Dispatchers.IO) {
                 deleteFiles()
                 orphanChecked = true
+                diskHasUnknownFields = false
                 latest.value = Loaded(default)
                 alsoUnderLock()
             }
@@ -151,7 +170,10 @@ class EncryptedStore<T>(
 
     @OptIn(ExperimentalSerializationApi::class)
     private fun readFromDisk(): T {
-        if (!file.exists()) return default
+        if (!file.exists()) {
+            diskHasUnknownFields = false
+            return default
+        }
         val bytes = try {
             file.readBytes()
         } catch (e: IOException) {
@@ -164,7 +186,17 @@ class EncryptedStore<T>(
             throw StoreCorruptedException(e)
         }
         try {
-            return STORE_CBOR.decodeFromByteArray(serializer, plain)
+            val strict = try {
+                Loaded(STRICT_CBOR.decodeFromByteArray(serializer, plain))
+            } catch (_: Exception) {
+                // Campos desconocidos, o un CBOR ilegible (que también falla con el CBOR tolerante).
+                null
+            }
+            if (strict != null) {
+                diskHasUnknownFields = false
+                return strict.value
+            }
+            return STORE_CBOR.decodeFromByteArray(serializer, plain).also { diskHasUnknownFields = true }
         } catch (_: Exception) {
             throw StoreCorruptedException(UnreadableContentException())
         } finally {
@@ -174,7 +206,7 @@ class EncryptedStore<T>(
 
     @OptIn(ExperimentalSerializationApi::class)
     private fun persist(value: T) {
-        if (isEmpty(value)) {
+        if (isEmpty(value) && !diskHasUnknownFields) {
             deleteFiles()
             return
         }
@@ -197,6 +229,8 @@ class EncryptedStore<T>(
             tmp.delete()
             throw StoreUnavailableException(e)
         }
+        // Reescrito solo con los campos conocidos.
+        diskHasUnknownFields = false
         syncDirectory()
     }
 

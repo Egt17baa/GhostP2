@@ -7,6 +7,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.ghostp2.engine.Identity
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -110,6 +111,43 @@ class SettingsRepositoryTest {
         broken.wipe()
         assertFalse(file().exists())
         assertEquals(AppSettings(), broken.get())
+    }
+
+    @Test
+    fun rawOutOfRangeSettingsKeepTheFile() = runBlocking {
+        // Ajustes guardados fuera de rango (p. ej. por otra versión) y todo lo demás por defecto.
+        store().update { it.withSettings(StoredSettings(lockAfterMinutes = 7)) }
+        assertTrue(file().exists())
+        val s = store()
+        val journal = StoredDeletionJournal(s)
+        journal.add("a")
+        journal.remove("a")
+        assertTrue("una escritura con ajustes guardados no por defecto conserva el archivo", file().exists())
+        assertEquals(AppSettings(), StoredSettingsRepository(store()).get())
+    }
+
+    @Test
+    fun corruptedFileFailsClosedAndIsNotTouched() = runBlocking {
+        StoredDeletionJournal(store()).add("a")
+        val raw = file().readBytes()
+        raw[raw.size / 2] = (raw[raw.size / 2].toInt() xor 0x40).toByte()
+        file().writeBytes(raw)
+        val s = store()
+        assertCorrupted { StoredDeletionJournal(s).pending() }
+        assertCorrupted { StoredDeletionJournal(s).add("b") }
+        assertCorrupted { StoredDeletionJournal(s).remove("a") }
+        assertCorrupted { StoredSettingsRepository(s).settings.first() }
+        assertCorrupted { StoredSettingsRepository(s).get() }
+        assertCorrupted { StoredSettingsRepository(s).update { it.copy(lockEnabled = true) } }
+        assertArrayEquals("el archivo dañado no se toca", raw, file().readBytes())
+    }
+
+    private suspend fun assertCorrupted(block: suspend () -> Unit) {
+        try {
+            block()
+            fail("se esperaba StoreCorruptedException")
+        } catch (_: StoreCorruptedException) {
+        }
     }
 
     @Test

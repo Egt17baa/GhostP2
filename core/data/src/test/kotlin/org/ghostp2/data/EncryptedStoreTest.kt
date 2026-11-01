@@ -83,6 +83,21 @@ class EncryptedStoreTest {
     }
 
     @Test
+    fun emptyValueKeepsAFileWithUnknownFields() = runBlocking {
+        // Un archivo de una versión más nueva con solo un campo que esta no conoce: aquí se lee como `default`.
+        EncryptedStore(file(), aead, NoteV2.serializer(), NoteV2(), label).update { NoteV2(extra = "nuevo") }
+        val s = store()
+        assertEquals(Note(), s.read())
+        // Una escritura que aquí parece vacía no borra el archivo: el original tenía datos.
+        s.update { Note() }
+        assertTrue("con campos desconocidos el archivo no se borra", file().exists())
+        assertEquals(Note(), store().read())
+        // Ya reescrito sin campos desconocidos, el siguiente valor vacío sí lo borra.
+        s.update { Note() }
+        assertFalse(file().exists())
+    }
+
+    @Test
     fun wrongKeyThrowsStoreCorrupted() = runBlocking {
         store().update { it.copy(text = "a") }
         assertCorrupted { store(a = TestAeads.newAead()).read() }

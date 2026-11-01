@@ -1,3 +1,5 @@
+@file:OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+
 package org.ghostp2.data
 
 import android.content.Context
@@ -10,6 +12,8 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.cbor.Cbor
 import org.ghostp2.engine.Contact
 import org.ghostp2.engine.ContactRepository
 import org.ghostp2.engine.ContactStatus
@@ -410,6 +414,34 @@ class DataStoreRepositoriesTest {
         val target = File(context.noBackupFilesDir, "ghostp2.bin")
         assertTrue(target.exists())
         assertEquals(identity(), createRepositories(context, aead).identities.load())
+    }
+
+    /** `StoredData` tal como lo escribía el formato 1: sin ajustes ni borrados pendientes. */
+    @Serializable
+    private class StoredDataV1(val identity: StoredIdentity? = null, val contacts: List<StoredContact> = emptyList())
+
+    @Test
+    fun format1FileFromProductionIsMigrated() = runBlocking {
+        val context: Context = RuntimeEnvironment.getApplication()
+        val target = File(context.noBackupFilesDir, "ghostp2.bin")
+        val v1 = StoredDataV1(StoredIdentity.from(identity()), listOf(contact(1), contact(3)).map { StoredContact.from(it) })
+        val plain = Cbor.encodeToByteArray(StoredDataV1.serializer(), v1)
+        target.writeBytes(byteArrayOf(1) + aead.encrypt(plain, byteArrayOf(1) + "ghostp2-store-v1".toByteArray()))
+
+        val repos = createRepositories(context, aead)
+        assertEquals(identity(), repos.identities.load())
+        assertEquals(listOf(contact(1), contact(3)), repos.contacts.all())
+        assertEquals(AppSettings(), repos.settings.get())
+        assertEquals(emptySet<String>(), repos.deletions.pending())
+        assertEquals("leer no reescribe", 1, target.readBytes()[0].toInt())
+
+        // La primera escritura pasa el archivo al formato 2 sin perder nada.
+        repos.settings.update { it.copy(onboardingDone = true) }
+        assertEquals(2, target.readBytes()[0].toInt())
+        val again = createRepositories(context, aead)
+        assertEquals(identity(), again.identities.load())
+        assertEquals(listOf(contact(1), contact(3)), again.contacts.all())
+        assertEquals(AppSettings(onboardingDone = true), again.settings.get())
     }
 
     private suspend fun waitUntil(condition: () -> Boolean) {

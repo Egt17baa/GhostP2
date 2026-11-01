@@ -44,6 +44,10 @@ interface SettingsRepository {
 
     suspend fun get(): AppSettings
 
+    /**
+     * Aplica `transform` a los ajustes actuales y los guarda. `transform` debe ser pura: se ejecuta con
+     * el cerrojo del almacén tomado (no reentrante) y nunca debe llamar a ningún repositorio.
+     */
     suspend fun update(transform: (AppSettings) -> AppSettings)
 
     /** Vuelve a los ajustes por defecto; sobre un almacén dañado lo borra entero (como los otros `wipe()`). */
