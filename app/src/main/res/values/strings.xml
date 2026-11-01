@@ -58,6 +58,9 @@
     <string name="onboarding_notifications_title">Notificaciones</string>
     <string name="onboarding_notifications_text">GhostP2 avisa de los mensajes nuevos sin mostrar su contenido y muestra una notificación fija mientras está activo. Sin este permiso no verás esos avisos.</string>
     <string name="onboarding_notifications_allow">Permitir notificaciones</string>
+    <string name="onboarding_notifications_done">Notificaciones permitidas.</string>
+    <string name="onboarding_notifications_blocked">Las notificaciones están bloqueadas para GhostP2. Puedes permitirlas en sus ajustes.</string>
+    <string name="onboarding_notifications_settings">Abrir ajustes de notificaciones</string>
     <string name="onboarding_battery_title">Batería</string>
     <string name="onboarding_battery_text">Con el ahorro de batería, Android corta la conexión con Tor cuando la pantalla se apaga y no te llegan mensajes. Quítalo para GhostP2.</string>
     <string name="onboarding_battery_allow">Quitar el ahorro de batería</string>

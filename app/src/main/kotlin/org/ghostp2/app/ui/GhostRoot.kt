@@ -76,6 +76,7 @@ private fun ReadyRoot(container: AppContainer, actions: ActivityActions) {
     var exhaustedRounds by remember { mutableIntStateOf(0) }
     var exhausted by remember { mutableStateOf(false) }
     var finishing by remember { mutableStateOf(false) }
+    var onboardingSaveFailed by remember { mutableStateOf(false) }
     val ui = rememberCoroutineScope()
     val settingsFlow = remember(container, round) {
         container.settings.settings
@@ -113,12 +114,13 @@ private fun ReadyRoot(container: AppContainer, actions: ActivityActions) {
         return
     }
     if (!current.onboardingDone) {
-        OnboardingRoute(actions, onFinish = {
+        OnboardingRoute(actions, saveFailed = onboardingSaveFailed, onFinish = {
             if (!finishing) {
                 finishing = true
+                onboardingSaveFailed = false
                 ui.launch {
                     try {
-                        finishOnboarding(container, actions)
+                        onboardingSaveFailed = !finishOnboarding(container, actions)
                     } finally {
                         finishing = false
                     }
@@ -173,19 +175,22 @@ private fun RootBanner(container: AppContainer, actions: ActivityActions) {
 }
 
 /**
- * "Activar GhostP2" de la bienvenida: la marca como hecha y después activa. Si no se puede guardar, se
- * vuelve a comprobar el almacenamiento (si falla, la raíz muestra [StorageErrorScreen]) y no se activa.
+ * "Activar GhostP2" de la bienvenida: primero la marca como hecha y solo después activa. Si no se puede
+ * guardar, no se activa y se vuelve a comprobar el almacenamiento: si falla, la raíz muestra
+ * [StorageErrorScreen]; si no, devuelve falso y la bienvenida muestra el error junto al botón.
  */
-private suspend fun finishOnboarding(container: AppContainer, actions: ActivityActions) {
+private suspend fun finishOnboarding(container: AppContainer, actions: ActivityActions): Boolean {
     try {
         container.settings.update { it.copy(onboardingDone = true) }
     } catch (e: CancellationException) {
         throw e
     } catch (e: Exception) {
+        // El almacenamiento falla: la raíz pasa a la pantalla de error y este aviso ya no se ve.
         container.checkStorage()
-        return
+        return false
     }
     actions.activate()
+    return true
 }
 
 @Composable

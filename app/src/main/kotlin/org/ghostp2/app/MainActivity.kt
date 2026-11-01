@@ -22,6 +22,9 @@ class MainActivity : ComponentActivity() {
     private val notificationPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
+    /** Ya se pidió el permiso en la bienvenida: "Activar" no vuelve a preguntar (solo en memoria). */
+    private var notificationsAsked = false
+
     private val batteryExemption =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { }
 
@@ -32,7 +35,9 @@ class MainActivity : ComponentActivity() {
         val actions = ActivityActions(
             activate = ::activate,
             disconnect = ::disconnect,
-            requestBatteryExemption = { runCatching { batteryExemption.launch(BatteryOptimization.requestIntent(this)) } },
+            requestBatteryExemption = {
+                runCatching { BatteryOptimization.launchRequest(this) { batteryExemption.launch(it) } }
+            },
             requestNotifications = ::requestNotifications,
         )
         setContent { GhostTheme { GhostRoot(container, actions) } }
@@ -49,7 +54,7 @@ class MainActivity : ComponentActivity() {
             ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
 
     private fun activate() {
-        if (needsNotificationPermission()) {
+        if (needsNotificationPermission() && !notificationsAsked) {
             notificationPermissionThenStart.launch(Manifest.permission.POST_NOTIFICATIONS)
         } else {
             startGhostService()
@@ -57,7 +62,10 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun requestNotifications() {
-        if (needsNotificationPermission()) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        if (needsNotificationPermission()) {
+            notificationsAsked = true
+            notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
     }
 
     private fun startGhostService() {

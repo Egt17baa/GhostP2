@@ -40,4 +40,14 @@ class OnboardingTest {
         assertEquals(R.string.battery_hint_generic, BatteryOptimization.manufacturerHint("Google"))
         assertEquals(R.string.battery_hint_generic, BatteryOptimization.manufacturerHint(""))
     }
+
+    @Test
+    fun notificationAccessIsBlockedOnlyAfterAskingWithoutRationale() {
+        assertEquals(NotificationAccess.GRANTED, notificationAccess(granted = true, asked = true, showRationale = false))
+        // Sin pedirlo todavía, la falta de justificación no significa "denegado para siempre".
+        assertEquals(NotificationAccess.ASK, notificationAccess(granted = false, asked = false, showRationale = false))
+        // Primera denegación: el sistema todavía puede preguntar otra vez.
+        assertEquals(NotificationAccess.ASK, notificationAccess(granted = false, asked = true, showRationale = true))
+        assertEquals(NotificationAccess.BLOCKED, notificationAccess(granted = false, asked = true, showRationale = false))
+    }
 }

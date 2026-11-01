@@ -2,19 +2,19 @@ package org.ghostp2.app.ui
 
 import androidx.compose.material3.Text
 import androidx.compose.ui.test.ExperimentalTestApi
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.hasContentDescription
+import androidx.compose.ui.test.hasText
+import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithContentDescription
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
-import androidx.compose.ui.test.assertCountEquals
-import androidx.compose.ui.test.hasText
-import androidx.compose.ui.test.junit4.v2.createComposeRule
-import androidx.compose.ui.test.onAllNodesWithText
-import androidx.compose.ui.test.onNodeWithText
-import androidx.compose.ui.test.performClick
 import kotlinx.coroutines.runBlocking
 import org.ghostp2.app.StorageState
 import org.ghostp2.app.TestGhostApp
@@ -23,10 +23,10 @@ import org.ghostp2.data.StoreUnavailableException
 import org.ghostp2.engine.EngineErrorKind
 import org.ghostp2.engine.EngineStatus
 import org.junit.After
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
-import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -34,6 +34,7 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 import java.io.IOException
+import java.util.concurrent.CopyOnWriteArrayList
 
 @OptIn(ExperimentalTestApi::class)
 @RunWith(RobolectricTestRunner::class)
@@ -47,10 +48,14 @@ class GhostRootTest {
 
     private var activations = 0
 
+    /** Orden de las escrituras de ajustes ("save") y de las activaciones ("activate"). */
+    private val events = CopyOnWriteArrayList<String>()
+
     /** Como la actividad, pero sin servicio: "Activar" arranca el motor del contenedor directamente. */
     private val actions = ActivityActions(
         activate = {
             activations++
+            events += "activate"
             container.start()
         },
         disconnect = { container.stop() },
@@ -62,6 +67,7 @@ class GhostRootTest {
     fun setUp() {
         // Salvo en onboardingShownUntilDone, la bienvenida ya está hecha.
         runBlocking { app.storage.settings.update { it.copy(onboardingDone = true) } }
+        app.storage.settings.onWrite = { events += "save" }
     }
 
     @After
@@ -194,6 +200,56 @@ class GhostRootTest {
         compose.waitUntil(TIMEOUT) { activations == 1 }
         assertTrue(runBlocking { app.storage.settings.get() }.onboardingDone)
         compose.waitUntil(TIMEOUT) { compose.onAllNodesWithText("Bienvenido a GhostP2").fetchSemanticsNodes().isEmpty() }
+    }
+
+    /** Muestra la bienvenida y llega a su último paso (en Robolectric hay tres). */
+    private fun showOnboardingAtLastStep() {
+        runBlocking { app.storage.settings.update { it.copy(onboardingDone = false) } }
+        events.clear()
+        show()
+        waitForText("Bienvenido a GhostP2")
+        compose.onNodeWithText("Siguiente").performClick()
+        compose.onNodeWithText("Siguiente").performClick()
+    }
+
+    @Test
+    fun onboardingSavesBeforeActivating() {
+        showOnboardingAtLastStep()
+        compose.onNodeWithText("Activar GhostP2").performClick()
+        compose.waitUntil(TIMEOUT) { activations == 1 }
+        assertEquals(listOf("save", "activate"), events.toList())
+    }
+
+    @Test
+    fun onboardingWriteFailureDoesNotActivateAndSaysSo() {
+        showOnboardingAtLastStep()
+        app.storage.settings.writeFailure = StoreUnavailableException(IOException("x"))
+        compose.onNodeWithText("Activar GhostP2").performClick()
+
+        // El almacenamiento se sigue leyendo bien: el error se ve junto al botón.
+        waitForText("Ha ocurrido un error inesperado. Tus datos no se han tocado.")
+        assertEquals(StorageState.Ok, container.storage.value)
+        assertEquals(0, activations)
+        assertFalse(runBlocking { app.storage.settings.get() }.onboardingDone)
+
+        // Al volver a intentarlo con la escritura arreglada: se guarda y después se activa.
+        app.storage.settings.writeFailure = null
+        compose.onNodeWithText("Activar GhostP2").performClick()
+        compose.waitUntil(TIMEOUT) { activations == 1 }
+        assertEquals(listOf("save", "activate"), events.toList())
+    }
+
+    @Test
+    fun onboardingWriteFailureWithBadStorageShowsStorageError() {
+        showOnboardingAtLastStep()
+        app.storage.settings.writeFailure = StoreUnavailableException(IOException("x"))
+        app.storage.failure = StoreUnavailableException(IOException("x"))
+        compose.onNodeWithText("Activar GhostP2").performClick()
+
+        waitForText("No se pudo acceder a tus datos cifrados")
+        assertEquals(StorageState.Unavailable(1), container.storage.value)
+        assertEquals(0, activations)
+        assertFalse(runBlocking { app.storage.settings.get() }.onboardingDone)
     }
 
     @Test

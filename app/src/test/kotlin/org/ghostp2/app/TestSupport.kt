@@ -8,7 +8,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
-import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.updateAndGet
 import kotlinx.coroutines.withTimeout
 import org.ghostp2.data.AppSettings
 import org.ghostp2.data.SettingsRepository
@@ -116,8 +116,16 @@ class InMemorySettingsRepository(initial: AppSettings = AppSettings()) : Setting
 
     override suspend fun get(): AppSettings = state.value
 
+    /** Hace fallar [update] sin guardar nada (como una escritura del archivo que falla). */
+    @Volatile var writeFailure: Exception? = null
+
+    /** Se llama tras cada escritura guardada (p. ej. para comprobar el orden frente a otras acciones). */
+    @Volatile var onWrite: ((AppSettings) -> Unit)? = null
+
     override suspend fun update(transform: (AppSettings) -> AppSettings) {
-        state.update { transform(it).sanitized() }
+        writeFailure?.let { throw it }
+        val saved = state.updateAndGet { transform(it).sanitized() }
+        onWrite?.invoke(saved)
     }
 
     override suspend fun wipe() {

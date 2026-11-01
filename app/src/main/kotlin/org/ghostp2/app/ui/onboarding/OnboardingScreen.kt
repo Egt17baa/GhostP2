@@ -29,7 +29,9 @@ import org.ghostp2.app.R
 /**
  * Bienvenida paso a paso ([steps], de [onboardingSteps]). Cada paso ofrece "Siguiente"; el último,
  * "Activar GhostP2" ([onFinish]). [batteryIgnoring] es el estado actual de la exención: con ella ya no se
- * ofrece pedirla. El paso actual vive solo en memoria (sin estado guardable).
+ * ofrece pedirla; igual con [notifications] (y, denegado para siempre, se ofrecen los ajustes). Con
+ * [saveFailed] se avisa junto a "Activar GhostP2". El paso actual vive solo en memoria (sin estado
+ * guardable).
  */
 @Composable
 fun OnboardingScreen(
@@ -38,6 +40,9 @@ fun OnboardingScreen(
     onRequestNotifications: () -> Unit,
     onRequestBattery: () -> Unit,
     onFinish: () -> Unit,
+    notifications: NotificationAccess = NotificationAccess.ASK,
+    onOpenNotificationSettings: () -> Unit = {},
+    saveFailed: Boolean = false,
 ) {
     var index by remember(steps) { mutableIntStateOf(0) }
     val step = steps.getOrNull(index) ?: return
@@ -64,9 +69,20 @@ fun OnboardingScreen(
             }
             OnboardingStep.NOTIFICATIONS -> {
                 Title(R.string.onboarding_notifications_title)
-                Body(R.string.onboarding_notifications_text)
-                OutlinedButton(onClick = onRequestNotifications) {
-                    Text(stringResource(R.string.onboarding_notifications_allow))
+                when (notifications) {
+                    NotificationAccess.GRANTED -> Body(R.string.onboarding_notifications_done)
+                    NotificationAccess.ASK -> {
+                        Body(R.string.onboarding_notifications_text)
+                        OutlinedButton(onClick = onRequestNotifications) {
+                            Text(stringResource(R.string.onboarding_notifications_allow))
+                        }
+                    }
+                    NotificationAccess.BLOCKED -> {
+                        Body(R.string.onboarding_notifications_blocked)
+                        OutlinedButton(onClick = onOpenNotificationSettings) {
+                            Text(stringResource(R.string.onboarding_notifications_settings))
+                        }
+                    }
                 }
             }
             OnboardingStep.BATTERY -> {
@@ -82,6 +98,9 @@ fun OnboardingScreen(
                 // El ahorro propio del fabricante sigue activo aunque Android exima a GhostP2.
                 Body(BatteryOptimization.manufacturerHint(Build.MANUFACTURER))
             }
+        }
+        if (last && saveFailed) {
+            Text(stringResource(R.string.store_failed), color = MaterialTheme.colorScheme.error)
         }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
             if (last) {
