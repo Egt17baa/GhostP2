@@ -1,6 +1,14 @@
 package org.ghostp2.app.ui
 
+import androidx.compose.material3.Text
 import androidx.compose.ui.test.ExperimentalTestApi
+import androidx.compose.ui.test.hasContentDescription
+import androidx.compose.ui.test.onAllNodesWithContentDescription
+import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.navigation.NavHostController
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.rememberNavController
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.v2.createComposeRule
@@ -186,6 +194,41 @@ class GhostRootTest {
         compose.waitUntil(TIMEOUT) { activations == 1 }
         assertTrue(runBlocking { app.storage.settings.get() }.onboardingDone)
         compose.waitUntil(TIMEOUT) { compose.onAllNodesWithText("Bienvenido a GhostP2").fetchSemanticsNodes().isEmpty() }
+    }
+
+    @Test
+    fun contactListWithBannerAndDisconnectWhileRunning() {
+        show()
+        waitForText("Aún no tienes contactos")
+        compose.onNodeWithText("GhostP2 está desactivado").assertExists()
+        compose.onAllNodesWithContentDescription("Desconectar").assertCountEquals(0)
+        // Sin la pantalla de añadir todavía en el grafo: no hace nada (ni cierra la app).
+        compose.onNodeWithText("Añadir contacto").performClick()
+        compose.onNodeWithText("Aún no tienes contactos").assertExists()
+
+        compose.onNodeWithText("Activar").performClick()
+        compose.waitUntil(TIMEOUT) { container.engine.status.value == EngineStatus.Online }
+        compose.waitUntilAtLeastOneExists(hasContentDescription("Desconectar"), TIMEOUT)
+        compose.onNodeWithContentDescription("Desconectar").performClick()
+        compose.waitUntil(TIMEOUT) { container.engine.status.value == EngineStatus.Stopped }
+        compose.waitUntil(TIMEOUT) { compose.onAllNodesWithContentDescription("Desconectar").fetchSemanticsNodes().isEmpty() }
+    }
+
+    @Test
+    fun openIfRegisteredOnlyNavigatesToKnownDestinations() {
+        var nav: NavHostController? = null
+        compose.setContent {
+            val controller = rememberNavController().also { nav = it }
+            NavHost(controller, startDestination = Routes.CONTACTS) {
+                composable(Routes.CONTACTS) { Text("lista") }
+                composable(Routes.CHAT) { entry -> Text("chat ${entry.idArg()}") }
+            }
+        }
+        compose.waitUntil(TIMEOUT) { nav != null }
+        compose.runOnUiThread { nav!!.openIfRegistered(Routes.contact("a/b")) }
+        compose.onNodeWithText("lista").assertExists()
+        compose.runOnUiThread { nav!!.openIfRegistered(Routes.chat("a/b")) }
+        waitForText("chat a/b")
     }
 
     private companion object {

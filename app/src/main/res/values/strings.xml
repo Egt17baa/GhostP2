@@ -65,6 +65,18 @@
     <string name="onboarding_next">Siguiente</string>
     <string name="onboarding_finish">Activar GhostP2</string>
 
+    <!-- Lista de contactos -->
+    <string name="contacts_add">Añadir contacto</string>
+    <string name="contacts_settings">Ajustes</string>
+    <string name="contacts_empty">Aún no tienes contactos</string>
+    <string name="contacts_failed">No se pudieron cargar tus contactos</string>
+    <string name="contacts_online">en línea</string>
+    <string name="contacts_connecting">conectando…</string>
+    <string name="contacts_offline">desconectado</string>
+    <string name="contacts_verified">verificado</string>
+    <string name="contacts_identity_changed">Identidad cambiada · vuelve a emparejar</string>
+    <string name="contacts_deleting">Borrando…</string>
+
     <!-- Ahorro de energía de cada fabricante -->
     <string name="battery_hint_xiaomi">En Xiaomi, Redmi y POCO: Ajustes › Aplicaciones › GhostP2 › Ahorro de batería › «Sin restricciones», y activa también «Inicio automático».</string>
     <string name="battery_hint_samsung">En Samsung: Ajustes › Aplicaciones › GhostP2 › Batería › «Sin restricciones», y comprueba que GhostP2 no está en Ajustes › Batería › Límites de uso en segundo plano.</string>

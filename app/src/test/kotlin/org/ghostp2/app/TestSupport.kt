@@ -13,6 +13,7 @@ import kotlinx.coroutines.withTimeout
 import org.ghostp2.data.AppSettings
 import org.ghostp2.data.SettingsRepository
 import org.ghostp2.engine.AcceptResult
+import org.ghostp2.engine.Contact
 import org.ghostp2.engine.ContactRepository
 import org.ghostp2.engine.EngineHarness
 import org.ghostp2.engine.InvitationState
@@ -44,8 +45,9 @@ class TestGhostApp : GhostApp() {
 }
 
 /**
- * Almacenamiento en memoria; [failure] hace fallar la lectura de la identidad (como un archivo ilegible) y
- * [saveFailure] solo su escritura (la comprobación pasa, pero el motor no puede guardar la identidad).
+ * Almacenamiento en memoria; [failure] hace fallar la lectura de la identidad (como un archivo ilegible),
+ * [saveFailure] solo su escritura (la comprobación pasa, pero el motor no puede guardar la identidad) y
+ * [contactsFailure] el flujo de contactos al empezar a recogerlo.
  */
 class TestStorage : AppStorage {
     @Volatile var failure: Exception? = null
@@ -70,7 +72,16 @@ class TestStorage : AppStorage {
         }
     }
 
-    override val contacts: ContactRepository = InMemoryContactRepository()
+    @Volatile var contactsFailure: Exception? = null
+
+    private val memoryContacts = InMemoryContactRepository()
+
+    override val contacts: ContactRepository = object : ContactRepository by memoryContacts {
+        override val contacts: Flow<List<Contact>> = flow {
+            contactsFailure?.let { throw it }
+            emitAll(memoryContacts.contacts)
+        }
+    }
 
     override val settings = InMemorySettingsRepository()
 

@@ -1,7 +1,6 @@
 package org.ghostp2.app.ui
 
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.material3.CircularProgressIndicator
@@ -18,6 +17,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.navigation.NavController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
@@ -28,8 +28,12 @@ import kotlinx.coroutines.flow.retryWhen
 import kotlinx.coroutines.launch
 import org.ghostp2.app.AppContainer
 import org.ghostp2.app.StorageState
+import org.ghostp2.app.ui.contacts.ContactsScreen
+import org.ghostp2.app.ui.contacts.ContactsViewModel
+import org.ghostp2.app.ui.contacts.openRoute
 import org.ghostp2.app.ui.onboarding.OnboardingRoute
 import org.ghostp2.data.AppSettings
+import org.ghostp2.engine.EngineStatus
 
 /** Lo que la interfaz pide a la actividad: servicio, permiso de notificaciones y exención de batería. */
 class ActivityActions(
@@ -127,10 +131,28 @@ private fun ReadyRoot(container: AppContainer, actions: ActivityActions) {
     val navController = rememberNavController()
     NavHost(navController = navController, startDestination = Routes.CONTACTS) {
         composable(Routes.CONTACTS) {
-            // Provisional: la lista de contactos (Task 6) pone aquí su pantalla con este aviso.
-            Column(Modifier.safeDrawingPadding()) { RootBanner(container, actions) }
+            val vm = ghostViewModel(container) { ContactsViewModel(it) }
+            val state by vm.state.collectAsStateWithLifecycle()
+            val status by container.engine.status.collectAsStateWithLifecycle()
+            ContactsScreen(
+                state = state,
+                banner = { RootBanner(container, actions) },
+                onOpen = { row -> navController.openIfRegistered(openRoute(row)) },
+                onAdd = { navController.openIfRegistered(Routes.ADD) },
+                onSettings = { navController.openIfRegistered(Routes.SETTINGS) },
+                onRetry = vm::retry,
+                onDisconnect = actions.disconnect.takeIf { status != EngineStatus.Stopped },
+            )
         }
     }
+}
+
+/**
+ * Navega a [route] solo si su destino ya está en el grafo: las pantallas de añadir, detalle, chat y
+ * ajustes llegan en tareas posteriores y, hasta entonces, pulsar no hace nada (en vez de cerrar la app).
+ */
+internal fun NavController.openIfRegistered(route: String) {
+    if (graph.findNode(route) != null) navigate(route)
 }
 
 /**
