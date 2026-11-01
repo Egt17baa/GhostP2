@@ -440,12 +440,9 @@ Reglas acordadas mientras se ejecutaba el plan (el detalle está en `docs/PROTOC
 
 ### Pendiente
 
-Aplazado por la revisión final (lo arreglado en esa revisión ya no figura aquí):
+Solo queda lo que hay que comprobar en un dispositivo:
 
-- Task 6: acotar mejor las búsquedas de nodos en las pruebas de la lista; `onClickLabel` en las filas; prueba de error a mitad del flujo de contactos; prueba de parar el motor con un contacto.
-- Task 9: mostrar en la lista el resultado de borrar un contacto; conservar en el ViewModel el último nombre; reintento del número de seguridad; `Deferred` cancelado (M7); prueba de `deleteWithEngineStopped`.
-- CI: fijar también a SHA las acciones del trabajo `test`.
-- Task 10: semántica accesible de las burbujas (unidas, con el remitente); suavizar el comentario de `leaveNaming`; formato del contador.
-- Task 15: buscar `gms`/`firebase` en el dex del APK; comprobar el resumen del certificado firmante contra una variable del repositorio; mover los `-dontwarn` a las consumer-rules de `core/tor`; regla "pasar `Error.message` a un recurso antes de mostrarlo".
-- Task 3: (b) fijar el destino de los sinks antes de suscribirse; (d) nota sobre sinks de una sola instancia; marca de `KmpTorTransport` "envenenado" tras agotar el plazo de `stop`.
-- En dispositivo: `FLAG_SECURE` de `PreviewView` en API 26–28 (grabar la pantalla en "Escanear"); prueba del APK con R8 (PRUEBA-MANUAL, paso 79).
+- `FLAG_SECURE` de `PreviewView` en API 26–28 (grabar la pantalla en "Escanear").
+- Prueba del APK con R8 (PRUEBA-MANUAL, paso 79).
+
+El resto de lo aplazado por la revisión final (Tasks 3, 6, 9, 10 y 15, y las acciones del trabajo `test` de CI) se cerró en los commits 35d54d5 (`fix(tor)`), 5ddfda4 (`fix(app)`) y f8264a2 (`ci`).
