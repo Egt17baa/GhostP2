@@ -226,4 +226,14 @@ lleva [Lyrebird](https://gitlab.torproject.org/tpo/anti-censorship/pluggable-tra
 (BSD-3-Clause) como biblioteca nativa (`libgojni.so`). Por eso **la APK en conjunto se distribuye bajo
 GPL-3.0** (Apache-2.0 es compatible con GPL-3.0 en ese sentido); el código de GhostP2 sigue en
 Apache-2.0. El código fuente correspondiente de esa biblioteca es el de la etiqueta `5.7.0` de IPtProxy
-y las versiones de Lyrebird y Snowflake que fija. Ajustes › Acerca de lo resume.
+y las versiones de Lyrebird y Snowflake que fija.
+
+- [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md): cada componente de terceros de la APK (IPtProxy,
+  Lyrebird, Snowflake y los demás módulos Go de `libgojni.so`, tor y sus bibliotecas, kmp-tor, Bouncy
+  Castle, Tink, ZXing, AndroidX y Compose, CameraX…) con su versión y su licencia, y dónde está el código
+  fuente de la parte GPL-3.0 (etiquetas y commits exactos).
+- [`LICENSES/`](LICENSES): los textos completos (`GPL-3.0.txt`, `IPtProxy-MIT.txt`,
+  `Snowflake-BSD-3-Clause.txt`, `Go-modules.txt`, `Tor-bundle.txt`, `Java-MIT.txt` y `Apache-2.0.txt`).
+
+La APK lleva los dos en `assets/licenses/` y los muestra, sin red, en Ajustes › Acerca de › «Licencias de
+terceros».

@@ -37,7 +37,11 @@ fun GhostTextField(
     onImeAction: () -> Unit = {},
     /** Tipo de teclado; p. ej. `Ascii` para las líneas de «Mis puentes». */
     keyboardType: KeyboardType = KeyboardType.Unspecified,
-    /** Pide además al teclado que no muestre sugerencias (`TYPE_TEXT_FLAG_NO_SUGGESTIONS`). */
+    /**
+     * Pide además al teclado que no muestre sugerencias ni aprenda: `TYPE_TEXT_FLAG_NO_SUGGESTIONS` y la variante
+     * «contraseña visible» (`TYPE_TEXT_VARIATION_VISIBLE_PASSWORD`), que los teclados respetan mucho más; el texto
+     * se sigue viendo y el campo sigue siendo de varias líneas. Lo que haga cada teclado depende de él.
+     */
     noSuggestions: Boolean = false,
 ) {
     InterceptPlatformTextInput(interceptor = if (noSuggestions) NoSuggestionsInterceptor else NoLearningInterceptor) {
@@ -74,7 +78,8 @@ private val NoSuggestionsInterceptor = PlatformTextInputInterceptor { request, n
 /**
  * Petición de teclado que, tras la del campo ([delegate]), añade `IME_FLAG_NO_PERSONALIZED_LEARNING` a
  * `imeOptions` conservando los bits que puso el campo (acción, etc.); con [noSuggestions], también
- * `TYPE_TEXT_FLAG_NO_SUGGESTIONS` a `inputType`.
+ * `TYPE_TEXT_FLAG_NO_SUGGESTIONS` a `inputType` y, en un campo de texto, la variante
+ * `TYPE_TEXT_VARIATION_VISIBLE_PASSWORD` (conserva `TYPE_TEXT_FLAG_MULTI_LINE` y los demás bits).
  */
 internal class NoLearningRequest(
     private val delegate: PlatformTextInputMethodRequest,
@@ -83,6 +88,12 @@ internal class NoLearningRequest(
     override fun createInputConnection(outAttributes: EditorInfo): InputConnection =
         delegate.createInputConnection(outAttributes).also {
             outAttributes.imeOptions = outAttributes.imeOptions or EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING
-            if (noSuggestions) outAttributes.inputType = outAttributes.inputType or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            if (noSuggestions) {
+                var type = outAttributes.inputType or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+                if (type and InputType.TYPE_MASK_CLASS == InputType.TYPE_CLASS_TEXT) {
+                    type = (type and InputType.TYPE_MASK_VARIATION.inv()) or InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+                }
+                outAttributes.inputType = type
+            }
         }
 }

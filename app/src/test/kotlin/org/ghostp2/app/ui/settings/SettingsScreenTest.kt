@@ -62,6 +62,7 @@ class SettingsScreenTest {
             },
             onWipeAll = { events += "wipe" },
             onOpenBridges = { events += "bridges" },
+            onOpenLicenses = { events += "licenses" },
         )
     }
 
@@ -144,6 +145,13 @@ class SettingsScreenTest {
         compose.onNodeWithText("Puentes: Snowflake").performScrollTo()
         settings = settings?.copy(bridgeMode = org.ghostp2.engine.bridges.BridgeMode.OBFS4)
         compose.onNodeWithText("Puentes: obfs4").performScrollTo()
+    }
+
+    @Test
+    fun thirdPartyLicensesRowOpens() {
+        show()
+        compose.onNodeWithText(text(R.string.settings_third_party_licenses)).performScrollTo().performClick()
+        assertEquals(listOf("licenses"), events)
     }
 
     @Test

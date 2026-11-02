@@ -91,6 +91,46 @@ kotlin {
     jvmToolchain(17)
 }
 
+/**
+ * Avisos de terceros en la APK (`assets/licenses/`): `THIRD_PARTY_NOTICES.md` y los textos de `LICENSES/` de la
+ * raíz del repositorio, tal cual. Ajustes › Acerca de › «Licencias de terceros» los lee de ahí, sin red.
+ */
+abstract class LicenseAssets : DefaultTask() {
+    @get:InputFile
+    @get:PathSensitive(PathSensitivity.RELATIVE)
+    abstract val notices: RegularFileProperty
+
+    @get:InputDirectory
+    @get:PathSensitive(PathSensitivity.RELATIVE)
+    abstract val licenses: DirectoryProperty
+
+    @get:OutputDirectory
+    abstract val outputDir: DirectoryProperty
+
+    @get:javax.inject.Inject
+    abstract val files: FileSystemOperations
+
+    @TaskAction
+    fun copy() {
+        files.sync {
+            into(outputDir)
+            from(notices) { into("licenses") }
+            from(licenses) { into("licenses/LICENSES") }
+        }
+    }
+}
+
+val licenseAssets = tasks.register<LicenseAssets>("licenseAssets") {
+    notices.set(rootProject.layout.projectDirectory.file("THIRD_PARTY_NOTICES.md"))
+    licenses.set(rootProject.layout.projectDirectory.dir("LICENSES"))
+}
+
+androidComponents {
+    onVariants { variant ->
+        variant.sources.assets?.addGeneratedSourceDirectory(licenseAssets, LicenseAssets::outputDir)
+    }
+}
+
 dependencies {
     implementation(project(":core:data"))
     implementation(project(":core:tor"))

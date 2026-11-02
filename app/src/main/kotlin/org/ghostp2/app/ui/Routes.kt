@@ -15,6 +15,7 @@ object Routes {
     const val PHOTO = "foto/{id}/{item}"
     const val SETTINGS = "ajustes"
     const val BRIDGES = "puentes"
+    const val LICENSES = "licencias"
 
     fun name(id: String) = "nombrar/${Uri.encode(id)}"
 

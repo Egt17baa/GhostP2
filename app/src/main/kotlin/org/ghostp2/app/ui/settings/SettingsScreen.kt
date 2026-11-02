@@ -53,7 +53,8 @@ import org.ghostp2.engine.bridges.BridgeMode
  * Fotos ("Tamaño máximo"), Segundo plano (exención de batería, ayuda del fabricante [manufacturerHint],
  * "Activar GhostP2 al encender el móvil" y "Desconectar al salir de la app", R29), Puentes (el modo actual;
  * al tocarlo, [onOpenBridges] abre [BridgesScreen], R30), Datos ("Borrar todo" con doble confirmación) y
- * Acerca de (versión, licencias, mi .onion abreviada y el último aviso de diagnóstico). [settings] `null` ⇒ cargando.
+ * Acerca de (versión, licencias, «Licencias de terceros» con [onOpenLicenses] hacia [LicensesScreen], mi .onion
+ * abreviada y el último aviso de diagnóstico). [settings] `null` ⇒ cargando.
  * Los diálogos abiertos son simple `remember` (sin contenido).
  */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -79,6 +80,7 @@ fun SettingsScreen(
     onSetDisconnectAfter: (Int) -> Unit,
     onWipeAll: () -> Unit,
     onOpenBridges: () -> Unit,
+    onOpenLicenses: () -> Unit,
 ) {
     Scaffold(
         topBar = {
@@ -152,6 +154,11 @@ fun SettingsScreen(
             Text(stringResource(R.string.settings_version, version))
             Text(stringResource(R.string.settings_license))
             Text(stringResource(R.string.settings_license_components), style = MaterialTheme.typography.bodySmall)
+            Text(
+                stringResource(R.string.settings_third_party_licenses),
+                Modifier.fillMaxWidth().clickable(role = Role.Button, onClick = onOpenLicenses).padding(vertical = 12.dp),
+                style = MaterialTheme.typography.bodyLarge,
+            )
             Text(
                 if (myOnion != null) stringResource(R.string.settings_my_onion, abbreviateOnion(myOnion))
                 else stringResource(R.string.settings_my_onion_none),

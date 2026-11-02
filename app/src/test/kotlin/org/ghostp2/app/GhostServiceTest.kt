@@ -425,15 +425,48 @@ class GhostServiceTest {
 
     @Test
     fun reconnectWithBrokenStorageStopsTheService() {
-        startService()
+        val service = startService().get()
         eventually { engine.status.value == EngineStatus.Online }
         app.storage.failure = StoreUnavailableException(IOException("x"))
 
         val restarted = app.container.reconnect()
 
         assertFalse(runBlocking { withTimeout(20_000) { restarted.await() } })
-        assertNotNull(nextStoppedService())
+        // Lo detiene la reconexión (stopService) o, si heredó el arranque del servicio aún sin completar, el propio
+        // servicio al recibir `false` (stopSelf).
+        var stopped: Any? = null
+        eventually {
+            stopped = stopped ?: shadowOf(app).nextStoppedService ?: true.takeIf { shadowOf(service).isStoppedBySelf }
+            stopped != null
+        }
         assertEquals(EngineStatus.Stopped, engine.status.value)
+    }
+
+    /**
+     * "Desconectar" mientras arranca el arranque nuevo de una reconexión y, después, "Activar": la reconexión cancelada
+     * no detiene el servicio (alguien pidió otra cosa entretanto) y el servicio nuevo sigue en marcha.
+     */
+    @Test
+    fun reconnectCancelledByDisconnectDoesNotStopTheNextService() {
+        val first = startService()
+        eventually { engine.status.value == EngineStatus.Online }
+        app.tor.holdStarts = true
+        val restarted = app.container.reconnect()
+        eventually { engine.status.value is EngineStatus.StartingTor && app.tor.state.value is TorState.Starting }
+
+        first.get().onStartCommand(GhostService.stopIntent(app), 0, 2) // "Desconectar"
+        assertFalse(runBlocking { withTimeout(20_000) { restarted.await() } })
+        Thread.sleep(300)
+        shadowOf(Looper.getMainLooper()).idle()
+        app.tor.holdStarts = false
+        val again = startService() // "Activar"
+
+        eventually { engine.status.value == EngineStatus.Online }
+        Thread.sleep(300)
+        shadowOf(Looper.getMainLooper()).idle()
+        assertNull(shadowOf(app).nextStoppedService)
+        assertTrue(again.get().inForeground)
+        assertEquals(EngineStatus.Online, engine.status.value)
     }
 
     @Test

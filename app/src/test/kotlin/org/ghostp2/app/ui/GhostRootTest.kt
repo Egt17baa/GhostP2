@@ -8,14 +8,17 @@ import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.SemanticsNodeInteraction
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.hasContentDescription
+import androidx.compose.ui.test.hasScrollAction
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.onFirst
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.lifecycle.Lifecycle
@@ -352,6 +355,26 @@ class GhostRootTest {
         compose.waitUntil(TIMEOUT) { app.tor.forgetBridgeStateCalls.get() == 1 }
         assertEquals(BridgeMode.OBFS4, runBlocking { app.storage.settings.get() }.bridgeMode)
         assertEquals(EngineStatus.Stopped, container.engine.status.value)
+    }
+
+    /** Ajustes › Acerca de › «Licencias de terceros»: los avisos y los textos completos, leídos de la APK. */
+    @Test
+    fun thirdPartyLicensesShowTheNoticesAndTheTexts() {
+        show()
+        waitForText("Aún no tienes contactos")
+        compose.onNodeWithContentDescription("Ajustes").performClick()
+        waitForText("Licencias de terceros")
+        compose.onNodeWithText("Licencias de terceros").performScrollTo().performClick()
+
+        compose.waitUntilAtLeastOneExists(hasText("THIRD_PARTY_NOTICES.md"), TIMEOUT)
+        // Textos que solo están en los avisos (no en Ajustes).
+        compose.onAllNodes(hasText("IPtProxy 5.7.0", substring = true)).onFirst().assertExists()
+        compose.onAllNodes(hasText("**GPL-3.0**", substring = true)).onFirst().assertExists()
+        // También los textos completos, no solo el resumen.
+        compose.onNode(hasScrollAction()).performScrollToNode(hasText("LICENSES/GPL-3.0.txt"))
+        compose.onNode(hasScrollAction()).performScrollToNode(hasText("GNU GENERAL PUBLIC LICENSE", substring = true))
+        compose.onNode(hasScrollAction()).performScrollToNode(hasText("LICENSES/IPtProxy-MIT.txt"))
+        compose.onAllNodes(hasText("Guardian Project", substring = true)).onFirst().assertExists()
     }
 
     @Test

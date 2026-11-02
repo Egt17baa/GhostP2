@@ -234,6 +234,9 @@
     <string name="settings_section_about">Acerca de</string>
     <string name="settings_version">Versión %1$s</string>
     <string name="settings_license">Licencia Apache-2.0</string>
+    <string name="settings_third_party_licenses">Licencias de terceros</string>
+    <string name="licenses_title">Licencias de terceros</string>
+    <string name="licenses_load_failed">No se pudieron leer las licencias.</string>
     <string name="settings_license_components">La APK incluye IPtProxy (MIT), Lyrebird (GPL-3.0) y Snowflake (BSD-3-Clause) para los puentes, así que se distribuye bajo GPL-3.0. El código de GhostP2 sigue en Apache-2.0.</string>
     <string name="settings_my_onion">Mi dirección: %1$s</string>
     <string name="settings_my_onion_none">Mi dirección: todavía no publicada</string>

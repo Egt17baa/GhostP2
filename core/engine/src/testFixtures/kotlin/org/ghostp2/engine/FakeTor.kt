@@ -1,6 +1,7 @@
 package org.ghostp2.engine
 
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -153,7 +154,8 @@ class FakeTorNetwork {
  * Puentes (R30), como `KmpTorTransport`: con [bridges], cada `start` lee el ajuste (lo guarda en
  * [bridgeSetups]) y [bridged] dice si la ejecución va por puente; si la lectura lanza, `Error` sin puente.
  * [startFailure] hace terminar cada `start` en ese `Error`, [holdStarts] lo deja en `Starting(0)` hasta
- * [finishStart], y [calls] guarda el orden de `start`, `stop`, `wipeState` y `forgetBridgeState`.
+ * [finishStart], y [calls] guarda el orden de `start`, `stop`, `wipeState` y `forgetBridgeState`. Con [stopGate] o
+ * [forgetGate], `stop` o `forgetBridgeState` (ya anotados en [calls]) esperan a que se completen, como un Tor lento.
  */
 class FakeTor(
     private val network: FakeTorNetwork,
@@ -187,6 +189,12 @@ class FakeTor(
 
     /** Con `true`, [start] deja el estado en `Starting(0)`; [finishStart] lo pasa a `Ready`. */
     @Volatile var holdStarts = false
+
+    /** Si no es nulo, cada [stop] espera a que se complete (tras anotarse en [calls]). */
+    @Volatile var stopGate: CompletableDeferred<Unit>? = null
+
+    /** Si no es nulo, cada [forgetBridgeState] espera a que se complete (tras anotarse en [calls]). */
+    @Volatile var forgetGate: CompletableDeferred<Unit>? = null
 
     @Volatile private var bridgedRun = false
 
@@ -225,6 +233,7 @@ class FakeTor(
 
     override suspend fun stop() {
         calls += "stop"
+        stopGate?.await()
         bridgedRun = false
         network.unregisterAll(this)
         if (forgetsClientAuthOnStop) clientAuth.clear()
@@ -240,6 +249,7 @@ class FakeTor(
     override suspend fun forgetBridgeState() {
         calls += "forget"
         forgetBridgeStateCalls.incrementAndGet()
+        forgetGate?.await()
         forget()
     }
 

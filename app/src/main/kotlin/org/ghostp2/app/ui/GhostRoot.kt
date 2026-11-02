@@ -24,6 +24,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -42,10 +43,12 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.retryWhen
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.ghostp2.app.AppContainer
 import org.ghostp2.app.BatteryOptimization
 import org.ghostp2.app.R
@@ -68,8 +71,11 @@ import org.ghostp2.app.ui.pairing.NameContactScreen
 import org.ghostp2.app.ui.pairing.NameContactViewModel
 import org.ghostp2.app.ui.pairing.PairingViewModel
 import org.ghostp2.app.ui.settings.BridgesScreen
+import org.ghostp2.app.ui.settings.LicensesScreen
+import org.ghostp2.app.ui.settings.LicensesState
 import org.ghostp2.app.ui.settings.SettingsScreen
 import org.ghostp2.app.ui.settings.SettingsViewModel
+import org.ghostp2.app.ui.settings.readLicenseFiles
 import org.ghostp2.data.AppSettings
 import org.ghostp2.engine.EngineStatus
 import org.ghostp2.engine.bridges.BridgeMode
@@ -372,10 +378,14 @@ private fun ReadyRoot(container: AppContainer, actions: ActivityActions, navCont
                 actions,
                 onBack = dropUnlessResumed { navController.popBackStack() },
                 onOpenBridges = dropUnlessResumed { navController.open(Routes.BRIDGES) },
+                onOpenLicenses = dropUnlessResumed { navController.open(Routes.LICENSES) },
             )
         }
         composable(Routes.BRIDGES) {
             BridgesRoute(container, onBack = dropUnlessResumed { navController.popBackStack() })
+        }
+        composable(Routes.LICENSES) {
+            LicensesRoute(onBack = dropUnlessResumed { navController.popBackStack() })
         }
     }
     // Tras "Desconectar al salir de la app" (R29), la lista con "Activar", como tras "Desconectar": el
@@ -390,7 +400,13 @@ private fun ReadyRoot(container: AppContainer, actions: ActivityActions, navCont
 }
 
 @Composable
-private fun SettingsRoute(container: AppContainer, actions: ActivityActions, onBack: () -> Unit, onOpenBridges: () -> Unit) {
+private fun SettingsRoute(
+    container: AppContainer,
+    actions: ActivityActions,
+    onBack: () -> Unit,
+    onOpenBridges: () -> Unit,
+    onOpenLicenses: () -> Unit,
+) {
     val vm = ghostViewModel(container) { SettingsViewModel(it) }
     val settings by vm.state.collectAsStateWithLifecycle()
     val lockNeedsDeviceLock by vm.lockNeedsDeviceLock.collectAsStateWithLifecycle()
@@ -428,7 +444,24 @@ private fun SettingsRoute(container: AppContainer, actions: ActivityActions, onB
         onSetDisconnectAfter = vm::setDisconnectAfter,
         onWipeAll = vm::wipeAll,
         onOpenBridges = onOpenBridges,
+        onOpenLicenses = onOpenLicenses,
     )
+}
+
+/** Ajustes › Acerca de › «Licencias de terceros»: los archivos de la APK, leídos fuera del hilo principal y sin red. */
+@Composable
+private fun LicensesRoute(onBack: () -> Unit) {
+    val assets = LocalContext.current.assets
+    val state by produceState<LicensesState>(LicensesState.Loading, assets) {
+        value = try {
+            LicensesState.Loaded(withContext(Dispatchers.IO) { readLicenseFiles(assets) })
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            LicensesState.Failed
+        }
+    }
+    LicensesScreen(state, onBack)
 }
 
 /** Ajustes › Puentes (R30), con su propio [SettingsViewModel] (el cambio pendiente de reconexión vive en él). */

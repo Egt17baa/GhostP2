@@ -338,8 +338,8 @@ class AppContainer internal constructor(
 
     /**
      * Un arranque pedido con [start] (o [reconnect]): su resultado y su corrutina. [handedOver] (con
-     * `control`): [reconnect] pasó [result] al arranque siguiente, así que cancelar este no lo completa
-     * con `false`.
+     * `control`): [reconnect] pasó [result] al arranque siguiente, así que este ya no lo completa (ni con
+     * `false` al cancelarse ni con `true` si su `engine.start()` acababa de terminar).
      */
     private class StartRun(val result: CompletableDeferred<Boolean>) {
         lateinit var job: Job
@@ -350,6 +350,17 @@ class AppContainer internal constructor(
     private val control = Any()
     private var startRun: StartRun? = null
     private var stopJob: Job? = null
+
+    /**
+     * El servicio quiere el motor en marcha (R30): lo pone [start], que solo pide el [GhostService] al arrancar (ya en
+     * primer plano), y lo quita [stop]: "Desconectar" (en la app y en la notificación), "Desconectar al salir de la
+     * app" (R29), el plazo vencido de un reinicio `START_STICKY`, el `onDestroy` del servicio, el almacenamiento
+     * ilegible y los borrados. [reconnect] solo vuelve a arrancar mientras siga puesto: sin servicio no hay motor.
+     */
+    private var engineWanted = false
+
+    /** Sube con cada [start], [stop] y [reconnect]: así sabe [reconnect] si alguien pidió otra cosa después. */
+    private var requests = 0L
 
     /** Cambia al empezar y al terminar cada [wipeAll] (con el cerrojo tomado). */
     private var wipeGeneration = 0L
@@ -384,9 +395,11 @@ class AppContainer internal constructor(
     /**
      * Comprueba el almacenamiento y, si está bien, arranca el motor. El resultado es `false` si el
      * almacenamiento falla (el motor no se arranca) o si un [stop] cancela el arranque. Mientras hay un
-     * arranque en curso devuelve el mismo resultado.
+     * arranque en curso devuelve el mismo resultado. Lo pide el [GhostService] (marca que quiere el motor).
      */
     fun start(): Deferred<Boolean> = synchronized(control) {
+        engineWanted = true
+        requests++
         startRun?.takeIf { it.job.isActive }?.let { return it.result }
         launchStartLocked(CompletableDeferred())
     }
@@ -396,6 +409,7 @@ class AppContainer internal constructor(
         val previousStop = stopJob
         mutableStartFailed.value = false
         val generation = wipeGeneration
+        val run = StartRun(result)
         val job = scope.launch {
             previousStop?.join()
             try {
@@ -404,7 +418,8 @@ class AppContainer internal constructor(
                     // Ejecución nueva: el aviso de diagnóstico anterior ya no vale (los de este arranque sí).
                     mutableLastDiagnostic.value = null
                     engine.start()
-                    result.complete(true)
+                    // Si [reconnect] ya pasó el resultado al arranque siguiente, lo completa ese (no este, cancelado).
+                    synchronized(control) { if (!run.handedOver) result.complete(true) }
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -414,7 +429,6 @@ class AppContainer internal constructor(
                 runCatching { engine.stop() }
             }
         }
-        val run = StartRun(result)
         run.job = job
         // Cancelado o con el almacenamiento fallando: false (salvo si [reconnect] pasó el resultado a otro).
         job.invokeOnCompletion { if (!synchronized(control) { run.handedOver }) result.complete(false) }
@@ -430,22 +444,38 @@ class AppContainer internal constructor(
      *
      * Quien esperaba un arranque en curso (el servicio) recibe el resultado del nuevo, no un `false` de la
      * parada intermedia: el servicio sigue en primer plano. Si no había ninguno y el arranque nuevo no llega a
-     * hacerse (almacenamiento ilegible) sin que nadie pida otro, se detiene el servicio, como en su propio
+     * hacerse (almacenamiento ilegible) sin que nadie pida nada después, se detiene el servicio, como en su propio
      * arranque. Si no se puede borrar el estado de Tor (Tor atascado), se arranca igual: su marcador sigue y el
      * arranque lo vuelve a intentar.
+     *
+     * Solo se vuelve a arrancar si el servicio sigue queriendo el motor: tras "Desconectar", R29 o el `onDestroy`
+     * del servicio (aunque el motor aún se esté parando) solo se para y se borra el estado de Tor, y el resultado es
+     * `false`.
      */
     fun reconnect(): Deferred<Boolean> = synchronized(control) {
-        val carried = startRun?.takeIf { it.job.isActive }?.also { it.handedOver = true }?.result
-        val stopped = stop()
+        requests++
+        if (!engineWanted) {
+            val stopped = stop()
+            stopJob = scope.launch {
+                stopped.join()
+                forgetBridgeStateQuietly()
+            }
+            return CompletableDeferred(false)
+        }
+        // Solo un arranque cuyo resultado aún no se conoce: uno ya completado no lo recibiría nadie.
+        val carried = startRun?.takeIf { it.job.isActive && !it.result.isCompleted }?.also { it.handedOver = true }?.result
+        val stopped = stopLocked()
         stopJob = scope.launch {
             stopped.join()
             forgetBridgeStateQuietly()
         }
         val result = launchStartLocked(carried ?: CompletableDeferred())
         if (carried == null) {
+            val mine = requests
             scope.launch {
                 val started = result.await()
-                val superseded = synchronized(control) { startRun != null && startRun?.result !== result }
+                // Un start, stop o reconnect posterior (p. ej. "Desconectar" y "Activar" otra vez) manda.
+                val superseded = synchronized(control) { requests != mine }
                 if (!started && !superseded) appContext.stopService(Intent(appContext, GhostService::class.java))
             }
         }
@@ -454,11 +484,18 @@ class AppContainer internal constructor(
 
     /**
      * Cambio del ajuste «Puentes» con el motor parado (R30): tras la parada en curso, si la hay, borra el estado
-     * de Tor ([TorTransport.forgetBridgeState]) para que el siguiente arranque empiece de cero.
+     * de Tor ([TorTransport.forgetBridgeState]) para que el siguiente arranque empiece de cero. El borrado pasa a ser
+     * la parada en curso: un [start] pedido mientras tanto espera a que termine.
      */
     suspend fun forgetBridgeState() {
-        synchronized(control) { stopJob }?.join()
-        forgetBridgeStateQuietly()
+        val forget = synchronized(control) {
+            val previousStop = stopJob
+            scope.launch {
+                previousStop?.join()
+                forgetBridgeStateQuietly()
+            }.also { stopJob = it }
+        }
+        forget.join()
     }
 
     private suspend fun forgetBridgeStateQuietly() {
@@ -471,14 +508,24 @@ class AppContainer internal constructor(
         }
     }
 
-    /** Detiene el motor; antes cancela (y espera) un arranque en curso. */
+    /**
+     * Detiene el motor; antes cancela (y espera) un arranque en curso. Desde ahora nadie quiere el motor: un
+     * [reconnect] posterior no lo vuelve a arrancar.
+     */
     fun stop(): Job = synchronized(control) {
+        engineWanted = false
+        requests++
+        stopLocked()
+    }
+
+    /** Como [stop], pero sin cambiar si se quiere el motor (con `control` tomado; para [reconnect]). */
+    private fun stopLocked(): Job {
         // Las fotos pendientes no sobreviven a una parada.
         photos.clear()
         val run = startRun
         startRun = null
         val previousStop = stopJob
-        scope.launch {
+        return scope.launch {
             run?.job?.cancelAndJoin()
             previousStop?.join()
             try {

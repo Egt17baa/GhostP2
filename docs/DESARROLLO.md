@@ -52,7 +52,10 @@ kmp-tor, por la reflexión de la configuración de puentes, PROTOCOLO §14.11):
 - revisa que `BridgeConfigTest` e `IptProxyControllerTest` siguen pasando;
 - comprueba en el APK de versión que cada ABI lleva `lib/<abi>/libgojni.so` y que el dex conserva
   `go.*`, `IPtProxy.*` y los miembros de kmp-tor que usa la reflexión (`toLineItem$…`, `toSetting$…`);
-- vuelve a hacer los pasos de puentes de [PRUEBA-MANUAL](PRUEBA-MANUAL.md#puentes-r30).
+- vuelve a hacer los pasos de puentes de [PRUEBA-MANUAL](PRUEBA-MANUAL.md#puentes-r30);
+- actualiza [`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md) y `LICENSES/Go-modules.txt` con los módulos
+  de `go version -m` sobre el `libgojni.so` nuevo (versiones, licencias y etiquetas o commits del código
+  fuente de la parte GPL-3.0); al cambiar otras dependencias, la tabla de `releaseRuntimeClasspath`.
 
 ## APK de versión
 

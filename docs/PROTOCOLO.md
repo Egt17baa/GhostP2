@@ -807,7 +807,9 @@ contacto ofrece "Borrar contacto" (con confirmación; al terminar dice si el avi
     («Snowflake contacta con un intermediario a través de una red de distribución de contenidos, con
     servidores STUN públicos y con voluntarios que hacen de puente…») con "Usar Snowflake" y "Cancelar".
   - **«Mis puentes»**: líneas obfs4 o webtunnel pegadas o escaneadas del QR de bridges.torproject.org
-    (`['obfs4 …', 'obfs4 …']`), 10 como mucho.
+    (`['obfs4 …', 'obfs4 …']`), 10 como mucho. El campo pide al teclado ASCII sin sugerencias, sin
+    autocorrección, sin aprender y con la variante «contraseña visible» (`TYPE_TEXT_VARIATION_VISIBLE_PASSWORD`,
+    de varias líneas y con el texto a la vista); son peticiones: lo que haga cada teclado depende de él.
 - **Listas integradas** (`BuiltInBridges`): las de `pt_config.json` de tor-browser-build a 2026-11-02,
   copiadas tal cual, revisadas y fijas en el código; se actualizan con nuevas versiones de GhostP2.
   Nunca se descargan puentes (ni Moat, ni correo, ni Telegram).
@@ -859,6 +861,10 @@ contacto ofrece "Borrar contacto" (con confirmación; al terminar dice si el avi
   Reconectar es guardar, parar el motor (como "Desconectar": se cierran sesiones y Tor y se borran las
   conversaciones de memoria), `forgetBridgeState()` (borra `tor`, `pt` y el marcador) y arrancar de nuevo con
   el ajuste nuevo. El servicio sigue en primer plano: quien esperaba un arranque en curso recibe el del nuevo.
+  Solo se vuelve a arrancar si el servicio sigue queriendo el motor: tras "Desconectar" (en la app o en la
+  notificación), R29 o la destrucción del servicio, aunque el motor aún se esté parando, "Reconectar" solo
+  guarda, para y borra el estado de Tor, sin arrancar nada. Con el motor parado, el borrado pasa a ser la
+  parada en curso: un "Activar" pedido mientras tanto espera a que termine.
   Cambiar el ajuste siempre borra el estado de Tor, también al pasar a «No».
 - **Borrado al parar.** Con un modo distinto de «No», cada parada de Tor ("Desconectar", R29, `onDestroy` del
   servicio, cambio de ajuste, "Borrar todo") para Tor y después los transportes, y borra `noBackupFilesDir/tor`
@@ -871,8 +877,8 @@ contacto ofrece "Borrar contacto" (con confirmación; al terminar dice si el avi
   y 2 del proceso a logcat (etiqueta `GoLog`), así que tras crear el `Controller` (una vez por proceso)
   GhostP2 los vuelve a apuntar a `/dev/null` con `Os.dup2`; si no puede, el arranque por puente falla
   cerrado. Los mensajes de error de IPtProxy nunca se reenvían (podrían citar el puente). GhostP2 no
-  registra nada, ni qué puente se usa. La notificación fija y el inicio no nombran el puente: solo
-  «Conectando por puente… N %».
+  registra nada, ni qué puente se usa. La notificación fija no cambia; el inicio dice solo «Conectando por
+  puente… N %», sin nombrar el puente.
 - **kmp-tor sin API de puentes.** kmp-tor 2.6.0 no tiene API pública para `UseBridges`, `Bridge` ni
   `ClientTransportPlugin` (issue 05nelsonm/kmp-tor#626, abierta). GhostP2 construye esas tres opciones
   **por reflexión** con las factorías internas de kmp-tor

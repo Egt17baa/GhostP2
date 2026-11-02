@@ -79,6 +79,31 @@ class GhostTextFieldTest {
         assertTrue(attributes.inputType and InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS != 0)
         assertEquals(0, attributes.inputType and InputType.TYPE_TEXT_FLAG_AUTO_CORRECT)
         assertEquals(InputType.TYPE_CLASS_TEXT, attributes.inputType and InputType.TYPE_MASK_CLASS)
+        // Contraseña visible: los teclados la respetan mucho más que "sin sugerencias" y no aprenden de ella.
+        assertEquals(
+            InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD,
+            attributes.inputType and InputType.TYPE_MASK_VARIATION,
+        )
+        // Y sigue siendo de varias líneas.
+        assertTrue(attributes.inputType and InputType.TYPE_TEXT_FLAG_MULTI_LINE != 0)
+    }
+
+    /** Un campo normal no pasa a contraseña. */
+    @Test
+    fun normalFieldIsNotAPasswordField() {
+        lateinit var view: View
+        compose.setContent {
+            view = LocalView.current
+            var text by remember { mutableStateOf("") }
+            GhostTextField(text, { text = it }, modifier = Modifier.testTag(FIELD), label = "Mensaje")
+        }
+        compose.onNodeWithTag(FIELD).performClick()
+        compose.waitForIdle()
+
+        val attributes = EditorInfo()
+        compose.runOnIdle { view.onCreateInputConnection(attributes) }
+
+        assertEquals(0, attributes.inputType and InputType.TYPE_MASK_VARIATION)
     }
 
     @Test
