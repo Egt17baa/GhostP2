@@ -1,0 +1,139 @@
+package org.ghostp2.app.ui.pairing
+
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
+import org.ghostp2.app.AppContainer
+import org.ghostp2.app.ui.clearOwnClip
+import org.ghostp2.engine.AcceptResult
+import org.ghostp2.engine.EngineStatus
+import org.ghostp2.engine.InvitationHandle
+import org.ghostp2.engine.InvitationState
+
+/** Estado de "Pegar" (y, en la Task 8, de "Escanear"): aceptar la invitación de otro. */
+sealed interface AcceptUi {
+    data object Idle : AcceptUi
+
+    data object Working : AcceptUi
+
+    /** [message] es el texto del motor (p. ej. "Invitación no válida: …"); nunca incluye el secreto. */
+    data class Failed(val message: String) : AcceptUi
+
+    data class Paired(val contactId: String) : AcceptUi
+}
+
+/**
+ * Añadir contacto con el motor del contenedor: crea la invitación propia ("Mi código") y acepta la del
+ * otro ("Pegar"). Todo vive solo en memoria: el texto de la invitación (con su secreto) no pasa por
+ * ningún estado guardado ni se registra en ningún log.
+ *
+ * La invitación vive lo que este ViewModel: [onCleared] (salir de la pantalla, emparejar y pasar a
+ * nombrar, o que la actividad termine) la cancela y el motor retira el servicio temporal. Cuando deja de
+ * esperar, y en [onCleared], se vacía el portapapeles si aún tiene la invitación copiada. Al girar la
+ * pantalla el ViewModel se conserva (en memoria) y la invitación sigue, igual que el texto pegado
+ * ([pasted]); si el sistema mata el proceso no se restaura nada: el motor, la invitación y el texto
+ * desaparecen con él y, al volver, hace falta otra.
+ */
+class PairingViewModel(private val container: AppContainer) : ViewModel() {
+    private var handle: InvitationHandle? = null
+    private var watcher: Job? = null
+
+    private val mutableInvitation = MutableStateFlow<InvitationState?>(null)
+
+    /** Estado de la invitación propia; `null` hasta [createInvitation]. */
+    val invitation: StateFlow<InvitationState?> = mutableInvitation.asStateFlow()
+
+    private val mutableAccept = MutableStateFlow<AcceptUi>(AcceptUi.Idle)
+    val accept: StateFlow<AcceptUi> = mutableAccept.asStateFlow()
+
+    private val mutablePasted = MutableStateFlow("")
+
+    /** Texto de "Pegar" (lleva el secreto): aquí, en memoria, para que sobreviva a un giro; nunca guardable. */
+    val pasted: StateFlow<String> = mutablePasted.asStateFlow()
+
+    init {
+        // Un fallo anterior (p. ej. "GhostP2 no está activo") deja de mostrarse al volver a estar Online.
+        viewModelScope.launch {
+            container.engine.status.map { it == EngineStatus.Online }.distinctUntilChanged().collect { online ->
+                if (online) clearFailure()
+            }
+        }
+    }
+
+    /** Contacto recién emparejado por cualquiera de los dos caminos (invitación propia o aceptada). */
+    val pairedContactId: StateFlow<String?> =
+        combine(invitation, accept) { mine, theirs ->
+            (mine as? InvitationState.Paired)?.contactId ?: (theirs as? AcceptUi.Paired)?.contactId
+        }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
+
+    /** Crea una invitación nueva (cancela la anterior, si la hay). Sin motor `Online` queda en `Failed`. */
+    fun createInvitation() {
+        cancelInvitation()
+        val created = container.engine.createInvitation()
+        handle = created
+        showInvitation(created.state.value)
+        watcher = viewModelScope.launch { created.state.collect { showInvitation(it) } }
+    }
+
+    /**
+     * Pone el estado de la invitación. Si deja de estar en `Waiting` (emparejada, caducada, cancelada…),
+     * su texto ya no sirve: se vacía el portapapeles si aún lo tiene (solo lo copiado por GhostP2).
+     */
+    private fun showInvitation(state: InvitationState) {
+        val was = mutableInvitation.value
+        mutableInvitation.value = state
+        if (was is InvitationState.Waiting && state !is InvitationState.Waiting) clearOwnClip(container.appContext)
+    }
+
+    /** Cancela la invitación activa (idempotente) y la deja en `Cancelled`. */
+    fun cancelInvitation() {
+        // Primero se deja de copiar su estado: un `Waiting` atrasado no pisa el `Cancelled`.
+        watcher?.cancel()
+        watcher = null
+        val current = handle ?: return
+        handle = null
+        current.cancel()
+        val state = current.state.value
+        showInvitation(if (state is InvitationState.Paired) state else InvitationState.Cancelled)
+    }
+
+    /** Cambia el texto pegado; al editarlo deja de mostrarse el fallo anterior. */
+    fun setPasted(text: String) {
+        mutablePasted.value = text
+        clearFailure()
+    }
+
+    private fun clearFailure() {
+        mutableAccept.update { if (it is AcceptUi.Failed) AcceptUi.Idle else it }
+    }
+
+    /** Acepta la invitación pegada o escaneada; se recortan los espacios y saltos de línea de los extremos. */
+    fun accept(text: String) {
+        if (mutableAccept.value == AcceptUi.Working) return
+        val trimmed = text.trim()
+        mutableAccept.value = AcceptUi.Working
+        viewModelScope.launch {
+            // acceptInvitation nunca lanza salvo cancelación (que se propaga al salir de la pantalla).
+            mutableAccept.value = when (val result = container.engine.acceptInvitation(trimmed)) {
+                is AcceptResult.Paired -> AcceptUi.Paired(result.contactId)
+                is AcceptResult.Failed -> AcceptUi.Failed(result.message)
+            }
+        }
+    }
+
+    override fun onCleared() {
+        cancelInvitation()
+        // La invitación copiada ya no sirve sin esta pantalla (la cancela salir de ella).
+        clearOwnClip(container.appContext)
+    }
+}

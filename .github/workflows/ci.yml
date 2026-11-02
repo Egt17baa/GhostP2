@@ -1,0 +1,173 @@
+name: CI
+# Cada push (ramas y etiquetas) y cada pull request. El job `release` solo corre con etiquetas v*.
+on: [push, pull_request]
+permissions:
+  contents: read
+defaults:
+  run:
+    # bash -eo pipefail: falla en cualquier orden que falle, también dentro de una tubería.
+    shell: bash
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    # Acciones fijadas por commit, las mismas que en `release` (la etiqueta exacta, en el comentario).
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # El token no se queda en .git/config para los pasos siguientes.
+          persist-credentials: false
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.9.1
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3.2.2
+        with:
+          # El paquete 'tools' por defecto ya no existe en cmdline-tools recientes.
+          packages: 'platform-tools platforms;android-36 build-tools;36.1.0'
+      - uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4.4.3
+      - name: Pruebas, lint y APK
+        run: ./gradlew test lintDebug lintRelease :app:assembleDebug :app:assembleRelease --no-daemon
+      - name: Sin Google Play Services, Firebase, ML Kit ni otras bibliotecas de Google Play en el classpath de la versión
+        run: |
+          deps="$RUNNER_TEMP/release-runtime-classpath.txt"
+          # A un archivo primero: si Gradle falla, el paso falla (no se confunde con "sin coincidencias").
+          ./gradlew -q :app:dependencies --configuration releaseRuntimeClasspath --no-daemon > "$deps"
+          # Control: el informe no está vacío (BouncyCastle siempre está).
+          grep -q 'org.bouncycastle:bcprov' "$deps"
+          # GMS, Firebase, ML Kit, Play Core, transporte de datos de Google, consentimiento (UMP),
+          # com.google.android.libraries.*, Install Referrer y Play Billing.
+          if grep -iE 'com\.google\.android\.gms|com\.google\.firebase|com\.google\.mlkit|com\.google\.android\.play|play-services|com\.google\.android\.datatransport|com\.google\.android\.ump|com\.google\.android\.libraries|installreferrer|billingclient' "$deps"; then
+            echo "::error::Dependencia propietaria en releaseRuntimeClasspath de :app"
+            exit 1
+          fi
+      - name: Manifiesto y dex del APK de versión (sin emoji2, GMS ni Firebase; no depurable)
+        run: |
+          aapt2="$ANDROID_HOME/build-tools/36.1.0/aapt2"
+          shopt -s nullglob
+          apks=(app/build/outputs/apk/release/*.apk)
+          [ "${#apks[@]}" -eq 3 ] || { echo "::error::Se esperaban 3 APK de versión, hay ${#apks[@]}"; exit 1; }
+          for apk in "${apks[@]}"; do
+            "$aapt2" dump xmltree --file AndroidManifest.xml "$apk" > "$RUNNER_TEMP/manifest.txt"
+            "$aapt2" dump badging "$apk" > "$RUNNER_TEMP/badging.txt"
+            # Control: el volcado incluye los inicializadores de androidx-startup.
+            grep -q 'KmpTorResourceInitializer' "$RUNNER_TEMP/manifest.txt"
+            if grep -iE 'EmojiCompatInitializer|com\.google\.android\.gms|com\.google\.firebase' "$RUNNER_TEMP/manifest.txt"; then
+              echo "::error::$apk: el manifiesto fusionado declara emoji2 o Google Play Services"
+              exit 1
+            fi
+            if grep -q 'application-debuggable' "$RUNNER_TEMP/badging.txt"; then
+              echo "::error::$apk es depurable"
+              exit 1
+            fi
+            # Clases de GMS o Firebase en el código: a un archivo primero (sin tuberías cortadas).
+            rm -f "$RUNNER_TEMP/classes.dex"
+            unzip -p "$apk" 'classes*.dex' > "$RUNNER_TEMP/classes.dex"
+            # Control: el dex se ha extraído (R8 nunca renombra las clases del sistema).
+            grep -qaF 'Landroid/app/Activity;' "$RUNNER_TEMP/classes.dex"
+            if grep -qaE 'Lcom/google/android/gms/|Lcom/google/firebase/' "$RUNNER_TEMP/classes.dex"; then
+              echo "::error::$apk: el dex contiene clases de Google Play Services o Firebase"
+              exit 1
+            fi
+          done
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      # Los secretos no se pueden usar en `if:`; se convierten antes en 'true' o 'false'.
+      HAS_KEY: ${{ secrets.GHOSTP2_KEYSTORE_BASE64 != '' }}
+    # Acciones fijadas por commit (la etiqueta exacta, en el comentario): este job maneja la clave de firma.
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.9.1
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3.2.2
+        with:
+          packages: 'platform-tools platforms;android-36 build-tools;36.1.0'
+      - uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4.4.3
+        with:
+          # Solo lee la caché: lo construido con la clave no se guarda para otros jobs.
+          cache-read-only: true
+
+      - name: APK firmados
+        if: env.HAS_KEY == 'true'
+        env:
+          # Opcional (variable del repositorio, no secreto): SHA-256 del certificado de firma esperado.
+          GHOSTP2_CERT_SHA256: ${{ vars.GHOSTP2_CERT_SHA256 }}
+          GHOSTP2_KEYSTORE_BASE64: ${{ secrets.GHOSTP2_KEYSTORE_BASE64 }}
+          GHOSTP2_KEYSTORE_PASSWORD: ${{ secrets.GHOSTP2_KEYSTORE_PASSWORD }}
+          GHOSTP2_KEY_ALIAS: ${{ secrets.GHOSTP2_KEY_ALIAS }}
+          GHOSTP2_KEY_PASSWORD: ${{ secrets.GHOSTP2_KEY_PASSWORD }}
+        run: |
+          for v in GHOSTP2_KEYSTORE_PASSWORD GHOSTP2_KEY_ALIAS GHOSTP2_KEY_PASSWORD; do
+            [ -n "${!v}" ] || { echo "::error::Falta el secreto $v"; exit 1; }
+          done
+          export GHOSTP2_KEYSTORE_FILE="$RUNNER_TEMP/release.jks"
+          # El almacén de claves solo existe durante este paso.
+          trap 'rm -f "$GHOSTP2_KEYSTORE_FILE"' EXIT
+          umask 077
+          printf '%s' "$GHOSTP2_KEYSTORE_BASE64" | base64 --decode > "$GHOSTP2_KEYSTORE_FILE"
+          unset GHOSTP2_KEYSTORE_BASE64
+          ./gradlew :app:assembleRelease --no-daemon
+          apksigner="$ANDROID_HOME/build-tools/36.1.0/apksigner"
+          cd app/build/outputs/apk/release
+          shopt -s nullglob
+          apks=(*-release.apk)
+          [ "${#apks[@]}" -eq 3 ] || { echo "::error::Se esperaban 3 APK firmados, hay ${#apks[@]}"; exit 1; }
+          # Sin dos puntos ni espacios y en minúsculas, como lo escribe apksigner.
+          expected="$(printf '%s' "${GHOSTP2_CERT_SHA256:-}" | tr -d ': ' | tr 'A-F' 'a-f')"
+          [ -n "$expected" ] || echo "::notice::Sin la variable GHOSTP2_CERT_SHA256: no se compara el certificado de firma"
+          for apk in "${apks[@]}"; do
+            "$apksigner" verify --print-certs "$apk" > "$RUNNER_TEMP/certs.txt"
+            cat "$RUNNER_TEMP/certs.txt"
+            [ -n "$expected" ] || continue
+            # Todos los firmantes deben ser el esperado (y tiene que haber al menos uno).
+            digests="$(sed -n 's/^Signer #[0-9]* certificate SHA-256 digest: //p' "$RUNNER_TEMP/certs.txt")"
+            [ -n "$digests" ] || { echo "::error::$apk: apksigner no informa del SHA-256 del certificado"; exit 1; }
+            while read -r digest; do
+              if [ "$digest" != "$expected" ]; then
+                echo "::error::$apk: el certificado de firma no es el esperado (GHOSTP2_CERT_SHA256)"
+                exit 1
+              fi
+            done <<< "$digests"
+          done
+          sha256sum "${apks[@]}" > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Publicar la versión
+        if: env.HAS_KEY == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd app/build/outputs/apk/release
+          gh release create "$GITHUB_REF_NAME" --verify-tag --title "GhostP2 $GITHUB_REF_NAME" \
+            --generate-notes ./*-release.apk SHA256SUMS.txt
+
+      - name: APK sin firmar (no hay clave en los secretos)
+        if: env.HAS_KEY != 'true'
+        run: |
+          echo "::warning::Sin el secreto GHOSTP2_KEYSTORE_BASE64: APK sin firmar como artefacto y sin Release"
+          ./gradlew :app:assembleRelease --no-daemon
+          cd app/build/outputs/apk/release
+          shopt -s nullglob
+          apks=(*-release-unsigned.apk)
+          [ "${#apks[@]}" -eq 3 ] || { echo "::error::Se esperaban 3 APK sin firmar, hay ${#apks[@]}"; exit 1; }
+          sha256sum "${apks[@]}" > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Subir los APK sin firmar
+        if: env.HAS_KEY != 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: apk-sin-firmar
+          path: |
+            app/build/outputs/apk/release/*-release-unsigned.apk
+            app/build/outputs/apk/release/SHA256SUMS.txt
+          if-no-files-found: error

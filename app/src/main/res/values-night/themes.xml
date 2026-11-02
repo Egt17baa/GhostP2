@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Variante oscura (DayNight resuelve la oscura aquí): el fondo de arranque no destella en blanco. -->
+    <style name="Theme.GhostP2" parent="Theme.AppCompat.DayNight.NoActionBar" />
+</resources>
