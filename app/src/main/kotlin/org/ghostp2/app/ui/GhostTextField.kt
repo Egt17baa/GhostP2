@@ -1,5 +1,6 @@
 package org.ghostp2.app.ui
 
+import android.text.InputType
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
 import androidx.compose.foundation.text.KeyboardActions
@@ -13,6 +14,7 @@ import androidx.compose.ui.platform.InterceptPlatformTextInput
 import androidx.compose.ui.platform.PlatformTextInputInterceptor
 import androidx.compose.ui.platform.PlatformTextInputMethodRequest
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 
 /**
  * Único campo de texto de la app ("teclado de incógnito"): pide al teclado que no aprenda de lo escrito
@@ -33,8 +35,12 @@ fun GhostTextField(
     enabled: Boolean = true,
     imeAction: ImeAction = ImeAction.Default,
     onImeAction: () -> Unit = {},
+    /** Tipo de teclado; p. ej. `Ascii` para las líneas de «Mis puentes». */
+    keyboardType: KeyboardType = KeyboardType.Unspecified,
+    /** Pide además al teclado que no muestre sugerencias (`TYPE_TEXT_FLAG_NO_SUGGESTIONS`). */
+    noSuggestions: Boolean = false,
 ) {
-    InterceptPlatformTextInput(interceptor = NoLearningInterceptor) {
+    InterceptPlatformTextInput(interceptor = if (noSuggestions) NoSuggestionsInterceptor else NoLearningInterceptor) {
         OutlinedTextField(
             value = value,
             onValueChange = onValueChange,
@@ -43,7 +49,7 @@ fun GhostTextField(
             label = label?.let { { Text(it) } },
             singleLine = singleLine,
             maxLines = maxLines,
-            keyboardOptions = KeyboardOptions(autoCorrectEnabled = false, imeAction = imeAction),
+            keyboardOptions = KeyboardOptions(autoCorrectEnabled = false, keyboardType = keyboardType, imeAction = imeAction),
             // Primero lo de quien llama y después lo normal de la acción (pasar al siguiente campo, cerrar el teclado…).
             keyboardActions = KeyboardActions(onAny = {
                 onImeAction()
@@ -59,13 +65,24 @@ private val NoLearningInterceptor = PlatformTextInputInterceptor { request, next
     nextHandler.startInputMethod(NoLearningRequest(request))
 }
 
+/** Como [NoLearningInterceptor], y además sin sugerencias. */
+@OptIn(ExperimentalComposeUiApi::class)
+private val NoSuggestionsInterceptor = PlatformTextInputInterceptor { request, nextHandler ->
+    nextHandler.startInputMethod(NoLearningRequest(request, noSuggestions = true))
+}
+
 /**
  * Petición de teclado que, tras la del campo ([delegate]), añade `IME_FLAG_NO_PERSONALIZED_LEARNING` a
- * `imeOptions` conservando los bits que puso el campo (acción, etc.).
+ * `imeOptions` conservando los bits que puso el campo (acción, etc.); con [noSuggestions], también
+ * `TYPE_TEXT_FLAG_NO_SUGGESTIONS` a `inputType`.
  */
-internal class NoLearningRequest(private val delegate: PlatformTextInputMethodRequest) : PlatformTextInputMethodRequest {
+internal class NoLearningRequest(
+    private val delegate: PlatformTextInputMethodRequest,
+    private val noSuggestions: Boolean = false,
+) : PlatformTextInputMethodRequest {
     override fun createInputConnection(outAttributes: EditorInfo): InputConnection =
         delegate.createInputConnection(outAttributes).also {
             outAttributes.imeOptions = outAttributes.imeOptions or EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING
+            if (noSuggestions) outAttributes.inputType = outAttributes.inputType or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
         }
 }

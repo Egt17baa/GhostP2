@@ -48,8 +48,12 @@ private const val INVITATION_PREFIX = "ghostp2:"
  * Copia el plano Y en un búfer propio reutilizado, que se borra tras cada fotograma (lleva el secreto si
  * enfoca una invitación), y avisa a [onInvitation] una sola vez. El `ImageProxy` siempre se cierra y
  * un fotograma ilegible se salta sin lanzar (una excepción en el hilo del analizador cerraría la app).
+ * [accept] decide qué QR valen y qué se entrega (por defecto, [invitationOrNull]; «Mis puentes» usa el suyo).
  */
-class QrAnalyzer(private val onInvitation: (String) -> Unit) : ImageAnalysis.Analyzer {
+class QrAnalyzer(
+    private val accept: (String) -> String? = ::invitationOrNull,
+    private val onInvitation: (String) -> Unit,
+) : ImageAnalysis.Analyzer {
     private val reported = AtomicBoolean(false)
     private var buffer = ByteArray(0)
 
@@ -71,7 +75,7 @@ class QrAnalyzer(private val onInvitation: (String) -> Unit) : ImageAnalysis.Ana
                 val source = plane.buffer.duplicate()
                 val copied = minOf(source.remaining(), size)
                 source.get(buffer, 0, copied)
-                val invitation = decodeQrLuminance(buffer, it.width, it.height, rowStride)?.let(::invitationOrNull)
+                val invitation = decodeQrLuminance(buffer, it.width, it.height, rowStride)?.let(accept)
                 if (invitation != null && reported.compareAndSet(false, true)) onInvitation(invitation)
             } finally {
                 buffer.fill(0)

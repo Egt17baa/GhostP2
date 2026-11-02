@@ -1,5 +1,6 @@
 package org.ghostp2.engine
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -11,11 +12,13 @@ import org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters
 import org.ghostp2.core.crypto.Base32
 import org.ghostp2.core.crypto.OnionAddress
 import org.ghostp2.core.crypto.Primitives
+import org.ghostp2.engine.bridges.BridgeSetup
 import java.io.IOException
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
@@ -146,6 +149,11 @@ class FakeTorNetwork {
  *
  * Con [forgetsClientAuthOnStop] `= true`, `stop` (y `wipeState`) olvidan las autorizaciones de cliente,
  * como un Tor real (que solo las guarda en memoria); por defecto se conservan entre reinicios.
+ *
+ * Puentes (R30), como `KmpTorTransport`: con [bridges], cada `start` lee el ajuste (lo guarda en
+ * [bridgeSetups]) y [bridged] dice si la ejecución va por puente; si la lectura lanza, `Error` sin puente.
+ * [startFailure] hace terminar cada `start` en ese `Error`, [holdStarts] lo deja en `Starting(0)` hasta
+ * [finishStart], y [calls] guarda el orden de `start`, `stop`, `wipeState` y `forgetBridgeState`.
  */
 class FakeTor(
     private val network: FakeTorNetwork,
@@ -162,22 +170,81 @@ class FakeTor(
     /** Llamadas a [wipeState]. */
     val wipeStateCalls = AtomicInteger(0)
 
+    /** Llamadas a [forgetBridgeState]. */
+    val forgetBridgeStateCalls = AtomicInteger(0)
+
+    /** Orden de las llamadas: "start", "stop", "wipe" y "forget". */
+    val calls = CopyOnWriteArrayList<String>()
+
+    /** Ajuste de puentes que lee cada [start]; `null` = no se lee (como antes de R30). */
+    @Volatile var bridges: (suspend () -> BridgeSetup?)? = null
+
+    /** Lo que devolvió [bridges] en cada [start], en orden (`null` = sin puentes). */
+    val bridgeSetups = CopyOnWriteArrayList<BridgeSetup?>()
+
+    /** Si no es nulo, cada [start] termina en este `Error` en vez de `Ready`. */
+    @Volatile var startFailure: TorState.Error? = null
+
+    /** Con `true`, [start] deja el estado en `Starting(0)`; [finishStart] lo pasa a `Ready`. */
+    @Volatile var holdStarts = false
+
+    @Volatile private var bridgedRun = false
+
+    override val bridged: Boolean get() = bridgedRun
+
+    /** Termina un arranque retenido por [holdStarts]. */
+    fun finishStart() {
+        if (mutableState.value is TorState.Starting) mutableState.value = TorState.Ready
+    }
+
     /** .onion (sin sufijo) con autorización de cliente registrada ahora mismo. */
     fun clientAuthOnions(): Set<String> = clientAuth.keys.toSet()
 
     override suspend fun start() {
+        calls += "start"
         mutableState.value = TorState.Starting(0)
-        mutableState.value = TorState.Ready
+        val supplier = bridges
+        if (supplier != null) {
+            val setup = try {
+                supplier()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                mutableState.value = TorState.Error("No se pudo leer el ajuste de puentes")
+                return
+            }
+            bridgeSetups += setup
+            bridgedRun = setup != null
+        }
+        startFailure?.let {
+            mutableState.value = it
+            return
+        }
+        if (!holdStarts) mutableState.value = TorState.Ready
     }
 
     override suspend fun stop() {
+        calls += "stop"
+        bridgedRun = false
         network.unregisterAll(this)
         if (forgetsClientAuthOnStop) clientAuth.clear()
         mutableState.value = TorState.Off
     }
 
     override suspend fun wipeState() {
+        calls += "wipe"
         wipeStateCalls.incrementAndGet()
+        forget()
+    }
+
+    override suspend fun forgetBridgeState() {
+        calls += "forget"
+        forgetBridgeStateCalls.incrementAndGet()
+        forget()
+    }
+
+    private fun forget() {
+        bridgedRun = false
         network.unregisterAll(this)
         clientAuth.clear()
         mutableState.value = TorState.Off

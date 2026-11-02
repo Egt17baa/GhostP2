@@ -26,6 +26,34 @@ echo "sdk.dir=$HOME/android-sdk" > local.properties   # ya ignorado por git
 Los APK se generan por ABI en `app/build/outputs/apk/debug/`
 (por ejemplo `app-arm64-v8a-debug.apk`).
 
+## IPtProxy (puentes de Tor, R30)
+
+Los puentes usan `com.netzarchitekten:IPtProxy:5.7.0` de Maven Central, con la versión fija en
+`gradle/libs.versions.toml` (`iptproxy`). El proyecto no usa `verification-metadata.xml` de Gradle, así
+que la suma de referencia está aquí; compruébala al instalar el entorno y en cada cambio de versión:
+
+| Archivo | SHA-256 |
+|---|---|
+| `IPtProxy-5.7.0.aar` | `567130d6760c64f823c62150d9da7978d6f8d8ef8766e2a5b4f8eb5cdaba5b51` |
+| `IPtProxy-5.7.0.pom` | `f929c8ce3b3a571908730aa0e1e6b33b60380bdc91af215461b913e00fc0722e` |
+
+```bash
+# El que ha descargado Gradle (tras compilar una vez):
+find ~/.gradle/caches/modules-2/files-2.1/com.netzarchitekten/IPtProxy/5.7.0 -name '*.aar' -exec sha256sum {} \;
+# O directamente de Maven Central:
+curl -sSLO https://repo1.maven.org/maven2/com/netzarchitekten/IPtProxy/5.7.0/IPtProxy-5.7.0.aar
+echo "567130d6760c64f823c62150d9da7978d6f8d8ef8766e2a5b4f8eb5cdaba5b51  IPtProxy-5.7.0.aar" | sha256sum -c
+```
+
+Debe decir `IPtProxy-5.7.0.aar: OK`. Si no coincide, no compiles con ella. Al actualizar IPtProxy (o
+kmp-tor, por la reflexión de la configuración de puentes, PROTOCOLO §14.11):
+
+- anota aquí las sumas nuevas;
+- revisa que `BridgeConfigTest` e `IptProxyControllerTest` siguen pasando;
+- comprueba en el APK de versión que cada ABI lleva `lib/<abi>/libgojni.so` y que el dex conserva
+  `go.*`, `IPtProxy.*` y los miembros de kmp-tor que usa la reflexión (`toLineItem$…`, `toSetting$…`);
+- vuelve a hacer los pasos de puentes de [PRUEBA-MANUAL](PRUEBA-MANUAL.md#puentes-r30).
+
 ## APK de versión
 
 ```bash

@@ -93,8 +93,11 @@ Así ningún valor interno de la librería, por ejemplo `stun.l.google.com`, se 
 4. **Pegar texto con basura.** Saltos `\r\n`, prefijo `Bridge`, espacios, líneas repetidas,
    transportes no admitidos y más de 10 líneas: mensaje claro por línea y nada guardado si hay
    error. → `parsesMessyPaste`, `rejectsUnsupportedAndTooMany`.
-5. **«Mis puentes» vacío.** Elegir «Mis puentes» sin líneas válidas no se guarda. Si llega así
-   desde disco, se sanea a «No». → `customWithoutLinesSanitizesToNone`.
+5. **«Mis puentes» vacío.** Elegir «Mis puentes» sin líneas válidas no se guarda (la interfaz y el
+   ViewModel lo rechazan). Si llega así desde disco, sigue en «Mis puentes» (no se sanea a «No»):
+   `bridgeSetupFor` da un `BridgeSetup` vacío, que falla cerrado como `BRIDGE_FAILED` sin arrancar
+   Tor. → `customWithoutLinesStaysCustomAndFailsClosed`, `customWithoutLinesIsEmptySetup`,
+   `emptySetupIsBridgeFailedWithoutDaemon`.
 
 ---
 

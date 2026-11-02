@@ -8,6 +8,7 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.provider.Settings
 import androidx.activity.compose.LocalActivity
+import androidx.annotation.StringRes
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
@@ -73,6 +74,27 @@ internal fun cameraAccess(hasCamera: Boolean, granted: Boolean, asked: Boolean, 
     }
 
 /**
+ * Textos del escáner según lo que se lee: sin cámara, sin permiso, permiso bloqueado, cámara que no abre y
+ * la indicación bajo la vista previa.
+ */
+internal class ScanTexts(
+    @StringRes val noCamera: Int,
+    @StringRes val noPermission: Int,
+    @StringRes val blocked: Int,
+    @StringRes val cameraFailed: Int,
+    @StringRes val hint: Int,
+)
+
+/** Los de la invitación ("Puedes pegar la invitación"). */
+internal val INVITATION_SCAN_TEXTS = ScanTexts(
+    noCamera = R.string.scan_no_camera,
+    noPermission = R.string.scan_no_permission,
+    blocked = R.string.scan_blocked,
+    cameraFailed = R.string.scan_camera_failed,
+    hint = R.string.scan_hint,
+)
+
+/**
  * Escáner del QR de una invitación. Con cámara (`FEATURE_CAMERA_ANY`), pide el permiso `CAMERA` al
  * mostrarse (solo aquí: la cámara solo se usa para esto, R23); sin cámara no pide nada y ofrece pegar.
  * Sin permiso: "Sin permiso de cámara. Puedes pegar la invitación" y "Pegar" ([onUsePaste]); denegado
@@ -84,12 +106,22 @@ internal fun cameraAccess(hasCamera: Boolean, granted: Boolean, asked: Boolean, 
  */
 @Composable
 fun QrScanner(onInvitation: (String) -> Unit, onUsePaste: () -> Unit) {
-    QrScannerContent(onUsePaste) { CameraPreview(onInvitation, onUsePaste) }
+    QrCodeScanner(accept = ::invitationOrNull, onResult = onInvitation, onUsePaste = onUsePaste, texts = INVITATION_SCAN_TEXTS)
 }
 
-/** [QrScanner] con la vista de la cámara aparte ([camera]), para probar el permiso sin CameraX. */
+/**
+ * Escáner de QR general, igual que [QrScanner]: solo avisa a [onResult] (una vez, en el hilo principal) con lo que
+ * devuelva [accept] para el texto de un QR (que corre en el hilo del analizador); con `null`, el QR se ignora.
+ * También lo usa «Mis puentes» (R30) para los QR de bridges.torproject.org.
+ */
 @Composable
-internal fun QrScannerContent(onUsePaste: () -> Unit, camera: @Composable () -> Unit) {
+internal fun QrCodeScanner(accept: (String) -> String?, onResult: (String) -> Unit, onUsePaste: () -> Unit, texts: ScanTexts) {
+    QrScannerContent(onUsePaste, texts) { CameraPreview(accept, onResult, onUsePaste, texts) }
+}
+
+/** [QrCodeScanner] con la vista de la cámara aparte ([camera]), para probar el permiso sin CameraX. */
+@Composable
+internal fun QrScannerContent(onUsePaste: () -> Unit, texts: ScanTexts = INVITATION_SCAN_TEXTS, camera: @Composable () -> Unit) {
     val context = LocalContext.current
     val activity = LocalActivity.current
     val hasCamera = remember { context.packageManager.hasSystemFeature(PackageManager.FEATURE_CAMERA_ANY) }
@@ -112,9 +144,9 @@ internal fun QrScannerContent(onUsePaste: () -> Unit, camera: @Composable () -> 
     }
     when (access) {
         CameraAccess.GRANTED -> camera()
-        CameraAccess.NO_CAMERA -> UsePaste(stringResource(R.string.scan_no_camera), onUsePaste)
-        CameraAccess.DENIED -> UsePaste(stringResource(R.string.scan_no_permission), onUsePaste)
-        CameraAccess.BLOCKED -> UsePaste(stringResource(R.string.scan_blocked), onUsePaste) {
+        CameraAccess.NO_CAMERA -> UsePaste(stringResource(texts.noCamera), onUsePaste)
+        CameraAccess.DENIED -> UsePaste(stringResource(texts.noPermission), onUsePaste)
+        CameraAccess.BLOCKED -> UsePaste(stringResource(texts.blocked), onUsePaste) {
             Button(onClick = { openAppSettings(context) }) { Text(stringResource(R.string.scan_open_settings)) }
         }
     }
@@ -133,10 +165,10 @@ private fun openAppSettings(context: Context) {
 }
 
 @Composable
-private fun CameraPreview(onInvitation: (String) -> Unit, onUsePaste: () -> Unit) {
+private fun CameraPreview(accept: (String) -> String?, onResult: (String) -> Unit, onUsePaste: () -> Unit, texts: ScanTexts) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
-    val currentOnInvitation by rememberUpdatedState(onInvitation)
+    val currentOnResult by rememberUpdatedState(onResult)
     var failed by remember { mutableStateOf(false) }
     val previewView = remember { PreviewView(context) }
 
@@ -150,7 +182,7 @@ private fun CameraPreview(onInvitation: (String) -> Unit, onUsePaste: () -> Unit
         val analysis = ImageAnalysis.Builder()
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
             .build()
-            .also { it.setAnalyzer(analysisThread, QrAnalyzer { text -> main.execute { if (!disposed) currentOnInvitation(text) } }) }
+            .also { it.setAnalyzer(analysisThread, QrAnalyzer(accept) { text -> main.execute { if (!disposed) currentOnResult(text) } }) }
         var provider: ProcessCameraProvider? = null
         val future = ProcessCameraProvider.getInstance(context)
         future.addListener({
@@ -177,7 +209,7 @@ private fun CameraPreview(onInvitation: (String) -> Unit, onUsePaste: () -> Unit
     }
 
     if (failed) {
-        UsePaste(stringResource(R.string.scan_camera_failed), onUsePaste)
+        UsePaste(stringResource(texts.cameraFailed), onUsePaste)
         return
     }
     Column(
@@ -186,7 +218,7 @@ private fun CameraPreview(onInvitation: (String) -> Unit, onUsePaste: () -> Unit
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         AndroidView(factory = { previewView }, modifier = Modifier.fillMaxWidth().aspectRatio(PREVIEW_RATIO))
-        Text(stringResource(R.string.scan_hint), textAlign = TextAlign.Center)
+        Text(stringResource(texts.hint), textAlign = TextAlign.Center)
         OutlinedButton(onClick = onUsePaste) { Text(stringResource(R.string.add_tab_paste)) }
     }
 }

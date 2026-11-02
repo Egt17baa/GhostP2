@@ -16,6 +16,25 @@ import kotlinx.coroutines.sync.withLock
 import org.ghostp2.app.AppContainer
 import org.ghostp2.app.Notifications
 import org.ghostp2.data.AppSettings
+import org.ghostp2.engine.EngineStatus
+import org.ghostp2.engine.bridges.BridgeLines
+import org.ghostp2.engine.bridges.BridgeMode
+import org.ghostp2.engine.bridges.ParseResult
+
+/**
+ * Resultado de [SettingsViewModel.setBridges]: guardado (o sin cambios), pendiente de confirmar la reconexión
+ * ([SettingsViewModel.confirmReconnect]) o rechazado porque «Mis puentes» no es válido (no se guarda nada).
+ */
+enum class BridgeChange { SAVED, NEEDS_RECONNECT, INVALID }
+
+/** Ajuste «Puentes» pedido: [lines] (normalizadas) solo con [BridgeMode.CUSTOM]; con otro modo se conservan las guardadas. */
+private data class BridgeTarget(val mode: BridgeMode, val lines: List<String>?) {
+    fun differsFrom(current: AppSettings): Boolean =
+        mode != current.bridgeMode || (lines != null && lines != current.customBridges)
+
+    fun applyTo(current: AppSettings): AppSettings =
+        current.copy(bridgeMode = mode, customBridges = lines ?: current.customBridges)
+}
 
 /**
  * Ajustes de la app sobre `container.settings`. Las escrituras van al scope del proceso (salir de la
@@ -103,6 +122,86 @@ class SettingsViewModel(private val container: AppContainer) : ViewModel() {
                 mutableWipeFailed.value = true
             } finally {
                 mutableWiping.value = false
+            }
+        }
+    }
+
+    /** Cambio de «Puentes» a la espera de que se confirme la reconexión; solo en memoria. */
+    @Volatile private var pendingBridges: BridgeTarget? = null
+
+    /**
+     * «Puentes» (R30). Con [BridgeMode.CUSTOM], [customText] es el texto pegado o escaneado: si no pasa
+     * [BridgeLines.parse] o no tiene ninguna línea, [BridgeChange.INVALID] y no se guarda nada; si pasa, se
+     * guardan sus líneas normalizadas. Con otro modo se conservan las líneas guardadas.
+     *
+     * Sin cambio real (mismo modo y, con «Mis puentes», las mismas líneas), [BridgeChange.SAVED] sin hacer nada.
+     * Con cambio, según el motor:
+     * - `Online` o `StartingTor`: [BridgeChange.NEEDS_RECONNECT] sin guardar; [confirmReconnect] guarda y reconecta
+     *   y [cancelReconnect] lo olvida;
+     * - `Error`: guarda y reconecta enseguida (no hay conversaciones que perder);
+     * - `Stopped`: guarda y borra el estado de Tor.
+     * Reconectar es parar, borrar el estado de Tor y volver a arrancar ([AppContainer.reconnect]), y cambiar el
+     * ajuste siempre borra el estado de Tor, también al pasar a «No».
+     */
+    fun setBridges(mode: BridgeMode, customText: String?): BridgeChange {
+        val lines = if (mode == BridgeMode.CUSTOM) {
+            val parsed = BridgeLines.parse(customText.orEmpty())
+            if (parsed !is ParseResult.Ok || parsed.lines.isEmpty()) return BridgeChange.INVALID
+            parsed.lines.map { it.line }
+        } else {
+            null
+        }
+        val target = BridgeTarget(mode, lines)
+        pendingBridges = null
+        val current = state.value
+        if (current != null && !target.differsFrom(current)) return BridgeChange.SAVED
+        return when (container.engine.status.value) {
+            EngineStatus.Online, is EngineStatus.StartingTor -> {
+                pendingBridges = target
+                BridgeChange.NEEDS_RECONNECT
+            }
+            else -> {
+                applyBridges(target)
+                BridgeChange.SAVED
+            }
+        }
+    }
+
+    /** "Reconectar": guarda el cambio pendiente de [setBridges] y reconecta. Sin cambio pendiente no hace nada. */
+    fun confirmReconnect() {
+        val target = pendingBridges ?: return
+        pendingBridges = null
+        applyBridges(target)
+    }
+
+    /** "Cancelar" en el diálogo de reconexión: se olvida el cambio pendiente (no se guarda). */
+    fun cancelReconnect() {
+        pendingBridges = null
+    }
+
+    /**
+     * Guarda [target] y, si cambió algo, borra el estado de Tor: con el motor parado, solo eso; si no, reconecta.
+     * En el scope del proceso y en orden con las demás escrituras; si no se puede guardar, [saveFailed] y nada más.
+     */
+    private fun applyBridges(target: BridgeTarget) {
+        mutableSaveFailed.value = false
+        container.scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            writes.withLock {
+                try {
+                    if (!target.differsFrom(container.settings.get())) return@withLock
+                    container.settings.update(target::applyTo)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    mutableSaveFailed.value = true
+                    container.checkStorage()
+                    return@withLock
+                }
+                if (container.engine.status.value == EngineStatus.Stopped) {
+                    container.forgetBridgeState()
+                } else {
+                    container.reconnect()
+                }
             }
         }
     }

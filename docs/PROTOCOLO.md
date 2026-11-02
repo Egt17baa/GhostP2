@@ -454,7 +454,8 @@ valores por defecto están en `EngineConfig`.
 | Conexión SOCKS a una .onion | 60 s |
 | Ventana para entregar `Unpair` al borrar | 2 min (120 000 ms) |
 | `Unpair` a todos al "Borrar todo" | 2,5 s en total, en paralelo |
-| Arranque de Tor hasta `Ready` | 180 s |
+| Arranque de Tor hasta `Ready` | 180 s (también por puente, R30) |
+| Puentes en «Mis puentes» | 10 líneas como mucho (R30, §14.11) |
 | Registro de autorizaciones de cliente al arrancar | 30 s en total, en paralelo |
 | Historial en memoria | 500 elementos por contacto (se descartan los más antiguos) |
 | Fotos en el historial, sumando todas las conversaciones | 64 MiB (`maxPhotoBytesInMemory`; se descartan las más antiguas) |
@@ -627,7 +628,8 @@ contacto ofrece "Borrar contacto" (con confirmación; al terminar dice si el avi
 ### 14.7 Ciclo de vida del motor y Tor (reglas R13 y R18)
 
 - Arranque: almacenamiento comprobado (§14.9) → identidad (se crea si no hay) → Tor hasta `Ready`
-  (como mucho 180 s; si no, `Error("Tor no terminó de arrancar")`) → autorizaciones de cliente →
+  (como mucho 180 s; si no, `Error("Tor no terminó de arrancar")`, que con puente es `BRIDGE_FAILED`, R30) →
+  autorizaciones de cliente →
   escucha local → publicación → bucles de los contactos. Estado visible: `Stopped`,
   `StartingTor(%)`, `Online` o `Error(mensaje)`. Un fallo de arranque libera todo y deja
   `Error`; nunca lanza.
@@ -641,7 +643,7 @@ contacto ofrece "Borrar contacto" (con confirmación; al terminar dice si el avi
   defecto con el motor en `Error` (también si el error fue al arrancar) y el usuario no ha pulsado
   "Desconectar", vuelve a arrancar el motor una vez; como mucho un reinicio por aviso de red y con
   al menos 30 s entre dos reinicios, para no entrar en bucle si Tor sigue fallando (entonces queda
-  "Reintentar").
+  "Reintentar"). Con puentes (R30), el reinicio usa el ajuste guardado, el mismo puente: nunca directo.
 - Una excepción inesperada en una corrutina del proceso (motor, sesiones, servicio) no cierra la
   app: los scopes llevan un `CoroutineExceptionHandler` que la descarta sin registrarla.
 
@@ -725,11 +727,19 @@ contacto ofrece "Borrar contacto" (con confirmación; al terminar dice si el avi
   primera escritura; cualquier otro primer byte es "datos ilegibles" sin intentar descifrar. El
   formato 2 añade, con valor por defecto, los ajustes de la app (bienvenida hecha, bloqueo y
   "Bloquear tras", ocultar nombres, lado mayor de las fotos, activar al encender y, desde R29,
-  desconectar al salir; sin secretos ni contenido) y los borrados pendientes (§14.6). Un archivo de
-  formato 1 se lee con ajustes por defecto y sin borrados pendientes; uno de formato 2 escrito antes
-  de R29 (sin ese campo) se lee con "Nunca".
+  desconectar al salir; desde R30, el modo de «Puentes» como nombre y las líneas de «Mis puentes»;
+  sin secretos ni contenido) y los borrados pendientes (§14.6). Un archivo de formato 1 se lee con
+  ajustes por defecto y sin borrados pendientes; uno de formato 2 escrito antes de R29 (sin ese
+  campo) se lee con "Nunca", y uno escrito antes de R30 (sin los campos de puentes) se lee con «No».
 - Estado de Tor en `noBackupFilesDir/tor` (consenso, guardas, cookie de control); sin claves de
   servicios ni de autorización.
+- **R30**, solo con un ajuste de «Puentes» distinto de «No»:
+  - `noBackupFilesDir/pt`: el `stateDir` de IPtProxy. Sus transportes de cliente (obfs4, webtunnel,
+    Snowflake) no escriben en él, y el `ipt.log` que IPtProxy podría dejar se borra al crearlo.
+  - `noBackupFilesDir/tor-bridged`: marcador vacío. Se crea antes de arrancar los transportes y se borra
+    después de borrar `tor` y `pt` al parar. Si existe al arrancar (el proceso murió con el puente activo, o
+    Tor quedó atascado), se borran `tor` y `pt` antes que nada, con cualquier modo.
+  - Con «No» no se crea ninguno de los dos.
 - **R29**: mientras "Desconectar al salir de la app" está armado, `noBackupFilesDir/auto-disconnect`
   (20 bytes, sin cifrar: versión, `BOOT_COUNT`, plazo en `elapsedRealtime` y minutos; sin secretos
   ni contenido). Se borra al volver a la app, al cortar, con "Desconectar" y al pasar a "Nunca".
@@ -787,6 +797,99 @@ contacto ofrece "Borrar contacto" (con confirmación; al terminar dice si el avi
     (PIN, patrón o contraseña): `FingerprintManagerCompat` de androidx.core 1.18 no detecta hardware
     ahí, y androidx.biometric 1.1.0 pasa directamente a la credencial.
 
+### 14.11 Puentes (regla R30)
+
+- **Opciones** (Ajustes › Puentes; fila "Puentes: <modo>"):
+  - **«No»** (por defecto): Tor directo, como antes de R30. IPtProxy no se carga ni se inicia (ni su
+    `Controller` ni `libgojni.so`): ningún tráfico nuevo y la misma configuración de Tor.
+  - **«obfs4»**: los 7 puentes obfs4 integrados.
+  - **«Snowflake»**: los 2 puentes Snowflake integrados. Antes de elegirlo se muestra su aviso
+    («Snowflake contacta con un intermediario a través de una red de distribución de contenidos, con
+    servidores STUN públicos y con voluntarios que hacen de puente…») con "Usar Snowflake" y "Cancelar".
+  - **«Mis puentes»**: líneas obfs4 o webtunnel pegadas o escaneadas del QR de bridges.torproject.org
+    (`['obfs4 …', 'obfs4 …']`), 10 como mucho.
+- **Listas integradas** (`BuiltInBridges`): las de `pt_config.json` de tor-browser-build a 2026-11-02,
+  copiadas tal cual, revisadas y fijas en el código; se actualizan con nuevas versiones de GhostP2.
+  Nunca se descargan puentes (ni Moat, ni correo, ni Telegram).
+  - **WebTunnel solo en «Mis puentes»**: tor-browser-build no trae ninguna lista WebTunnel, así que no hay
+    opción «WebTunnel» integrada.
+  - **Snowflake**: los mismos valores de tor-browser-build, en la línea `Bridge` y también en el
+    `Controller` de IPtProxy (ningún valor interno de la librería se cuela): intermediario
+    `https://1098762253.rsc.cdn77.org/`, frentes `app.datapacket.com,www.datapacket.com` (domain fronting por
+    CDN77/datapacket), sin AMP cache (`cdn.ampproject.org` es de Google), sin SQS y una lista STUN sin
+    servidores de Google. No se usa `SnowflakeProxy` (no se hace de puente para otros).
+- **Validación de «Mis puentes»** (`BridgeLines`):
+  - `obfs4 <IPv4|[IPv6]>:<puerto> <huella de 40 hex> cert=<base64 sin relleno> iat-mode=<0|1|2>`;
+  - `webtunnel <IPv4|[IPv6]>:<puerto> <huella> url=https://… [ver=…]`, con `url=` en ASCII imprimible sin
+    `#`, comillas ni `\` y puerto 1–65535;
+  - se aceptan el prefijo `Bridge`, la huella en minúsculas, espacios de más y saltos `\r\n`; se quitan las
+    líneas en blanco y las repetidas (IPv6 en forma canónica, RFC 5952);
+  - cualquier otro transporte (meek, snowflake, obfs2/3…) o línea mal formada es un error: "Línea N no
+    válida"; más de 10, "Máximo 10 puentes"; sin ninguna, "Pega al menos un puente". **Con un error no se
+    guarda nada**: lo comprueban la pantalla y el ViewModel.
+  - Se guardan las líneas normalizadas en `ghostp2.bin` (cifrado, §14.9). Se conservan al elegir otra opción
+    (para no perderlas) y se borran con «Borrar todo».
+- **Ajuste guardado** (formato 2, R21): un archivo sin los campos de puentes se lee como «No», y **un modo
+  desconocido** (p. ej. uno escrito por una versión más nueva y leído tras volver a una anterior) también
+  se lee como «No» (ver §15). «Mis puentes» sin líneas válidas **no** se sanea a «No»: sigue en «Mis puentes»
+  y falla cerrado (abajo).
+- **Nunca directo, falla cerrado.** Cada arranque de Tor lee el ajuste guardado en ese momento
+  (`AppContainer` pasa a `KmpTorTransport` un proveedor que llama a `settings.get()`; nunca una copia). Con
+  un modo distinto de «No»:
+  1. se crea el marcador `tor-bridged` y se arranca un transporte de IPtProxy por tipo
+     (`start(<tipo>, "")`, SOCKS5 solo en `127.0.0.1`, puerto comprobado);
+  2. Tor recibe, en el mismo `LOADCONF` que el resto de su configuración y con `DisableNetwork 1` aún
+     puesto, `UseBridges 1`, una línea `Bridge` por puente y `ClientTransportPlugin <tipo> socks5
+     127.0.0.1:<puerto>` por tipo;
+  3. antes de dar `Ready`, `GETCONF UseBridges` debe responder `1`; si no, error de puente y Tor se para.
+
+  Cualquier fallo (IPtProxy que no arranca o falta `libgojni.so`, un `BridgeSetup` vacío por «Mis
+  puentes» inválido, la configuración que no se puede construir, el `GETCONF`, un error de Tor durante la
+  ejecución por puente o los 180 s de arranque agotados) da `TorState.Error(bridge = true)` y el motor
+  `EngineErrorKind.BRIDGE_FAILED`: «No se puede conectar por el puente. Prueba otro tipo de puente o pega
+  puentes nuevos en Ajustes › Puentes.». Nunca se reintenta sin puente: "Reintentar" y el reinicio al
+  volver la red (R18) usan el mismo ajuste guardado. Si el ajuste no se puede leer, o con «No» falla el
+  borrado del marcador, es un error de Tor normal (`TOR`), sin arrancar.
+- **Cambiar el ajuste** (solo con un cambio real; el mismo modo y las mismas líneas no hacen nada):
+  - motor `Online` o `StartingTor`: diálogo «Para usar los nuevos puentes hay que reconectar. Se cerrarán
+    las conversaciones abiertas.» con "Reconectar" y "Cancelar" (cancelar no guarda nada);
+  - motor en `Error` (también `BRIDGE_FAILED`): se reconecta enseguida, sin diálogo;
+  - motor `Stopped`: solo se guarda y se borra el estado de Tor.
+
+  Reconectar es guardar, parar el motor (como "Desconectar": se cierran sesiones y Tor y se borran las
+  conversaciones de memoria), `forgetBridgeState()` (borra `tor`, `pt` y el marcador) y arrancar de nuevo con
+  el ajuste nuevo. El servicio sigue en primer plano: quien esperaba un arranque en curso recibe el del nuevo.
+  Cambiar el ajuste siempre borra el estado de Tor, también al pasar a «No».
+- **Borrado al parar.** Con un modo distinto de «No», cada parada de Tor ("Desconectar", R29, `onDestroy` del
+  servicio, cambio de ajuste, "Borrar todo") para Tor y después los transportes, y borra `noBackupFilesDir/tor`
+  entero y `noBackupFilesDir/pt`; el marcador se borra al final, solo si los dos borrados funcionaron. Con
+  Tor atascado se para lo que se pueda y el marcador se queda: el siguiente arranque borra antes de nada (como
+  tras la muerte del proceso). Cada conexión por puente arranca en frío (unos 30–60 s más). Con «No» se
+  conserva el estado de Tor, como antes.
+- **Sin registros.** IPtProxy se crea con `enableLogging = false`, `unsafeLogging = false` y `logLevel =
+  "ERROR"`, y se borra `IPtProxy.LogFileName` de `stateDir`. La biblioteca Go de gomobile redirige los fd 1
+  y 2 del proceso a logcat (etiqueta `GoLog`), así que tras crear el `Controller` (una vez por proceso)
+  GhostP2 los vuelve a apuntar a `/dev/null` con `Os.dup2`; si no puede, el arranque por puente falla
+  cerrado. Los mensajes de error de IPtProxy nunca se reenvían (podrían citar el puente). GhostP2 no
+  registra nada, ni qué puente se usa. La notificación fija y el inicio no nombran el puente: solo
+  «Conectando por puente… N %».
+- **kmp-tor sin API de puentes.** kmp-tor 2.6.0 no tiene API pública para `UseBridges`, `Bridge` ni
+  `ClientTransportPlugin` (issue 05nelsonm/kmp-tor#626, abierta). GhostP2 construye esas tres opciones
+  **por reflexión** con las factorías internas de kmp-tor
+  (`TorSetting.LineItem.Companion.toLineItem$io_matthewnelson_kmp_tor_runtime_core_jvm` y
+  `TorSetting.Companion.toSetting$…`), que son `@JvmSynthetic` (no se pueden llamar desde Java). Las reglas
+  de R8 de `:core:tor` conservan esos miembros. Si un cambio de kmp-tor los rompe, el arranque por puente
+  falla cerrado y `BridgeConfigTest` falla: hay que revisarlo en cada actualización de kmp-tor.
+- **Un solo `Controller` de IPtProxy por proceso**: IPtProxy 5.7.0 no admite un segundo (`transports.Init()`
+  de Lyrebird falla), así que se reutiliza; cada arranque de Tor arranca y para sus propios transportes, y el
+  anterior siempre se para antes del siguiente.
+- **DNS fuera de Tor** (aceptado): los transportes resuelven con el DNS normal del móvil (resolutor de
+  bionic, que respeta el DNS privado de Android) los nombres que necesitan: el host `url=` de WebTunnel y los
+  frentes y los STUN de Snowflake. El operador ve una consulta a un dominio de cobertura, que es justo lo que
+  el disfraz pretende. obfs4 usa IP y no hace DNS. Tor sigue con `OnionTrafficOnly`, sin DNS ni salidas.
+- La cámara también se usa para escanear el QR de «Mis puentes» (mismo escáner y mismo permiso que la
+  invitación, R23); solo se aceptan QR que sean una lista válida de puentes.
+
 ## 15. Limitaciones del nivel de aplicación
 
 Complementan las del núcleo (§13). GhostP2 no promete más de lo que hay aquí.
@@ -824,7 +927,7 @@ Complementan las del núcleo (§13). GhostP2 no promete más de lo que hay aquí
 - **R23: sin cámara para fotos**: `TakePicture` exige que la cámara escriba la foto en un archivo
   (en disco) y `TakePicturePreview` solo devuelve una miniatura; por eso solo se envían fotos
   elegidas con el selector del sistema. La cámara (CameraX, opcional en el manifiesto) solo se usa
-  para escanear el QR de la invitación, y los fotogramas no se guardan.
+  para escanear el QR de la invitación y el de «Mis puentes» (R30), y los fotogramas no se guardan.
 - **Estado de Tor en disco**: guardas y caché de consenso revelan, a quien lea el
   almacenamiento de la app, que se ha usado Tor (no con quién).
 - **Tor colgado al detener o borrar**: detener Tor espera como mucho 15 s. Si el proceso no para en
@@ -841,8 +944,9 @@ Complementan las del núcleo (§13). GhostP2 no promete más de lo que hay aquí
   arranque anterior puede dar `Ready` antes de tiempo (las operaciones fallan con `IOException` y se
   reintentan como cualquier fallo de conexión) o, si es el de su parada, dejar Tor en `Error` (el
   motor muestra el error con "Reintentar") hasta el siguiente arranque. No se ha visto en pruebas.
-- **Metadatos visibles**: la red local y la operadora ven que usas Tor (sin puentes, puede estar
-  bloqueado); tus contactos ven cuándo estás en línea; un adversario que observe gran parte de la
+- **Metadatos visibles**: sin puentes, la red local y la operadora ven que usas Tor (y puede estar
+  bloqueado); con puentes (R30) ven tráfico disfrazado hacia el puente o, con Snowflake, el intermediario,
+  STUN y voluntarios; tus contactos ven cuándo estás en línea; un adversario que observe gran parte de la
   red puede correlacionar horarios y volumen (latido cada 20 s, ráfagas de fotos). Los nodos de
   Tor no ven el contenido.
 - **Otras apps del mismo móvil**: el puerto SOCKS de Tor, la escucha local del servicio oculto y
@@ -866,3 +970,32 @@ Complementan las del núcleo (§13). GhostP2 no promete más de lo que hay aquí
   que cortar.
 - **Reinstalación** (R14): no se avisa; el contacto antiguo queda desconectado y hay que volver a
   emparejar.
+- **Puentes (R30)**:
+  - **Un modo de puentes desconocido se lee como «No»** (formato 2, R21): si se vuelve a una versión de
+    GhostP2 que no conoce el modo guardado (o el campo se pierde), el siguiente arranque es **directo**.
+    Tras volver a una versión anterior, revisa Ajustes › Puentes antes de activar.
+  - **Un puente caído se detecta solo por el plazo** (M3): los eventos de IPtProxy son por conexión (uno de los 7
+    obfs4 caído también los da), así que no se usan; si ningún puente funciona, `BRIDGE_FAILED` llega a los
+    180 s del arranque, no antes.
+  - **`Stop` de IPtProxy no corta las conexiones en curso** (M4): cerrar el transporte cierra su escucha,
+    pero una conexión que ya estaba marcando o negociando con el puente (o una sesión Snowflake) sigue hasta
+    que termina o caduca. Durante unos segundos tras "Desconectar" puede haber algún paquete al puente; los
+    hilos de Go terminan cuando acaban esas conexiones.
+  - **Los puertos SOCKS locales de los transportes no tienen autenticación** (M9), igual que en Orbot: mientras
+    hay una ejecución por puente, otra app del móvil puede encontrarlos en `127.0.0.1`, saber que GhostP2 usa
+    puentes y hacer que GhostP2 conecte a otros destinos a través de obfs4 o webtunnel (tráfico atribuido a
+    GhostP2).
+  - **Un Tor anterior mal configurado puede marcar un momento** antes de que lo pare la comprobación
+    `GETCONF UseBridges`: kmp-tor activa la red (`RESETCONF DisableNetwork`) dentro de su arranque, antes de
+    que GhostP2 pueda preguntar. Solo pasaría si se reutilizase un Tor aún vivo arrancado con «No»; para evitarlo,
+    un `stopDaemon` que lanza con Tor aún en marcha deja el transporte envenenado y no se reutiliza.
+  - **Registros que no se pueden quitar**: los `log.Printf` de IPtProxy en sus propios fallos al crear el
+    `Controller` (antes de desactivar sus registros) salen por `__android_log_write`; solo contienen la ruta de
+    `stateDir`. Un `panic` de Go antes de la redirección de los fd 1 y 2 también iría a logcat.
+  - **DNS fuera de Tor** para el host de WebTunnel y los frentes y STUN de Snowflake (§14.11).
+  - **Snowflake** expone tu dirección IP al intermediario (a través de CDN77), a los servidores STUN y a los
+    voluntarios que hacen de puente; no ven el contenido.
+  - **Tamaño**: `libgojni.so` añade unos 8–9 MB comprimidos por ABI a la APK y unos 24–28 MB instalada, también
+    con «No».
+  - **Integración real solo en la prueba manual**: que Tor arranque por cada transporte, el DNS de Go en
+    Android y que logcat quede en silencio se comprueban a mano (PRUEBA-MANUAL).

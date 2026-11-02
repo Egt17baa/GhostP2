@@ -30,6 +30,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.ghostp2.app.StorageState
 import org.ghostp2.app.TestGhostApp
+import org.ghostp2.app.bridgeSupplier
 import org.ghostp2.data.StoreCorruptedException
 import org.ghostp2.data.StoreUnavailableException
 import org.ghostp2.engine.AcceptResult
@@ -39,6 +40,10 @@ import org.ghostp2.engine.EngineErrorKind
 import org.ghostp2.engine.EngineHarness
 import org.ghostp2.engine.EngineStatus
 import org.ghostp2.engine.InvitationState
+import org.ghostp2.engine.TorState
+import org.ghostp2.engine.bridges.BridgeMode
+import org.ghostp2.engine.bridges.BridgeSetup
+import org.ghostp2.engine.bridges.BuiltInBridges
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -301,6 +306,52 @@ class GhostRootTest {
         compose.onNodeWithContentDescription("Desconectar").performClick()
         compose.waitUntil(TIMEOUT) { container.engine.status.value == EngineStatus.Stopped }
         compose.waitUntil(TIMEOUT) { compose.onAllNodesWithContentDescription("Desconectar").fetchSemanticsNodes().isEmpty() }
+    }
+
+    @Test
+    fun bridgeFailedShowsBanner() {
+        runBlocking { app.storage.settings.update { it.copy(bridgeMode = BridgeMode.OBFS4) } }
+        app.tor.bridges = bridgeSupplier(app.storage.settings)
+        app.tor.startFailure = TorState.Error("puente caído", bridge = true)
+        show()
+        waitForText("Aún no tienes contactos")
+
+        compose.onNodeWithText("Activar").performClick()
+
+        waitForText(BRIDGE_FAILED)
+        assertEquals(EngineErrorKind.BRIDGE_FAILED, (container.engine.status.value as EngineStatus.Error).kind)
+        compose.onAllNodesWithText("Sin conexión con Tor").assertCountEquals(0)
+        // Nunca sin puente: el único arranque fue con los obfs4 integrados.
+        assertEquals(listOf(BridgeSetup(BuiltInBridges.OBFS4)), app.tor.bridgeSetups.toList())
+    }
+
+    @Test
+    fun startingByBridgeShowsBridgeProgress() {
+        runBlocking { app.storage.settings.update { it.copy(bridgeMode = BridgeMode.SNOWFLAKE) } }
+        app.tor.bridges = bridgeSupplier(app.storage.settings)
+        app.tor.holdStarts = true
+        show()
+        waitForText("Aún no tienes contactos")
+        compose.onNodeWithText("Activar").performClick()
+        waitForText("Conectando por puente… 0 %")
+    }
+
+    @Test
+    fun settingsBridgesSavesTheChosenMode() {
+        show()
+        waitForText("Aún no tienes contactos")
+        compose.onNodeWithContentDescription("Ajustes").performClick()
+        waitForText("Puentes: No")
+        compose.onNodeWithText("Puentes: No").performScrollTo().performClick()
+        waitForText("Mis puentes")
+        compose.onNodeWithText("obfs4").performClick()
+        compose.onNodeWithText("Guardar").performScrollTo().performClick()
+
+        // Con el motor parado: se guarda, se borra el estado de Tor y se vuelve a Ajustes.
+        waitForText("Puentes: obfs4")
+        compose.waitUntil(TIMEOUT) { app.tor.forgetBridgeStateCalls.get() == 1 }
+        assertEquals(BridgeMode.OBFS4, runBlocking { app.storage.settings.get() }.bridgeMode)
+        assertEquals(EngineStatus.Stopped, container.engine.status.value)
     }
 
     @Test
@@ -678,6 +729,8 @@ class GhostRootTest {
     private fun hasRole(role: Role) = SemanticsMatcher.expectValue(SemanticsProperties.Role, role)
 
     private companion object {
+        const val BRIDGE_FAILED =
+            "No se puede conectar por el puente. Prueba otro tipo de puente o pega puentes nuevos en Ajustes › Puentes."
         const val PAIR_TIMEOUT = 30_000L
         const val TIMEOUT = 10_000L
     }

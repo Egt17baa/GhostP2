@@ -26,9 +26,9 @@ class EngineBannerTest {
     private var activations = 0
     private var disconnections = 0
 
-    private fun show(status: EngineStatus, startFailed: Boolean = false) {
+    private fun show(status: EngineStatus, startFailed: Boolean = false, bridged: Boolean = false) {
         compose.setContent {
-            EngineBanner(status, startFailed, onActivate = { activations++ }, onDisconnect = { disconnections++ })
+            EngineBanner(status, startFailed, onActivate = { activations++ }, onDisconnect = { disconnections++ }, bridged = bridged)
         }
     }
 
@@ -50,6 +50,26 @@ class EngineBannerTest {
         compose.onNodeWithText("Desconectar").performClick()
         assertEquals(1, disconnections)
         assertAbsent("Activar")
+    }
+
+    @Test
+    fun startingByBridgeSaysSo() {
+        show(EngineStatus.StartingTor(25), bridged = true)
+        compose.onNodeWithText("Conectando por puente… 25 %").assertExists()
+        assertAbsent("Conectando a la red Tor… 25 %")
+        compose.onNodeWithText("Desconectar").performClick()
+        assertEquals(1, disconnections)
+    }
+
+    @Test
+    fun bridgeFailedSaysToTryAnotherBridge() {
+        show(EngineStatus.Error("x", EngineErrorKind.BRIDGE_FAILED), bridged = true)
+        compose.onNodeWithText(BRIDGE_FAILED).assertExists()
+        assertAbsent("Sin conexión con Tor")
+        compose.onNodeWithText("Reintentar").performClick()
+        compose.onNodeWithText("Desconectar").performClick()
+        assertEquals(1, activations)
+        assertEquals(1, disconnections)
     }
 
     @Test
@@ -96,5 +116,10 @@ class EngineBannerTest {
         assertEquals(1, activations)
         assertAbsent("GhostP2 está desactivado")
         assertAbsent("Activar")
+    }
+
+    private companion object {
+        const val BRIDGE_FAILED =
+            "No se puede conectar por el puente. Prueba otro tipo de puente o pega puentes nuevos en Ajustes › Puentes."
     }
 }

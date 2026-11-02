@@ -61,6 +61,7 @@ class SettingsScreenTest {
                 settings = settings?.copy(disconnectAfterMinutes = it)
             },
             onWipeAll = { events += "wipe" },
+            onOpenBridges = { events += "bridges" },
         )
     }
 
@@ -128,6 +129,21 @@ class SettingsScreenTest {
         assertEquals(5, settings?.disconnectAfterMinutes)
         compose.onNodeWithText(text(R.string.settings_disconnect_after_5)).assertIsSelected()
         compose.onNodeWithText(text(R.string.settings_disconnect_after_0)).assertIsNotSelected()
+    }
+
+    @Test
+    fun bridgesRowShowsModeAndOpens() {
+        show()
+        compose.onNodeWithText("Puentes").performScrollTo()
+        compose.onNodeWithText("Puentes: No").performScrollTo().performClick()
+        assertEquals(listOf("bridges"), events)
+
+        settings = settings?.copy(bridgeMode = org.ghostp2.engine.bridges.BridgeMode.CUSTOM)
+        compose.onNodeWithText("Puentes: Mis puentes").performScrollTo()
+        settings = settings?.copy(bridgeMode = org.ghostp2.engine.bridges.BridgeMode.SNOWFLAKE)
+        compose.onNodeWithText("Puentes: Snowflake").performScrollTo()
+        settings = settings?.copy(bridgeMode = org.ghostp2.engine.bridges.BridgeMode.OBFS4)
+        compose.onNodeWithText("Puentes: obfs4").performScrollTo()
     }
 
     @Test

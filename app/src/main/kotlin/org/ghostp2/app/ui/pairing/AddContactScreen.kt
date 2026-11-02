@@ -46,6 +46,7 @@ import kotlinx.coroutines.delay
 import org.ghostp2.app.R
 import org.ghostp2.app.ui.GhostTextField
 import org.ghostp2.app.ui.copySensitive
+import org.ghostp2.app.ui.startingText
 import org.ghostp2.engine.EngineErrorKind
 import org.ghostp2.engine.EngineStatus
 import org.ghostp2.engine.InvitationState
@@ -55,8 +56,8 @@ import org.ghostp2.engine.InvitationState
  * "Copiar", "Compartir" y "Crear otra" al caducar, cancelarse o fallar), "Escanear" ([QrScanner],
  * que acepta al leer y pasa a "Pegar") y "Pegar" ([GhostTextField] con [pasted] y "Aceptar", con
  * el estado [accept]). Sin el motor `Online` ([status]): parado, "Activa GhostP2 para añadir
- * contactos" y "Activar"; arrancando, "Conectando a la red Tor…"; con error (o [startFailed]), el
- * aviso del error y "Reintentar" ([onActivate] en los dos casos).
+ * contactos" y "Activar"; arrancando, "Conectando a la red Tor…" (o "Conectando por puente…" con
+ * [bridged], R30); con error (o [startFailed]), el aviso del error y "Reintentar" ([onActivate] en los dos casos).
  *
  * El texto de la invitación no se puede seleccionar (R24): solo se copia con "Copiar", marcado como
  * sensible. Con el motor `Online` y sin invitación (o cancelada al parar el motor) se pide una con
@@ -76,6 +77,7 @@ fun AddContactScreen(
     onActivate: () -> Unit,
     onBack: () -> Unit,
     startFailed: Boolean = false,
+    bridged: Boolean = false,
     clock: () -> Long = System::currentTimeMillis,
 ) {
     var tab by remember { mutableIntStateOf(TAB_MINE) }
@@ -99,7 +101,7 @@ fun AddContactScreen(
     ) { padding ->
         Column(Modifier.padding(padding).fillMaxSize()) {
             if (!online) {
-                NotOnline(status, startFailed, onActivate)
+                NotOnline(status, startFailed, bridged, onActivate)
                 return@Column
             }
             PrimaryTabRow(selectedTabIndex = tab) {
@@ -125,13 +127,14 @@ fun AddContactScreen(
 
 /** Motor no `Online`: qué pasa y, salvo mientras arranca, cómo activarlo (o reintentar). */
 @Composable
-private fun NotOnline(status: EngineStatus, startFailed: Boolean, onActivate: () -> Unit) {
+private fun NotOnline(status: EngineStatus, startFailed: Boolean, bridged: Boolean, onActivate: () -> Unit) {
     val retry = stringResource(R.string.action_retry)
     val (message, action) = when {
         startFailed -> stringResource(R.string.banner_unexpected) to retry
-        status is EngineStatus.StartingTor -> stringResource(R.string.banner_starting, status.percent) to null
+        status is EngineStatus.StartingTor -> stringResource(startingText(bridged), status.percent) to null
         status is EngineStatus.Error && status.kind == EngineErrorKind.STORAGE -> stringResource(R.string.banner_storage_error) to retry
         status is EngineStatus.Error && status.kind == EngineErrorKind.TOR_STUCK -> stringResource(R.string.banner_tor_stuck) to retry
+        status is EngineStatus.Error && status.kind == EngineErrorKind.BRIDGE_FAILED -> stringResource(R.string.banner_bridge_failed) to retry
         status is EngineStatus.Error -> stringResource(R.string.banner_tor_error) to retry
         else -> stringResource(R.string.add_not_online) to stringResource(R.string.action_activate)
     }

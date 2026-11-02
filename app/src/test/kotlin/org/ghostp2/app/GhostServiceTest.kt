@@ -24,10 +24,14 @@ import org.ghostp2.app.lock.Armed
 import org.ghostp2.app.lock.ArmedFile
 import org.ghostp2.data.StoreCorruptedException
 import org.ghostp2.data.StoreUnavailableException
+import org.ghostp2.engine.EngineErrorKind
 import org.ghostp2.engine.EngineHarness
 import org.ghostp2.engine.EngineStatus
 import org.ghostp2.engine.Presence
 import org.ghostp2.engine.TorState
+import org.ghostp2.engine.bridges.BridgeMode
+import org.ghostp2.engine.bridges.BridgeSetup
+import org.ghostp2.engine.bridges.BuiltInBridges
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -365,6 +369,71 @@ class GhostServiceTest {
         now += 25_000
         callback.onAvailable(ShadowNetwork.newInstance(3))
         eventually { engine.status.value == EngineStatus.Online }
+    }
+
+    @Test
+    fun networkReturnRetriesSameBridgeNeverDirect() {
+        runBlocking { app.storage.settings.update { it.copy(bridgeMode = BridgeMode.OBFS4) } }
+        app.tor.bridges = bridgeSupplier(app.storage.settings)
+        app.tor.startFailure = TorState.Error("puente caído", bridge = true)
+        var now = 1_000_000L
+        val service = startService().get()
+        service.elapsedRealtime = { now }
+        eventually { (engine.status.value as? EngineStatus.Error)?.kind == EngineErrorKind.BRIDGE_FAILED }
+        val callback = networkCallbacks().single()
+
+        // Vuelve la red con el puente aún caído: otro intento, con el mismo puente, y sigue en error.
+        callback.onAvailable(ShadowNetwork.newInstance(1))
+        eventually { app.tor.bridgeSetups.size == 2 }
+        eventually { (engine.status.value as? EngineStatus.Error)?.kind == EngineErrorKind.BRIDGE_FAILED }
+
+        // Pasados 30 s y con el puente ya bien: en línea, por el puente.
+        app.tor.startFailure = null
+        now += 31_000
+        callback.onAvailable(ShadowNetwork.newInstance(2))
+        eventually { engine.status.value == EngineStatus.Online }
+        val obfs4 = BridgeSetup(BuiltInBridges.OBFS4)
+        assertEquals(listOf(obfs4, obfs4, obfs4), app.tor.bridgeSetups.toList())
+        assertTrue(app.tor.bridged)
+    }
+
+    @Test
+    fun reconnectWhileStartingKeepsTheServiceAndStartsAgain() {
+        app.tor.holdStarts = true
+        val controller = startService()
+        val service = controller.get()
+        // Tor ya arrancando (retenido en Starting), no solo el motor.
+        eventually { engine.status.value is EngineStatus.StartingTor && app.tor.state.value is TorState.Starting }
+        app.tor.holdStarts = false
+        val mark = app.tor.calls.size
+
+        val restarted = app.container.reconnect()
+
+        assertTrue(runBlocking { withTimeout(20_000) { restarted.await() } })
+        eventually { engine.status.value == EngineStatus.Online }
+        Thread.sleep(300)
+        shadowOf(Looper.getMainLooper()).idle()
+        // El servicio no se enteró de la parada intermedia: sigue en primer plano con su NetworkCallback.
+        assertTrue(service.inForeground)
+        assertFalse(shadowOf(service).isStoppedBySelf)
+        assertEquals(1, networkCallbacks().size)
+        assertEquals(EngineStatus.Online, engine.status.value)
+        val calls = app.tor.calls.drop(mark)
+        assertEquals("$calls", listOf("forget", "start"), calls.dropWhile { it == "stop" })
+        assertTrue("$calls", calls.first() == "stop")
+    }
+
+    @Test
+    fun reconnectWithBrokenStorageStopsTheService() {
+        startService()
+        eventually { engine.status.value == EngineStatus.Online }
+        app.storage.failure = StoreUnavailableException(IOException("x"))
+
+        val restarted = app.container.reconnect()
+
+        assertFalse(runBlocking { withTimeout(20_000) { restarted.await() } })
+        assertNotNull(nextStoppedService())
+        assertEquals(EngineStatus.Stopped, engine.status.value)
     }
 
     @Test

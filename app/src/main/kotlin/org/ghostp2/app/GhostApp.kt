@@ -53,6 +53,8 @@ import org.ghostp2.engine.MessengerEngine
 import org.ghostp2.engine.Notice
 import org.ghostp2.engine.TorTransport
 import org.ghostp2.engine.UnpairDelivery
+import org.ghostp2.engine.bridges.BridgeSetup
+import org.ghostp2.engine.bridges.bridgeSetupFor
 import org.ghostp2.tor.KmpTorTransport
 import java.io.File
 
@@ -183,12 +185,16 @@ class AppContainer internal constructor(
     val tor: TorTransport,
     private val store: AppStorage,
 ) {
-    /** Producción: Tor con kmp-tor y `ghostp2.bin` cifrado con Android Keystore. */
-    constructor(context: Context) : this(
+    /**
+     * Producción: Tor con kmp-tor y `ghostp2.bin` cifrado con Android Keystore. Cada arranque de Tor lee el
+     * ajuste «Puentes» guardado en ese momento ([bridgeSupplier], R30).
+     */
+    constructor(context: Context) : this(context, StoredAppStorage(createRepositories(context.applicationContext)))
+
+    private constructor(context: Context, store: AppStorage) : this(
         context,
-        // Sin puentes por ahora (R30): el ajuste «Puentes» se conecta aquí en la Task 3.
-        KmpTorTransport(context.applicationContext) { null },
-        StoredAppStorage(createRepositories(context.applicationContext)),
+        KmpTorTransport(context.applicationContext, bridgeSupplier(store.settings)),
+        store,
     )
 
     internal val appContext: Context = context.applicationContext
@@ -330,8 +336,15 @@ class AppContainer internal constructor(
         }
     }
 
-    /** Un arranque pedido con [start]: su corrutina y su resultado. */
-    private class StartRun(val job: Job, val result: Deferred<Boolean>)
+    /**
+     * Un arranque pedido con [start] (o [reconnect]): su resultado y su corrutina. [handedOver] (con
+     * `control`): [reconnect] pasó [result] al arranque siguiente, así que cancelar este no lo completa
+     * con `false`.
+     */
+    private class StartRun(val result: CompletableDeferred<Boolean>) {
+        lateinit var job: Job
+        var handedOver = false
+    }
 
     // Protegidos por `control`.
     private val control = Any()
@@ -375,8 +388,12 @@ class AppContainer internal constructor(
      */
     fun start(): Deferred<Boolean> = synchronized(control) {
         startRun?.takeIf { it.job.isActive }?.let { return it.result }
+        launchStartLocked(CompletableDeferred())
+    }
+
+    /** Lanza un arranque que completa [result] (con `control` tomado; espera a la parada en curso). */
+    private fun launchStartLocked(result: CompletableDeferred<Boolean>): Deferred<Boolean> {
         val previousStop = stopJob
-        val result = CompletableDeferred<Boolean>()
         mutableStartFailed.value = false
         val generation = wipeGeneration
         val job = scope.launch {
@@ -397,10 +414,61 @@ class AppContainer internal constructor(
                 runCatching { engine.stop() }
             }
         }
-        // Cancelado o con el almacenamiento fallando: false.
-        job.invokeOnCompletion { result.complete(false) }
-        startRun = StartRun(job, result)
+        val run = StartRun(result)
+        run.job = job
+        // Cancelado o con el almacenamiento fallando: false (salvo si [reconnect] pasó el resultado a otro).
+        job.invokeOnCompletion { if (!synchronized(control) { run.handedOver }) result.complete(false) }
+        startRun = run
+        return result
+    }
+
+    /**
+     * Reconecta para usar un ajuste de puentes nuevo (R30): como [stop] (cancela un arranque en curso y para el
+     * motor: cierra Tor y las sesiones, borra las conversaciones de memoria y vacía la cola de fotos), después
+     * [TorTransport.forgetBridgeState] y un arranque nuevo, que lee el ajuste guardado. El ajuste debe estar
+     * guardado antes de llamar.
+     *
+     * Quien esperaba un arranque en curso (el servicio) recibe el resultado del nuevo, no un `false` de la
+     * parada intermedia: el servicio sigue en primer plano. Si no había ninguno y el arranque nuevo no llega a
+     * hacerse (almacenamiento ilegible) sin que nadie pida otro, se detiene el servicio, como en su propio
+     * arranque. Si no se puede borrar el estado de Tor (Tor atascado), se arranca igual: su marcador sigue y el
+     * arranque lo vuelve a intentar.
+     */
+    fun reconnect(): Deferred<Boolean> = synchronized(control) {
+        val carried = startRun?.takeIf { it.job.isActive }?.also { it.handedOver = true }?.result
+        val stopped = stop()
+        stopJob = scope.launch {
+            stopped.join()
+            forgetBridgeStateQuietly()
+        }
+        val result = launchStartLocked(carried ?: CompletableDeferred())
+        if (carried == null) {
+            scope.launch {
+                val started = result.await()
+                val superseded = synchronized(control) { startRun != null && startRun?.result !== result }
+                if (!started && !superseded) appContext.stopService(Intent(appContext, GhostService::class.java))
+            }
+        }
         result
+    }
+
+    /**
+     * Cambio del ajuste «Puentes» con el motor parado (R30): tras la parada en curso, si la hay, borra el estado
+     * de Tor ([TorTransport.forgetBridgeState]) para que el siguiente arranque empiece de cero.
+     */
+    suspend fun forgetBridgeState() {
+        synchronized(control) { stopJob }?.join()
+        forgetBridgeStateQuietly()
+    }
+
+    private suspend fun forgetBridgeStateQuietly() {
+        try {
+            tor.forgetBridgeState()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            // Tor atascado: el marcador de KmpTorTransport sigue y el siguiente arranque vuelve a borrar.
+        }
     }
 
     /** Detiene el motor; antes cancela (y espera) un arranque en curso. */
@@ -597,6 +665,16 @@ class AppContainer internal constructor(
         appContext.stopService(Intent(appContext, GhostService::class.java))
         stop().join()
     }
+}
+
+/**
+ * Ajuste «Puentes» para cada arranque de Tor (R30): lee los ajustes **guardados en ese momento** (nunca una copia
+ * anterior) y devuelve [bridgeSetupFor]; `null` solo con «No». Un fallo al leer se lanza tal cual (también la
+ * cancelación): `KmpTorTransport` lo da como error de Tor sin arrancar, nunca como «sin puentes».
+ */
+internal fun bridgeSupplier(settings: SettingsRepository): suspend () -> BridgeSetup? = {
+    val current = settings.get()
+    bridgeSetupFor(current.bridgeMode, current.customBridges)
 }
 
 /** Número de arranque del móvil (`Settings.Global.BOOT_COUNT`), o `null` si no se puede leer. */

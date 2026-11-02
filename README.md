@@ -11,6 +11,8 @@ contacto no está conectado. Descartado".
 - Sesiones Noise `KKpsk2` con claves efímeras nuevas en cada conexión y ratchet con una clave por
   mensaje, relleno y contador estricto.
 - Texto y fotos. Nada de mensajes, fotos ni claves de sesión en disco.
+- Puentes de Tor disfrazados (obfs4, Snowflake o tus propios obfs4/WebTunnel) para redes que bloquean
+  Tor; nunca se conecta sin puente si lo has elegido.
 
 ## Estado
 
@@ -70,8 +72,23 @@ gestor de archivos) o con `adb install app-arm64-v8a-release.apk`.
    "✓ entregado" (recibido por su app, no leído). Las fotos se eligen con el selector de fotos del
    sistema; "Guardar" en el visor es la única forma de que una foto llegue al disco.
 5. **Ajustes**: bloqueo con huella o PIN, ocultar el nombre en las notificaciones, tamaño de las
-   fotos, activar al encender el móvil y "Desconectar al salir de la app" ("Nunca" por defecto; a
-   los 2, 5 o 15 minutos fuera de la app cierra Tor y borra las conversaciones, R29).
+   fotos, activar al encender el móvil, "Desconectar al salir de la app" ("Nunca" por defecto; a
+   los 2, 5 o 15 minutos fuera de la app cierra Tor y borra las conversaciones, R29) y "Puentes"
+   (abajo).
+6. **Puentes** (Ajustes › Puentes, R30): "No" por defecto (Tor directo, como siempre). Si tu red
+   bloquea Tor o no quieres que se note que lo usas:
+   - **obfs4**: los puentes obfs4 que trae Tor Browser.
+   - **Snowflake**: con un aviso antes de elegirlo. Contacta con un intermediario a través de una red
+     de distribución de contenidos, con servidores STUN públicos (ninguno de Google) y con voluntarios
+     que hacen de puente; ven tu dirección IP, no tus mensajes. Úsalo solo si los otros no funcionan.
+   - **Mis puentes**: lo más discreto. Pide puentes obfs4 o WebTunnel en
+     [bridges.torproject.org](https://bridges.torproject.org/) (desde el navegador; GhostP2 nunca los
+     descarga solo) y pégalos o escanea su código QR; como mucho 10. WebTunnel solo está aquí.
+
+   Si el puente no funciona, sale "No se puede conectar por el puente…" y GhostP2 **nunca** se conecta
+   sin él. Cambiar el ajuste con GhostP2 en marcha pide reconectar (se cierran las conversaciones
+   abiertas). Con un puente, el estado de Tor se borra cada vez que se para, así que cada conexión
+   arranca en frío (unos 30–60 s más).
 
 ## Compilar y probar
 
@@ -176,7 +193,11 @@ Lo que GhostP2 **no** protege ni hace, en resumen (detalle en
   sistema. La cámara solo se usa para escanear el QR de una invitación.
 - **Android Keystore obligatorio**: si no funciona, la app se niega a usar el almacenamiento (no
   cae a guardar la clave en claro) y no arranca.
-- **Sin puentes** (obfs4, Snowflake): en redes que bloquean Tor no funciona.
+- **Puentes** (R30): sin ellos, en redes que bloquean Tor no funciona. Con ellos, los transportes
+  resuelven fuera de Tor, con el DNS del móvil, el host de WebTunnel y los frentes y STUN de Snowflake;
+  un puente caído se detecta a los 3 minutos del arranque; sus puertos locales no tienen
+  autenticación (como en Orbot); y si vuelves a una versión de GhostP2 que no conoce el modo guardado,
+  se lee como "No" (directo). Detalle en [PROTOCOLO §14.11 y §15](docs/PROTOCOLO.md#1411-puentes-regla-r30).
 - **Segundo plano**: con el ahorro de batería de Android o del fabricante la conexión puede
   cortarse. "Activar GhostP2 al encender el móvil" está desactivado por defecto (R20), y aun
   activado el sistema puede no dejarlo arrancar. Si Tor falla, al volver la red se reintenta una
@@ -196,4 +217,13 @@ Lo que GhostP2 **no** protege ni hace, en resumen (detalle en
 
 ## Licencia
 
-[Apache-2.0](LICENSE).
+El código de GhostP2 es [Apache-2.0](LICENSE).
+
+Para los puentes, la APK incluye [IPtProxy](https://github.com/tladesignz/IPtProxy) 5.7.0 (MIT), que
+lleva [Lyrebird](https://gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/lyrebird)
+(obfs4 y WebTunnel, **GPL-3.0**) y
+[Snowflake](https://gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/snowflake)
+(BSD-3-Clause) como biblioteca nativa (`libgojni.so`). Por eso **la APK en conjunto se distribuye bajo
+GPL-3.0** (Apache-2.0 es compatible con GPL-3.0 en ese sentido); el código de GhostP2 sigue en
+Apache-2.0. El código fuente correspondiente de esa biblioteca es el de la etiqueta `5.7.0` de IPtProxy
+y las versiones de Lyrebird y Snowflake que fija. Ajustes › Acerca de lo resume.

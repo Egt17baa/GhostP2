@@ -237,6 +237,35 @@ Con A y B activos, emparejados y "en línea", y algún mensaje en el chat de A c
 | 85 | Abre GhostP2 en A, "Activar" si hace falta, y sal a la pantalla de inicio. Antes de 1 minuto, mata el proceso como en el paso 63 (`run-as … kill -9`). Espera a que el servicio vuelva solo y no abras la app. | Vuelve "GhostP2 activo · cifrado" y, a los 2 minutos de haber salido (no de que volviera el servicio), desaparece la notificación fija y B ve a A "desconectado". |
 | 86 | Repite el paso 85, pero mata el proceso a 1 minuto y 55 segundos de haber salido, y no abras la app. | Si el servicio vuelve después de los 2 minutos (el sistema decide cuándo), no aparece ninguna notificación de GhostP2 (ni la fija ni "se ha detenido") y B no ve a A "en línea". Si vuelve antes, corta a los 2 minutos como en el paso 85. Al abrir la app (también si la abres pasados los 2 minutos y antes de que vuelva el servicio): "GhostP2 está desactivado" con "Activar", y el servicio ya no vuelve después (ni la notificación fija ni Tor). Vuelve a dejar "Nunca" al terminar. |
 
+### Puentes (R30)
+
+Con el APK de **depuración** en A (los pasos con `run-as` lo necesitan), A y B emparejados y "Nunca"
+en "Desconectar al salir de la app". Puentes propios: pide dos obfs4 y un webtunnel en
+<https://bridges.torproject.org/options> (o con el bot de Telegram), en un navegador del ordenador,
+nunca desde GhostP2. Para mirar el tráfico de A sin root sirve PCAPdroid (código abierto, por app) o
+una captura en el router. Deja en marcha en el ordenador, durante toda la sección:
+
+```sh
+adb -s <serie-A> logcat -c && adb -s <serie-A> logcat -s GoLog
+```
+
+| # | Paso | Resultado esperado |
+|---|---|---|
+| 87 | En A: "Ajustes" › "Puentes". | La fila dice "Puentes: No". Se abre la pantalla con el texto «Los puentes disfrazan tu conexión…» y "No" marcado, más "obfs4", "Snowflake" y "Mis puentes" (no hay "WebTunnel"). |
+| 88 | Con A en **wifi** y activo, elige "obfs4" y "Guardar". | Diálogo «Para usar los nuevos puentes hay que reconectar. Se cerrarán las conversaciones abiertas.». Con "Cancelar" no cambia nada (vuelve a abrir la pantalla: sigue "No"). Repite y pulsa "Reconectar": el chat con B se vacía, "Conectando por puente… N %" y, en unos minutos, en línea con B. La notificación fija no nombra el puente. En la captura, A solo conecta a las IP de los 7 puentes obfs4 integrados (ningún repetidor de Tor directo). |
+| 89 | Desactiva el wifi para pasar a **datos móviles** (4G/5G). | A vuelve a "en línea" con B, también por puente (en la captura, solo IP de los puentes). |
+| 90 | Elige "Snowflake". | Antes de marcarlo, el aviso «Snowflake contacta con un intermediario a través de una red de distribución de contenidos, con servidores STUN públicos y con voluntarios que hacen de puente. No ven tus mensajes, pero sí tu dirección IP. Úsalo solo si los otros no funcionan.». "Cancelar" deja la opción anterior; "Usar Snowflake", "Guardar" y "Reconectar" conectan por Snowflake. En la captura: DNS de `app.datapacket.com`/`www.datapacket.com` y de los STUN, ninguno de Google (`stun.l.google.com`, `ampproject`). |
+| 91 | Elige "Mis puentes" y pega tus dos obfs4 y el webtunnel (con el prefijo `Bridge` y una línea repetida). "Guardar" y "Reconectar". | Se guardan (al volver, las líneas aparecen sin `Bridge` y sin la repetida) y A conecta por puente. En la captura, A conecta solo a tus puentes y resuelve el host `url=` del webtunnel. |
+| 92 | En "Mis puentes", borra el texto, pulsa "Escanear QR" (concede la cámara) y escanea el QR de bridges.torproject.org. "Guardar" y "Reconectar". | El campo se llena con las líneas del QR y A conecta. Un QR que no sea de puentes (por ejemplo, una invitación de GhostP2) se ignora. |
+| 93 | En "Mis puentes", escribe `obfs4 basura` en la línea 1 y `meek_lite 192.0.2.1:80 0123456789ABCDEF0123456789ABCDEF01234567` en la 2, y "Guardar". Después pega 11 líneas válidas. | «Línea 1 no válida» y «Línea 2 no válida»; con 11, «Máximo 10 puentes». No se guarda nada (al volver a la pantalla siguen los puentes anteriores). |
+| 94 | Pon en "Mis puentes" un obfs4 con una IP que no responda (copia uno tuyo y cambia la IP por `192.0.2.1`), "Guardar" y "Reconectar". | "Conectando por puente…" y, en como mucho 3 minutos, «No se puede conectar por el puente. Prueba otro tipo de puente o pega puentes nuevos en Ajustes › Puentes.». **Nunca** en línea: B no ve a A, y la captura no muestra ninguna conexión directa a Tor. Activa y desactiva el modo avión: lo vuelve a intentar con el mismo puente y vuelve al error. |
+| 95 | Con A en ese error, elige "obfs4" y "Guardar". | Sin diálogo: reconecta enseguida y A vuelve a en línea por puente. |
+| 96 | Pulsa "Desconectar" y, en el ordenador: `adb -s <serie-A> shell run-as org.ghostp2.app ls no_backup`. | No aparecen `tor`, `pt` ni `tor-bridged` (solo `ghostp2.bin` y, si acaso, `auto-disconnect`). Con `adb -s <serie-A> shell ss -tn` (o la captura), unos segundos después ninguna conexión a los puentes. |
+| 97 | "Activar" (sigue "obfs4") y, con A ya en línea por puente, mata el proceso sin que vuelva: `adb -s <serie-A> shell am force-stop org.ghostp2.app`. Mira `run-as org.ghostp2.app ls no_backup`. Abre GhostP2 (motor parado), "Ajustes" › "Puentes", elige "No", "Guardar" y vuelve a mirar. | Tras matarlo: `tor`, `pt` y `tor-bridged` siguen ahí (no hubo parada). Al guardar "No" con el motor parado no hay diálogo y se borran los tres. (El borrado al arrancar por el marcador, con cualquier modo, lo cubre `markerFromCrashWipesBeforeStart`.) |
+| 98 | Con "No", "Desconectar" y "Activar", y mira la captura y `ls no_backup`. Después, en el mismo proceso, "obfs4", "No" y otra vez "obfs4" (reconectando cada vez). | Con "No", tráfico idéntico al de antes de R30 (repetidores de Tor directos, sin DNS de IPtProxy), sin `pt` ni `tor-bridged`, y `tor` se conserva al desconectar. Cada cambio usa exactamente el ajuste elegido: puentes solo en las ejecuciones con "obfs4". |
+| 99 | Repasa la ventana de `logcat -s GoLog` del ordenador. Repite el paso 90 en una red que bloquee Snowflake (por ejemplo, un punto de acceso que bloquee los STUN) y mira de nuevo. | `GoLog` sigue **en silencio** en todos los pasos (ni errores de pion/WebRTC ni direcciones). Tampoco hay nada de GhostP2 en `adb logcat` que nombre el puente. |
+| 100 | Con el APK de **versión** (pasos 76–79), repite los pasos 88, 90 y 96 (sin `run-as`). | Igual: R8 no rompe IPtProxy ni la configuración de puentes de kmp-tor. |
+
 ## Lo que esta prueba no cubre
 
 - **Identidad cambiada** ("La identidad de <nombre> ha cambiado"): hace falta que un solo lado

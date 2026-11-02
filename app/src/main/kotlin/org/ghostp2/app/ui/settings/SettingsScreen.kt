@@ -1,6 +1,7 @@
 package org.ghostp2.app.ui.settings
 
 import androidx.annotation.StringRes
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -45,13 +46,14 @@ import androidx.compose.ui.unit.dp
 import org.ghostp2.app.R
 import org.ghostp2.data.AppSettings
 import org.ghostp2.engine.Notice
+import org.ghostp2.engine.bridges.BridgeMode
 
 /**
  * Ajustes: Seguridad (bloqueo y "Bloquear tras"), Notificaciones ("Ocultar el nombre del contacto"),
  * Fotos ("Tamaño máximo"), Segundo plano (exención de batería, ayuda del fabricante [manufacturerHint],
- * "Activar GhostP2 al encender el móvil" y "Desconectar al salir de la app", R29), Datos ("Borrar todo"
- * con doble confirmación) y Acerca de (versión, licencia, mi .onion abreviada y el último aviso de
- * diagnóstico). [settings] `null` ⇒ cargando.
+ * "Activar GhostP2 al encender el móvil" y "Desconectar al salir de la app", R29), Puentes (el modo actual;
+ * al tocarlo, [onOpenBridges] abre [BridgesScreen], R30), Datos ("Borrar todo" con doble confirmación) y
+ * Acerca de (versión, licencias, mi .onion abreviada y el último aviso de diagnóstico). [settings] `null` ⇒ cargando.
  * Los diálogos abiertos son simple `remember` (sin contenido).
  */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -76,6 +78,7 @@ fun SettingsScreen(
     onSetStartOnBoot: (Boolean) -> Unit,
     onSetDisconnectAfter: (Int) -> Unit,
     onWipeAll: () -> Unit,
+    onOpenBridges: () -> Unit,
 ) {
     Scaffold(
         topBar = {
@@ -135,12 +138,20 @@ fun SettingsScreen(
             }
             Text(stringResource(R.string.settings_disconnect_after_detail), style = MaterialTheme.typography.bodySmall)
 
+            Section(R.string.settings_section_bridges)
+            Text(
+                stringResource(R.string.settings_bridges_row, stringResource(bridgeModeLabel(settings.bridgeMode))),
+                Modifier.fillMaxWidth().clickable(role = Role.Button, onClick = onOpenBridges).padding(vertical = 12.dp),
+                style = MaterialTheme.typography.bodyLarge,
+            )
+
             Section(R.string.settings_section_data)
             WipeAll(wiping = wiping, wipeFailed = wipeFailed, onWipeAll = onWipeAll)
 
             Section(R.string.settings_section_about)
             Text(stringResource(R.string.settings_version, version))
             Text(stringResource(R.string.settings_license))
+            Text(stringResource(R.string.settings_license_components), style = MaterialTheme.typography.bodySmall)
             Text(
                 if (myOnion != null) stringResource(R.string.settings_my_onion, abbreviateOnion(myOnion))
                 else stringResource(R.string.settings_my_onion_none),
@@ -228,6 +239,15 @@ private fun RadioRow(label: String, selected: Boolean, onSelect: () -> Unit) {
         RadioButton(selected = selected, onClick = null)
         Text(label, Modifier.padding(start = 8.dp))
     }
+}
+
+/** Nombre del modo de «Puentes», el mismo en Ajustes y en [BridgesScreen]. */
+@StringRes
+internal fun bridgeModeLabel(mode: BridgeMode): Int = when (mode) {
+    BridgeMode.NONE -> R.string.bridges_none
+    BridgeMode.OBFS4 -> R.string.bridges_obfs4
+    BridgeMode.SNOWFLAKE -> R.string.bridges_snowflake
+    BridgeMode.CUSTOM -> R.string.bridges_custom
 }
 
 @StringRes

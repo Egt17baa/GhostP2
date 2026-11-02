@@ -82,6 +82,7 @@ class AddContactScreenTest {
         accept: AcceptUi = AcceptUi.Idle,
         status: EngineStatus = if (online) EngineStatus.Online else EngineStatus.Stopped,
         startFailed: Boolean = false,
+        bridged: Boolean = false,
     ) {
         compose.setContent {
             context = LocalContext.current
@@ -98,6 +99,7 @@ class AddContactScreenTest {
                     onActivate = { activations++ },
                     onBack = {},
                     startFailed = startFailed,
+                    bridged = bridged,
                     clock = { NOW },
                 )
             }
@@ -154,6 +156,24 @@ class AddContactScreenTest {
     fun failedStartShowsErrorAndRetry() {
         show(online = false, invitation = null, startFailed = true)
         compose.onNodeWithText("Error inesperado").assertExists()
+        compose.onNodeWithText("Reintentar").performClick()
+        assertEquals(1, activations)
+    }
+
+    @Test
+    fun bridgeStartAndFailureSayBridge() {
+        var status by mutableStateOf<EngineStatus>(EngineStatus.StartingTor(30))
+        compose.setContent {
+            AddContactScreen(
+                status = status, invitation = null, accept = AcceptUi.Idle, pasted = "", onPastedChange = {},
+                onCreateInvitation = {}, onAccept = {}, onActivate = { activations++ }, onBack = {}, bridged = true,
+            )
+        }
+        compose.onNodeWithText("Conectando por puente… 30 %").assertExists()
+        status = EngineStatus.Error("x", EngineErrorKind.BRIDGE_FAILED)
+        compose.onNodeWithText(
+            "No se puede conectar por el puente. Prueba otro tipo de puente o pega puentes nuevos en Ajustes › Puentes.",
+        ).assertExists()
         compose.onNodeWithText("Reintentar").performClick()
         assertEquals(1, activations)
     }

@@ -67,10 +67,12 @@ import org.ghostp2.app.ui.pairing.AddContactScreen
 import org.ghostp2.app.ui.pairing.NameContactScreen
 import org.ghostp2.app.ui.pairing.NameContactViewModel
 import org.ghostp2.app.ui.pairing.PairingViewModel
+import org.ghostp2.app.ui.settings.BridgesScreen
 import org.ghostp2.app.ui.settings.SettingsScreen
 import org.ghostp2.app.ui.settings.SettingsViewModel
 import org.ghostp2.data.AppSettings
 import org.ghostp2.engine.EngineStatus
+import org.ghostp2.engine.bridges.BridgeMode
 
 /** Lo que la interfaz pide a la actividad: servicio, permiso de notificaciones y exención de batería. */
 class ActivityActions(
@@ -216,7 +218,7 @@ private fun ReadyRoot(container: AppContainer, actions: ActivityActions, navCont
             val status by container.engine.status.collectAsStateWithLifecycle()
             ContactsScreen(
                 state = state,
-                banner = { RootBanner(container, actions) },
+                banner = { RootBanner(container, actions, bridged = current.bridgeMode != BridgeMode.NONE) },
                 onOpen = dropUnlessResumedWith { row: ContactRow -> navController.open(openRoute(row)) },
                 onAdd = dropUnlessResumed { navController.open(Routes.ADD) },
                 onSettings = dropUnlessResumed { navController.open(Routes.SETTINGS) },
@@ -253,6 +255,7 @@ private fun ReadyRoot(container: AppContainer, actions: ActivityActions, navCont
                 onActivate = { ui.launch { if (container.checkStorage() == StorageState.Ok) actions.activate() } },
                 onBack = dropUnlessResumed { navController.popBackStack() },
                 startFailed = startFailed,
+                bridged = current.bridgeMode != BridgeMode.NONE,
             )
         }
         composable(Routes.NAME) { entry ->
@@ -364,7 +367,15 @@ private fun ReadyRoot(container: AppContainer, actions: ActivityActions, navCont
             )
         }
         composable(Routes.SETTINGS) {
-            SettingsRoute(container, actions, onBack = dropUnlessResumed { navController.popBackStack() })
+            SettingsRoute(
+                container,
+                actions,
+                onBack = dropUnlessResumed { navController.popBackStack() },
+                onOpenBridges = dropUnlessResumed { navController.open(Routes.BRIDGES) },
+            )
+        }
+        composable(Routes.BRIDGES) {
+            BridgesRoute(container, onBack = dropUnlessResumed { navController.popBackStack() })
         }
     }
     // Tras "Desconectar al salir de la app" (R29), la lista con "Activar", como tras "Desconectar": el
@@ -379,7 +390,7 @@ private fun ReadyRoot(container: AppContainer, actions: ActivityActions, navCont
 }
 
 @Composable
-private fun SettingsRoute(container: AppContainer, actions: ActivityActions, onBack: () -> Unit) {
+private fun SettingsRoute(container: AppContainer, actions: ActivityActions, onBack: () -> Unit, onOpenBridges: () -> Unit) {
     val vm = ghostViewModel(container) { SettingsViewModel(it) }
     val settings by vm.state.collectAsStateWithLifecycle()
     val lockNeedsDeviceLock by vm.lockNeedsDeviceLock.collectAsStateWithLifecycle()
@@ -416,6 +427,24 @@ private fun SettingsRoute(container: AppContainer, actions: ActivityActions, onB
         onSetStartOnBoot = vm::setStartOnBoot,
         onSetDisconnectAfter = vm::setDisconnectAfter,
         onWipeAll = vm::wipeAll,
+        onOpenBridges = onOpenBridges,
+    )
+}
+
+/** Ajustes › Puentes (R30), con su propio [SettingsViewModel] (el cambio pendiente de reconexión vive en él). */
+@Composable
+private fun BridgesRoute(container: AppContainer, onBack: () -> Unit) {
+    val vm = ghostViewModel(container) { SettingsViewModel(it) }
+    val settings by vm.state.collectAsStateWithLifecycle()
+    val saveFailed by vm.saveFailed.collectAsStateWithLifecycle()
+    BridgesScreen(
+        settings = settings,
+        saveFailed = saveFailed,
+        onBack = onBack,
+        onSave = vm::setBridges,
+        onConfirmReconnect = vm::confirmReconnect,
+        onCancelReconnect = vm::cancelReconnect,
+        onDone = onBack,
     )
 }
 
@@ -463,10 +492,10 @@ private fun <T> dropUnlessResumedWith(block: (T) -> Unit): (T) -> Unit {
 
 /**
  * [EngineBanner] del motor del contenedor. "Activar" y "Reintentar" comprueban antes el almacenamiento:
- * si falla, la raíz muestra [StorageErrorScreen] en lugar de arrancar.
+ * si falla, la raíz muestra [StorageErrorScreen] en lugar de arrancar. [bridged]: el ajuste «Puentes» no es «No» (R30).
  */
 @Composable
-private fun RootBanner(container: AppContainer, actions: ActivityActions) {
+private fun RootBanner(container: AppContainer, actions: ActivityActions, bridged: Boolean) {
     val status by container.engine.status.collectAsStateWithLifecycle()
     val startFailed by container.startFailed.collectAsStateWithLifecycle()
     val ui = rememberCoroutineScope()
@@ -475,6 +504,7 @@ private fun RootBanner(container: AppContainer, actions: ActivityActions) {
         startFailed = startFailed,
         onActivate = { ui.launch { if (container.checkStorage() == StorageState.Ok) actions.activate() } },
         onDisconnect = actions.disconnect,
+        bridged = bridged,
     )
 }
 

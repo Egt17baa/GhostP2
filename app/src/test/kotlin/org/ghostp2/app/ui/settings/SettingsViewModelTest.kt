@@ -20,6 +20,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.ghostp2.app.Notifications
+import org.ghostp2.app.bridgeSupplier
 import org.ghostp2.app.R
 import org.ghostp2.app.TestGhostApp
 import org.ghostp2.app.eventually
@@ -30,6 +31,9 @@ import org.ghostp2.engine.EngineHarness
 import org.ghostp2.engine.EngineStatus
 import org.ghostp2.engine.Notice
 import org.ghostp2.engine.Presence
+import org.ghostp2.engine.bridges.BridgeMode
+import org.ghostp2.engine.bridges.BridgeSetup
+import org.ghostp2.engine.bridges.BuiltInBridges
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -50,6 +54,7 @@ class SettingsViewModelTest {
 
     @After
     fun tearDown() {
+        watchers.forEach { it.cancel() }
         store.clear()
         runBlocking { app.container.engine.stop() }
     }
@@ -58,6 +63,193 @@ class SettingsViewModelTest {
         ViewModelProvider.create(store, viewModelFactory { initializer { SettingsViewModel(app.container) } })[SettingsViewModel::class]
 
     private fun stored(): AppSettings = runBlocking { app.storage.settings.get() }
+
+    /** Como en producción: el Tor falso lee el ajuste guardado en cada arranque. */
+    private fun withBridgeSupplier() {
+        app.tor.bridges = bridgeSupplier(app.storage.settings)
+    }
+
+    /** ViewModel con su estado recogido, como mientras se ve la pantalla. */
+    private fun watchedViewModel(): SettingsViewModel {
+        val vm = viewModel()
+        val watcher = app.container.scope.launch { vm.state.collect {} }
+        watchers += watcher
+        eventually { vm.state.value == stored() }
+        return vm
+    }
+
+    private val watchers = mutableListOf<kotlinx.coroutines.Job>()
+
+    private fun online() {
+        assertTrue(runBlocking { withTimeout(TIMEOUT) { app.container.start().await() } })
+        eventually { app.container.engine.status.value == EngineStatus.Online }
+    }
+
+    /**
+     * Las paradas de Tor que hagan falta (ninguna si ya estaba parado, como tras caerse en `Error`), un único
+     * borrado y después un único arranque, en ese orden.
+     */
+    private fun assertStopForgetStart(calls: List<String>) {
+        val forget = calls.indexOf("forget")
+        assertEquals("$calls", 1, calls.count { it == "forget" })
+        assertEquals("$calls", 1, calls.count { it == "start" })
+        assertTrue("$calls", forget >= 0 && calls.subList(0, forget).all { it == "stop" })
+        assertEquals("$calls", "start", calls.last())
+        assertTrue("$calls", calls.subList(forget + 1, calls.size - 1).isEmpty())
+    }
+
+    /** Llamadas al Tor falso desde ahora. */
+    private fun torCallsFrom(mark: Int) = app.tor.calls.drop(mark)
+
+    @Test
+    fun changeWhileOnlineNeedsReconnect() {
+        withBridgeSupplier()
+        online()
+        val vm = watchedViewModel()
+        val mark = app.tor.calls.size
+
+        assertEquals(BridgeChange.NEEDS_RECONNECT, vm.setBridges(BridgeMode.OBFS4, null))
+
+        // Hasta confirmar, nada: ni se guarda ni se toca Tor.
+        Thread.sleep(200)
+        eventually { true }
+        assertEquals(BridgeMode.NONE, stored().bridgeMode)
+        assertEquals(emptyList<String>(), torCallsFrom(mark))
+        assertEquals(EngineStatus.Online, app.container.engine.status.value)
+
+        // Cancelar lo olvida: confirmar después no hace nada.
+        vm.cancelReconnect()
+        vm.confirmReconnect()
+        Thread.sleep(200)
+        eventually { true }
+        assertEquals(BridgeMode.NONE, stored().bridgeMode)
+        assertEquals(emptyList<String>(), torCallsFrom(mark))
+
+        // Mientras Tor arranca también hay que confirmar.
+        runBlocking { app.container.stop().join() }
+        app.tor.holdStarts = true
+        app.container.start()
+        eventually { app.container.engine.status.value is EngineStatus.StartingTor }
+        assertEquals(BridgeChange.NEEDS_RECONNECT, vm.setBridges(BridgeMode.SNOWFLAKE, null))
+        assertEquals(BridgeMode.NONE, stored().bridgeMode)
+    }
+
+    @Test
+    fun confirmReconnectStopsForgetsAndStarts() {
+        withBridgeSupplier()
+        online()
+        val vm = watchedViewModel()
+        val mark = app.tor.calls.size
+
+        assertEquals(BridgeChange.NEEDS_RECONNECT, vm.setBridges(BridgeMode.OBFS4, null))
+        vm.confirmReconnect()
+
+        eventually(TIMEOUT) {
+            app.container.engine.status.value == EngineStatus.Online && torCallsFrom(mark).lastOrNull() == "start"
+        }
+        assertEquals(BridgeMode.OBFS4, stored().bridgeMode)
+        // Primero se para Tor (con el motor), después se borra su estado y por último arranca de nuevo.
+        assertStopForgetStart(torCallsFrom(mark))
+        assertEquals("stop", torCallsFrom(mark).first()) // estaba en línea: se para antes de borrar
+        assertEquals(1, app.tor.forgetBridgeStateCalls.get())
+        // El arranque nuevo lee el ajuste ya guardado.
+        assertEquals(listOf(null, BridgeSetup(BuiltInBridges.OBFS4)), app.tor.bridgeSetups.toList())
+        assertTrue(app.tor.bridged)
+    }
+
+    @Test
+    fun changeWhileErrorReconnectsWithoutDialog() {
+        withBridgeSupplier()
+        online()
+        runBlocking { app.tor.stop() } // Tor se cae: Error (R18)
+        eventually { app.container.engine.status.value is EngineStatus.Error }
+        val vm = watchedViewModel()
+        val mark = app.tor.calls.size
+
+        assertEquals(BridgeChange.SAVED, vm.setBridges(BridgeMode.SNOWFLAKE, null))
+
+        eventually(TIMEOUT) { app.container.engine.status.value == EngineStatus.Online }
+        assertEquals(BridgeMode.SNOWFLAKE, stored().bridgeMode)
+        assertStopForgetStart(torCallsFrom(mark))
+        assertEquals(BridgeSetup(BuiltInBridges.SNOWFLAKE), app.tor.bridgeSetups.last())
+    }
+
+    @Test
+    fun changeWhileStoppedOnlySavesAndForgets() {
+        withBridgeSupplier()
+        val vm = watchedViewModel()
+        val custom = BuiltInBridges.OBFS4.take(2).joinToString("\r\n") { "Bridge  " + it.line + " " }
+
+        assertEquals(BridgeChange.SAVED, vm.setBridges(BridgeMode.CUSTOM, custom))
+
+        eventually { app.tor.forgetBridgeStateCalls.get() == 1 }
+        assertEquals(BridgeMode.CUSTOM, stored().bridgeMode)
+        // Se guardan las líneas normalizadas (sin "Bridge" ni espacios de más).
+        assertEquals(BuiltInBridges.OBFS4.take(2).map { it.line }, stored().customBridges)
+        Thread.sleep(200)
+        eventually { true }
+        assertEquals(listOf("forget"), app.tor.calls.toList())
+        assertEquals(EngineStatus.Stopped, app.container.engine.status.value)
+    }
+
+    @Test
+    fun sameValueIsNoop() {
+        runBlocking {
+            app.storage.settings.update {
+                it.copy(bridgeMode = BridgeMode.CUSTOM, customBridges = BuiltInBridges.OBFS4.take(1).map { b -> b.line })
+            }
+        }
+        withBridgeSupplier()
+        online()
+        val vm = watchedViewModel()
+        val writes = java.util.concurrent.CopyOnWriteArrayList<AppSettings>()
+        app.storage.settings.onWrite = { writes += it }
+        val mark = app.tor.calls.size
+
+        // Las mismas líneas, aunque se peguen de otra forma.
+        assertEquals(BridgeChange.SAVED, vm.setBridges(BridgeMode.CUSTOM, "Bridge " + BuiltInBridges.OBFS4[0].line + "\n\n"))
+        Thread.sleep(300)
+        eventually { true }
+        assertEquals(emptyList<AppSettings>(), writes.toList())
+        assertEquals(emptyList<String>(), torCallsFrom(mark))
+        assertEquals(EngineStatus.Online, app.container.engine.status.value)
+        assertEquals(0, app.tor.forgetBridgeStateCalls.get())
+    }
+
+    @Test
+    fun invalidCustomSavesNothing() {
+        val vm = watchedViewModel()
+        val writes = java.util.concurrent.CopyOnWriteArrayList<AppSettings>()
+        app.storage.settings.onWrite = { writes += it }
+
+        assertEquals(BridgeChange.INVALID, vm.setBridges(BridgeMode.CUSTOM, "obfs4 basura"))
+        assertEquals(BridgeChange.INVALID, vm.setBridges(BridgeMode.CUSTOM, " \n "))
+        assertEquals(BridgeChange.INVALID, vm.setBridges(BridgeMode.CUSTOM, null))
+        val eleven = (1..11).joinToString("\n") { n ->
+            "obfs4 192.0.2.$n:443 ${"A".repeat(40)} cert=${"A".repeat(70)} iat-mode=0"
+        }
+        assertEquals(BridgeChange.INVALID, vm.setBridges(BridgeMode.CUSTOM, eleven))
+
+        // La siguiente escritura es la primera.
+        vm.setStartOnBoot(true)
+        eventually { writes.isNotEmpty() }
+        assertEquals(listOf(AppSettings(startOnBoot = true)), writes.toList())
+        assertEquals(0, app.tor.forgetBridgeStateCalls.get())
+    }
+
+    @Test
+    fun otherModeKeepsSavedCustomLines() {
+        val lines = BuiltInBridges.OBFS4.take(1).map { it.line }
+        runBlocking { app.storage.settings.update { it.copy(bridgeMode = BridgeMode.CUSTOM, customBridges = lines) } }
+        val vm = watchedViewModel()
+
+        assertEquals(BridgeChange.SAVED, vm.setBridges(BridgeMode.NONE, null))
+
+        eventually { stored().bridgeMode == BridgeMode.NONE }
+        assertEquals(lines, stored().customBridges)
+        // Pasar a "No" también borra el estado de Tor.
+        eventually { app.tor.forgetBridgeStateCalls.get() == 1 }
+    }
 
     @Test
     fun lockNeedsDeviceCredential() {

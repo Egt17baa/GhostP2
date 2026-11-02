@@ -16,6 +16,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.text.input.KeyboardType
 import org.ghostp2.app.TestGhostApp
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -51,6 +52,31 @@ class GhostTextFieldTest {
 
         assertNotNull("El campo enfocado no abrió conexión con el teclado", connection)
         assertTrue(attributes.imeOptions and EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING != 0)
+        assertEquals(0, attributes.inputType and InputType.TYPE_TEXT_FLAG_AUTO_CORRECT)
+        assertEquals(InputType.TYPE_CLASS_TEXT, attributes.inputType and InputType.TYPE_MASK_CLASS)
+    }
+
+    /** El campo de «Mis puentes»: teclado ASCII, sin sugerencias, sin autocorrección y sin aprender. */
+    @Test
+    fun asciiFieldWithoutSuggestions() {
+        lateinit var view: View
+        compose.setContent {
+            view = LocalView.current
+            var text by remember { mutableStateOf("") }
+            GhostTextField(
+                text, { text = it }, modifier = Modifier.testTag(FIELD), label = "Puentes",
+                keyboardType = KeyboardType.Ascii, noSuggestions = true,
+            )
+        }
+        compose.onNodeWithTag(FIELD).performClick()
+        compose.waitForIdle()
+
+        val attributes = EditorInfo()
+        compose.runOnIdle { view.onCreateInputConnection(attributes) }
+
+        assertTrue(attributes.imeOptions and EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING != 0)
+        assertTrue(attributes.imeOptions and EditorInfo.IME_FLAG_FORCE_ASCII != 0)
+        assertTrue(attributes.inputType and InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS != 0)
         assertEquals(0, attributes.inputType and InputType.TYPE_TEXT_FLAG_AUTO_CORRECT)
         assertEquals(InputType.TYPE_CLASS_TEXT, attributes.inputType and InputType.TYPE_MASK_CLASS)
     }

@@ -32,6 +32,8 @@
     <!-- Aviso del estado del motor -->
     <string name="banner_stopped">GhostP2 está desactivado</string>
     <string name="banner_starting">Conectando a la red Tor… %1$d %%</string>
+    <string name="banner_starting_bridge">Conectando por puente… %1$d %%</string>
+    <string name="banner_bridge_failed">No se puede conectar por el puente. Prueba otro tipo de puente o pega puentes nuevos en Ajustes › Puentes.</string>
     <string name="banner_tor_error">Sin conexión con Tor</string>
     <string name="banner_tor_stuck">Tor no responde. Cierra GhostP2 desde Recientes y vuelve a abrirlo.</string>
     <string name="banner_storage_error">No se pudieron leer o guardar tus datos cifrados</string>
@@ -216,6 +218,8 @@
     <string name="settings_disconnect_after_5">A los 5 minutos</string>
     <string name="settings_disconnect_after_15">A los 15 minutos</string>
     <string name="settings_disconnect_after_detail">Al pasar ese tiempo fuera de la app se cierra Tor y se borran las conversaciones. No recibirás mensajes hasta que vuelvas a activar GhostP2.</string>
+    <string name="settings_section_bridges">Puentes</string>
+    <string name="settings_bridges_row">Puentes: %1$s</string>
     <string name="settings_section_data">Datos</string>
     <string name="settings_wipe">Borrar todo</string>
     <string name="settings_wipe_confirm_title">¿Borrar todo?</string>
@@ -230,6 +234,7 @@
     <string name="settings_section_about">Acerca de</string>
     <string name="settings_version">Versión %1$s</string>
     <string name="settings_license">Licencia Apache-2.0</string>
+    <string name="settings_license_components">La APK incluye IPtProxy (MIT), Lyrebird (GPL-3.0) y Snowflake (BSD-3-Clause) para los puentes, así que se distribuye bajo GPL-3.0. El código de GhostP2 sigue en Apache-2.0.</string>
     <string name="settings_my_onion">Mi dirección: %1$s</string>
     <string name="settings_my_onion_none">Mi dirección: todavía no publicada</string>
     <string name="settings_diagnostic_none">Último aviso de diagnóstico: ninguno</string>
@@ -239,4 +244,27 @@
         <item quantity="many">Último aviso de diagnóstico: no se pudo registrar en Tor la autorización de %1$d contactos</item>
         <item quantity="other">Último aviso de diagnóstico: no se pudo registrar en Tor la autorización de %1$d contactos</item>
     </plurals>
+    <!-- Puentes (R30) -->
+    <string name="bridges_title">Puentes</string>
+    <string name="bridges_help">Los puentes disfrazan tu conexión para que no se note que usas Tor. Lo más discreto son tus propios puentes obfs4 o WebTunnel de bridges.torproject.org.</string>
+    <string name="bridges_none">No</string>
+    <string name="bridges_obfs4">obfs4</string>
+    <string name="bridges_snowflake">Snowflake</string>
+    <string name="bridges_custom">Mis puentes</string>
+    <string name="bridges_custom_label">Líneas de puente obfs4 o webtunnel, una por línea</string>
+    <string name="bridges_custom_detail">Pídelos en bridges.torproject.org y pégalos aquí o escanea su código QR. Como mucho 10.</string>
+    <string name="bridges_scan">Escanear QR</string>
+    <string name="bridges_line_invalid">Línea %1$d no válida</string>
+    <string name="bridges_too_many">Máximo 10 puentes</string>
+    <string name="bridges_empty">Pega al menos un puente</string>
+    <string name="bridges_save">Guardar</string>
+    <string name="bridges_snowflake_warning">Snowflake contacta con un intermediario a través de una red de distribución de contenidos, con servidores STUN públicos y con voluntarios que hacen de puente. No ven tus mensajes, pero sí tu dirección IP. Úsalo solo si los otros no funcionan.</string>
+    <string name="bridges_snowflake_use">Usar Snowflake</string>
+    <string name="bridges_reconnect_text">Para usar los nuevos puentes hay que reconectar. Se cerrarán las conversaciones abiertas.</string>
+    <string name="bridges_reconnect">Reconectar</string>
+    <string name="bridges_scan_no_camera">Este móvil no tiene cámara. Puedes pegar los puentes</string>
+    <string name="bridges_scan_no_permission">Sin permiso de cámara. Puedes pegar los puentes</string>
+    <string name="bridges_scan_blocked">El permiso de cámara está bloqueado. Puedes darlo en los ajustes de GhostP2 o pegar los puentes</string>
+    <string name="bridges_scan_camera_failed">No se pudo abrir la cámara. Puedes pegar los puentes</string>
+    <string name="bridges_scan_hint">Apunta la cámara al código QR de bridges.torproject.org</string>
 </resources>
