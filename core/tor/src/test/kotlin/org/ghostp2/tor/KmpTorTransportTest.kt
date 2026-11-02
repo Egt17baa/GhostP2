@@ -1,6 +1,8 @@
 package org.ghostp2.tor
 
 import android.content.Context
+import io.matthewnelson.kmp.tor.runtime.core.config.TorConfig
+import io.matthewnelson.kmp.tor.runtime.core.config.TorSetting
 import io.matthewnelson.kmp.tor.runtime.core.ctrl.HiddenServiceEntry
 import io.matthewnelson.kmp.tor.runtime.core.ctrl.Reply
 import io.matthewnelson.kmp.tor.runtime.core.ctrl.Reply.Error.Companion.toError
@@ -12,11 +14,15 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.ghostp2.core.crypto.Primitives
 import org.ghostp2.engine.TorState
+import org.ghostp2.engine.bridges.BridgeSetup
+import org.ghostp2.engine.bridges.BuiltInBridges
+import org.ghostp2.engine.bridges.PtKind
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -43,8 +49,25 @@ import io.matthewnelson.kmp.tor.runtime.TorState as RuntimeState
 @RunWith(RobolectricTestRunner::class)
 class KmpTorTransportTest {
     private val dir: File = Files.createTempDirectory("tor-test").toFile()
-    private val driver = FakeDriver()
-    private val tor = KmpTorTransport(File(dir, "tor"), STOP_TIMEOUT_MILLIS) { onState ->
+
+    /** Orden de las llamadas al driver y a los transportes ("pt.start", "daemon.start", "daemon.stop", "pt.stop"). */
+    private val events: MutableList<String> = Collections.synchronizedList(mutableListOf())
+    private val driver = FakeDriver(events)
+    private val torDir = File(dir, "tor")
+    private val marker = File(dir, "tor-bridged")
+    private val ptDir = File(dir, "pt")
+
+    /** Lo que devuelve el proveedor de puentes en cada `start()` (como leer el ajuste guardado). */
+    @Volatile private var setup: BridgeSetup? = null
+    private val pts: MutableList<FakePt> = Collections.synchronizedList(mutableListOf())
+    @Volatile private var nextPtFailure: Exception? = null
+    @Volatile private var driverCreations = 0
+    private val tor = KmpTorTransport(
+        torDir, marker, ptDir, STOP_TIMEOUT_MILLIS,
+        bridges = { setup },
+        ptFactory = { stateDir -> FakePt(stateDir, events, nextPtFailure).also { pts += it } },
+    ) { onState ->
+        driverCreations++
         driver.also { it.onState = onState }
     }
 
@@ -68,7 +91,10 @@ class KmpTorTransportTest {
     @Test
     fun usesNoBackupFilesDir() {
         val context: Context = RuntimeEnvironment.getApplication()
-        assertEquals(File(context.noBackupFilesDir, "tor"), KmpTorTransport(context).torDir)
+        val transport = KmpTorTransport(context) { null }
+        assertEquals(File(context.noBackupFilesDir, "tor"), transport.torDir)
+        assertEquals(File(context.noBackupFilesDir, "tor-bridged"), transport.markerFile)
+        assertEquals(File(context.noBackupFilesDir, "pt"), transport.ptStateDir)
     }
 
     @Test
@@ -420,6 +446,254 @@ class KmpTorTransportTest {
         assertFalse(tor.state.value is TorState.Error)
     }
 
+    // --- Puentes (R30) ---
+
+    private val obfs4 = BridgeSetup(BuiltInBridges.OBFS4)
+
+    /** Texto de configuración de puentes que recibió el driver en el arranque `i`. */
+    private fun bridgeLines(i: Int): List<String> =
+        TorConfig.Builder { putAll(driver.bridgeConfigs[i]) }.toString().lines().filter { it.isNotEmpty() }
+
+    private fun writeTorState(): File = File(torDir, "work/data/state").apply {
+        parentFile!!.mkdirs()
+        writeText("guardas")
+    }
+
+    @Test
+    fun noBridgesNeverCreatesController() = runBlocking<Unit> {
+        setup = null
+        startReady()
+        assertFalse(tor.bridged)
+        tor.stop()
+        tor.start()
+        tor.wipeState()
+        tor.start()
+        withTimeout(5_000) { while (driver.starts < 2) delay(10) }
+        assertTrue("con «No» no se crea ningún controlador de IPtProxy", pts.isEmpty())
+        assertTrue("con «No» el driver no recibe configuración de puentes", driver.bridgeConfigs.all { it.isEmpty() })
+        assertFalse(marker.exists())
+        assertFalse(ptDir.exists())
+        assertFalse(events.any { it.startsWith("pt.") })
+    }
+
+    @Test
+    fun bridgeStartsPtBeforeDaemon() = runBlocking<Unit> {
+        setup = obfs4
+        tor.start()
+        withTimeout(5_000) { driver.startEntered.await() }
+        assertEquals(listOf("pt.start", "daemon.start"), events.toList())
+        val pt = pts.single()
+        assertEquals(ptDir, pt.stateDir)
+        assertEquals(setOf(PtKind.OBFS4), pt.startedKinds)
+        assertTrue("el marcador se crea antes de arrancar con puente", marker.exists())
+        assertTrue(tor.bridged)
+        val lines = bridgeLines(0)
+        assertTrue("UseBridges 1" in lines)
+        assertEquals(BuiltInBridges.OBFS4.map { "Bridge ${it.line}" }, lines.filter { it.startsWith("Bridge ") })
+        assertTrue("ClientTransportPlugin obfs4 socks5 127.0.0.1:4711" in lines)
+        driver.emit(RuntimeState(RuntimeState.Daemon.Starting, RuntimeState.Network.Disabled))
+        driver.emit(ready)
+        assertEquals(TorState.Ready, tor.state.value)
+    }
+
+    @Test
+    fun bridgeTransportErrorIsBridgeFailed() = runBlocking<Unit> {
+        setup = obfs4
+        nextPtFailure = IOException("no se pudo abrir el puerto")
+        tor.start()
+        val state = tor.state.value as TorState.Error
+        assertTrue(state.bridge)
+        assertFalse(state.stuck)
+        delay(100)
+        assertEquals("Tor no se arranca si falla el transporte", 0, driver.starts)
+        assertEquals(1, pts.single().stops)
+        assertTrue(tor.bridged)
+        tor.stop()
+        assertEquals(1, pts.single().stops)
+        assertFalse(marker.exists())
+        // Reintentar (desde Error) vuelve a crear un controlador: si arranca, Tor arranca por puente.
+        nextPtFailure = null
+        tor.start()
+        withTimeout(5_000) { driver.startEntered.await() }
+        assertEquals(2, pts.size)
+        assertTrue(bridgeLines(0).contains("UseBridges 1"))
+    }
+
+    @Test
+    fun emptySetupIsBridgeFailedWithoutDaemon() = runBlocking<Unit> {
+        setup = BridgeSetup(emptyList()) // «Mis puentes» sin líneas válidas: falla cerrado
+        tor.start()
+        val state = tor.state.value as TorState.Error
+        assertTrue(state.bridge)
+        assertTrue(tor.bridged)
+        delay(100)
+        assertEquals(0, driver.starts)
+        assertTrue("sin puentes no se inicia IPtProxy", pts.isEmpty())
+        tor.stop()
+        assertEquals(TorState.Off, tor.state.value)
+    }
+
+    @Test
+    fun bridgedRunErrorsAreBridgeErrors() = runBlocking<Unit> {
+        setup = obfs4
+        driver.startFailure = IllegalStateException("sin binario")
+        tor.start()
+        val settled = withTimeout(5_000) { tor.state.first { it !is TorState.Starting } }
+        assertEquals(TorState.Error("No se pudo arrancar Tor", bridge = true), settled)
+
+        driver.startFailure = null
+        tor.start()
+        driver.emit(ready)
+        driver.emit(off) // el proceso murió sin stop()
+        assertEquals(TorState.Error(UNEXPECTED_STOP, bridge = true), tor.state.value)
+
+        // Sin puentes, los mismos fallos no llevan la marca.
+        setup = null
+        tor.start()
+        driver.emit(ready)
+        driver.emit(off)
+        assertEquals(TorState.Error(UNEXPECTED_STOP), tor.state.value)
+    }
+
+    @Test
+    fun ptFailureWhileRunningIsBridgeFailed() = runBlocking<Unit> {
+        setup = obfs4
+        startReady()
+        pts.single().failures.emit(PtKind.OBFS4)
+        val state = withTimeout(5_000) { tor.state.first { it is TorState.Error } }
+        assertEquals(TorState.Error("El transporte del puente ha fallado", bridge = true), state)
+        driver.emit(ready) // no "revive" solo
+        assertTrue(tor.state.value is TorState.Error)
+        tor.stop()
+        assertEquals(1, pts.single().stops)
+    }
+
+    @Test
+    fun ptFailureAfterStopIsIgnored() = runBlocking<Unit> {
+        setup = obfs4
+        startReady()
+        val first = pts.single()
+        tor.stop()
+        setup = null
+        tor.start()
+        first.failures.emit(PtKind.OBFS4) // un evento tardío del controlador anterior
+        delay(100)
+        assertEquals(TorState.Starting(0), tor.state.value)
+    }
+
+    @Test
+    fun stopWithBridgeWipesAndStopsPt() = runBlocking<Unit> {
+        setup = obfs4
+        startReady()
+        writeTorState()
+        File(ptDir, "x").apply { parentFile!!.mkdirs(); writeText("y") }
+        tor.stop()
+        assertEquals(TorState.Off, tor.state.value)
+        assertFalse(torDir.exists())
+        assertFalse(ptDir.exists())
+        assertFalse(marker.exists())
+        assertEquals(1, pts.single().stops)
+        assertEquals(1, driver.stops)
+        assertEquals(listOf("pt.start", "daemon.start", "daemon.stop", "pt.stop"), events.toList())
+        assertFalse(tor.bridged)
+        tor.stop() // idempotente
+        assertEquals(1, pts.single().stops)
+        // Como wipeState: el siguiente arranque pide un driver nuevo a la fábrica.
+        tor.start()
+        assertEquals(2, driverCreations)
+        assertEquals(2, pts.size)
+    }
+
+    @Test
+    fun stopWithoutBridgeKeepsState() = runBlocking<Unit> {
+        setup = null
+        startReady()
+        val state = writeTorState()
+        tor.stop()
+        assertTrue("con «No» se conserva el estado de Tor", state.exists())
+        assertFalse(marker.exists())
+        tor.start()
+        assertEquals("con «No» se reutiliza el driver", 1, driverCreations)
+    }
+
+    @Test
+    fun markerFromCrashWipesBeforeStart() = runBlocking<Unit> {
+        // El proceso murió con puente activo: quedan el marcador, el estado de Tor y el de IPtProxy.
+        marker.writeText("")
+        val state = File(torDir, "work/state").apply { parentFile!!.mkdirs(); writeText("guardas") }
+        File(ptDir, "x").apply { parentFile!!.mkdirs(); writeText("y") }
+        setup = null
+        tor.start()
+        assertFalse(state.exists())
+        assertFalse(torDir.exists())
+        assertFalse(ptDir.exists())
+        assertFalse(marker.exists())
+        assertTrue(pts.isEmpty())
+        withTimeout(5_000) { driver.startEntered.await() }
+        assertTrue(driver.bridgeConfigs.single().isEmpty())
+    }
+
+    @Test
+    fun changeDuringStartRestartsWithNewMode() = runBlocking<Unit> {
+        setup = obfs4
+        driver.hangOnStart = true
+        tor.start()
+        withTimeout(5_000) { driver.startEntered.await() }
+        withTimeout(5_000) { tor.stop() } // a mitad del arranque por puente
+        assertEquals(1, pts.single().stops)
+        assertFalse(marker.exists())
+        setup = null
+        driver.hangOnStart = false
+        tor.start()
+        withTimeout(5_000) { while (driver.starts < 2) delay(10) }
+        assertEquals("un único controlador, creado y parado", 1, pts.size)
+        assertEquals(1, pts.single().stops)
+        assertTrue(driver.bridgeConfigs[0].isNotEmpty())
+        assertTrue("el segundo arranque va sin puentes", driver.bridgeConfigs[1].isEmpty())
+        assertFalse(tor.bridged)
+        assertFalse(marker.exists())
+    }
+
+    @Test
+    fun stuckBridgedStopKeepsMarkerForNextStart() = runBlocking<Unit> {
+        setup = obfs4
+        startReady()
+        writeTorState()
+        driver.hangOnStop = true
+        withTimeout(5_000) { tor.stop() }
+        assertEquals("aun atascado, se paran los transportes", 1, pts.single().stops)
+        assertFalse("se borra lo que se puede", torDir.exists())
+        assertTrue("el marcador se queda para el siguiente arranque", marker.exists())
+        // Tor por fin termina: el siguiente arranque (ya con «No») borra antes el estado y quita el marcador.
+        driver.hangOnStop = false
+        setup = null
+        File(torDir, "work").mkdirs()
+        tor.start()
+        assertFalse(File(torDir, "work").exists())
+        assertFalse(marker.exists())
+        assertEquals(TorState.Starting(0), tor.state.value)
+    }
+
+    @Test
+    fun wipeAndForgetDeletePtStateAndMarker() = runBlocking<Unit> {
+        File(ptDir, "x").apply { parentFile!!.mkdirs(); writeText("y") }
+        marker.writeText("")
+        writeTorState()
+        tor.wipeState()
+        assertFalse(torDir.exists())
+        assertFalse(ptDir.exists())
+        assertFalse(marker.exists())
+
+        setup = null
+        startReady()
+        writeTorState()
+        tor.forgetBridgeState()
+        assertEquals(TorState.Off, tor.state.value)
+        assertFalse(torDir.exists())
+        tor.start()
+        assertEquals("como wipeState: driver nuevo", 2, driverCreations)
+    }
+
     private suspend fun expectIOException(block: suspend () -> Any) {
         try {
             block()
@@ -430,8 +704,30 @@ class KmpTorTransportTest {
     }
 
     /** Runtime falso: la prueba emite los estados; las órdenes se registran y responden como Tor. */
-    private class FakeDriver : TorDriver {
+    /** IPtProxy falso: puertos fijos (obfs4 4711, webtunnel 4712, snowflake 4713). */
+    private class FakePt(val stateDir: File, private val events: MutableList<String>, private val failure: Exception?) : PtController {
+        @Volatile var startedKinds: Set<PtKind>? = null
+        @Volatile var stops = 0
+        override val failures = MutableSharedFlow<PtKind>(replay = 1)
+
+        override suspend fun start(kinds: Set<PtKind>): Map<PtKind, Int> {
+            events += "pt.start"
+            failure?.let { throw it }
+            startedKinds = kinds
+            return mapOf(PtKind.OBFS4 to 4711, PtKind.WEBTUNNEL to 4712, PtKind.SNOWFLAKE to 4713).filterKeys { it in kinds }
+        }
+
+        override fun stop() {
+            stops++
+            events += "pt.stop"
+        }
+    }
+
+    private class FakeDriver(private val events: MutableList<String> = mutableListOf()) : TorDriver {
         var onState: (RuntimeState) -> Unit = {}
+
+        /** Configuración de puentes recibida en cada `startDaemon` (vacía = sin puentes). */
+        val bridgeConfigs: MutableList<List<TorSetting>> = Collections.synchronizedList(mutableListOf())
         val commands: MutableList<TorCmd.Unprivileged<*>> = Collections.synchronizedList(mutableListOf())
         @Volatile var starts = 0
         @Volatile var stops = 0
@@ -447,7 +743,9 @@ class KmpTorTransportTest {
 
         fun emit(s: RuntimeState) = onState(s)
 
-        override suspend fun startDaemon() {
+        override suspend fun startDaemon(bridges: List<TorSetting>) {
+            events += "daemon.start"
+            bridgeConfigs += bridges
             starts++
             startEntered.complete(Unit)
             startFailure?.let { throw it }
@@ -461,6 +759,7 @@ class KmpTorTransportTest {
         }
 
         override suspend fun stopDaemon() {
+            events += "daemon.stop"
             stops++
             stopFailure?.let { throw it }
             if (hangOnStop) awaitCancellation()

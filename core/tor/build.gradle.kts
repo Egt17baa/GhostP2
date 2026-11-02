@@ -32,6 +32,9 @@ dependencies {
     implementation(libs.kmp.tor.runtime)
     // Binarios de tor (libtor.so + ejecutable) por ABI; se extraen al instalar (ver Task 10: useLegacyPackaging).
     implementation(libs.kmp.tor.resource.exec.tor)
+    // Puentes (R30): Lyrebird (obfs4, webtunnel) y Snowflake en una biblioteca Go (libgojni.so por ABI), en el
+    // proceso de la app. Solo se carga con un ajuste de puentes distinto de «No» (ver IptProxyController).
+    implementation(libs.iptproxy)
 
     testImplementation(libs.junit4)
     testImplementation(libs.robolectric)

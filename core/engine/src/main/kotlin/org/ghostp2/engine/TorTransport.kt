@@ -10,8 +10,10 @@ sealed interface TorState {
     /**
      * Fallo de Tor. [stuck]: un Tor anterior no se detuvo y sigue sin responder; no se arrancará otro
      * hasta reiniciar el proceso de la app (el motor lo muestra como [EngineErrorKind.TOR_STUCK]).
+     * [bridge]: la ejecución iba por puente (R30) y falló (el motor lo muestra como
+     * [EngineErrorKind.BRIDGE_FAILED], salvo con [stuck]); nunca se reintenta sin puente.
      */
-    data class Error(val message: String, val stuck: Boolean = false) : TorState
+    data class Error(val message: String, val stuck: Boolean = false, val bridge: Boolean = false) : TorState
 }
 
 /**
@@ -38,6 +40,12 @@ class PublishedService(val onion: String, val privateKey: ByteArray) {
  */
 interface TorTransport {
     val state: StateFlow<TorState>
+
+    /**
+     * La ejecución actual (desde el último [start] hasta el [stop]) va por puente (R30). El motor lo usa para
+     * dar [EngineErrorKind.BRIDGE_FAILED] también cuando el arranque agota su plazo. Sin puentes, `false`.
+     */
+    val bridged: Boolean get() = false
 
     /**
      * Arranca Tor en segundo plano. Contrato (regla R13): al volver, [state] es `Starting`, `Ready` o
@@ -105,4 +113,10 @@ interface TorTransport {
      * Lanza [java.io.IOException] si no se pudo borrar.
      */
     suspend fun wipeState()
+
+    /**
+     * Borra el estado de Tor en disco igual que [wipeState] (también el de los transportes de los puentes).
+     * Para el cambio del ajuste «Puentes» (R30): el arranque siguiente empieza de cero con el ajuste nuevo.
+     */
+    suspend fun forgetBridgeState() = wipeState()
 }

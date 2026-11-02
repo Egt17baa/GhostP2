@@ -2,6 +2,7 @@ package org.ghostp2.tor
 
 import io.matthewnelson.kmp.tor.runtime.core.config.TorConfig
 import io.matthewnelson.kmp.tor.runtime.core.config.TorOption
+import io.matthewnelson.kmp.tor.runtime.core.config.TorSetting
 import io.matthewnelson.kmp.tor.runtime.core.ctrl.TorCmd
 import io.matthewnelson.kmp.tor.runtime.core.ctrl.builder.BuilderScopeOnionAdd
 import io.matthewnelson.kmp.tor.runtime.core.key.ED25519_V3
@@ -18,7 +19,11 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.ghostp2.engine.TorState
+import org.ghostp2.engine.bridges.BridgeSetup
+import org.ghostp2.engine.bridges.PtKind
 import java.io.IOException
+import java.lang.reflect.InvocationTargetException
+import java.lang.reflect.Method
 import java.net.InetSocketAddress
 import java.net.Proxy
 import java.net.Socket
@@ -51,6 +56,81 @@ internal fun TorConfig.BuilderScope.applyGhostConfig() {
     }
     TorOption.DNSPort.configure { disable() }
     TorOption.HTTPTunnelPort.configure { disable() }
+}
+
+/**
+ * Puentes (R30) sobre [applyGhostConfig]: `UseBridges 1`, una `Bridge <línea>` por puente (en el orden de [setup])
+ * y `ClientTransportPlugin <transporte> socks5 127.0.0.1:<puerto>` por tipo, con el puerto del SOCKS local de
+ * IPtProxy en [ports]. Con `UseBridges 1` Tor solo usa esos puentes como primer salto: nunca conecta directo.
+ * Ver [bridgeSettings].
+ */
+internal fun TorConfig.BuilderScope.applyBridgeConfig(setup: BridgeSetup, ports: Map<PtKind, Int>) {
+    putAll(bridgeSettings(setup, ports))
+}
+
+/**
+ * Los ajustes de [applyBridgeConfig]. Falla cerrado con [IllegalArgumentException] si no hay puentes, si falta el
+ * puerto de algún tipo o si un puerto no está entre 1 y 65535 (Tor nunca recibe una configuración de puentes a
+ * medias).
+ */
+internal fun bridgeSettings(setup: BridgeSetup, ports: Map<PtKind, Int>): List<TorSetting> {
+    require(setup.lines.isNotEmpty()) { "Sin puentes" }
+    val plugins = setup.kinds.map { kind ->
+        val port = requireNotNull(ports[kind]) { "Sin puerto para ${kind.torName}" }
+        require(port in 1..65_535) { "Puerto no válido para ${kind.torName}" }
+        torSetting(TorOption.ClientTransportPlugin, "${kind.torName} socks5 127.0.0.1:$port")
+    }
+    return listOf(torSetting(TorOption.UseBridges, "1")) +
+        setup.lines.map { torSetting(TorOption.Bridge, it.line) } +
+        plugins
+}
+
+/**
+ * `TorSetting` de una opción sin constructor en kmp-tor. kmp-tor 2.6.0 conoce `UseBridges`, `Bridge` y
+ * `ClientTransportPlugin` (`TorOption`) pero no ofrece ninguna forma pública de darles valor (su issue #626,
+ * abierto: «There currently exists no way to configure bridges»), y su runtime no lee ningún torrc. Se usan, por
+ * reflexión, sus mismas funciones internas `TorOption.toLineItem` (comprueba que el argumento no está vacío y es de
+ * una sola línea) y `LineItem.toSetting`; kmp-tor manda luego la línea `opción argumento` a Tor en `LOADCONF`, como
+ * las demás. Los nombres JVM son los de `runtime-core-jvm` 2.6.0 (fijada en `libs.versions.toml`); las reglas de R8
+ * de `consumer-rules.pro` los conservan y `BridgeConfigTest` falla si cambian. Cualquier fallo es
+ * [IllegalArgumentException] o [IllegalStateException]: el arranque por puente falla cerrado.
+ */
+private fun torSetting(option: TorOption, argument: String): TorSetting {
+    val internals = KmpTorInternals.instance ?: throw IllegalStateException("kmp-tor sin soporte para ${option.name}")
+    return try {
+        val item = internals.toLineItem.invoke(internals.lineItemCompanion, option, argument, emptySet<String>())
+        internals.toSetting.invoke(TorSetting.Companion, item, emptyMap<String, Any>()) as TorSetting
+    } catch (e: InvocationTargetException) {
+        throw (e.cause as? IllegalArgumentException) ?: IllegalStateException("kmp-tor rechazó ${option.name}")
+    } catch (e: ReflectiveOperationException) {
+        throw IllegalStateException("kmp-tor sin soporte para ${option.name}")
+    }
+}
+
+/** Funciones internas de kmp-tor 2.6.0 que usa [torSetting]; se buscan una vez, la primera vez que hace falta. */
+private class KmpTorInternals(val lineItemCompanion: Any, val toLineItem: Method, val toSetting: Method) {
+    companion object {
+        private const val SUFFIX = "\$io_matthewnelson_kmp_tor_runtime_core_jvm"
+
+        /** `null` si esta versión de kmp-tor no las tiene (nunca con la 2.6.0 fijada). */
+        val instance: KmpTorInternals? by lazy {
+            try {
+                val companion = TorSetting.LineItem::class.java.getField("Companion").get(null)
+                    ?: return@lazy null
+                KmpTorInternals(
+                    companion,
+                    companion.javaClass.getMethod(
+                        "toLineItem$SUFFIX", TorOption::class.java, String::class.java, Set::class.java,
+                    ),
+                    TorSetting.Companion::class.java.getMethod(
+                        "toSetting$SUFFIX", TorSetting.LineItem::class.java, Map::class.java,
+                    ),
+                )
+            } catch (_: ReflectiveOperationException) {
+                null
+            }
+        }
+    }
 }
 
 /**

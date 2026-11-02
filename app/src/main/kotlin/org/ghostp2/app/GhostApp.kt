@@ -186,7 +186,8 @@ class AppContainer internal constructor(
     /** Producción: Tor con kmp-tor y `ghostp2.bin` cifrado con Android Keystore. */
     constructor(context: Context) : this(
         context,
-        KmpTorTransport(context.applicationContext),
+        // Sin puentes por ahora (R30): el ajuste «Puentes» se conecta aquí en la Task 3.
+        KmpTorTransport(context.applicationContext) { null },
         StoredAppStorage(createRepositories(context.applicationContext)),
     )
 

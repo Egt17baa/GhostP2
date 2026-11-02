@@ -6,6 +6,7 @@ import io.matthewnelson.kmp.tor.runtime.Action.Companion.stopDaemonAsync
 import io.matthewnelson.kmp.tor.runtime.RuntimeEvent
 import io.matthewnelson.kmp.tor.runtime.TorRuntime
 import io.matthewnelson.kmp.tor.runtime.core.OnEvent
+import io.matthewnelson.kmp.tor.runtime.core.config.TorSetting
 import io.matthewnelson.kmp.tor.runtime.core.ctrl.TorCmd
 import io.matthewnelson.kmp.tor.runtime.core.util.executeAsync
 import io.matthewnelson.kmp.tor.runtime.core.util.toInetAddress
@@ -19,8 +20,12 @@ import io.matthewnelson.kmp.tor.runtime.TorState as RuntimeState
  * fina sobre `TorRuntime`; las pruebas usan un doble (kmp-tor no arranca en la JVM ni en Robolectric).
  */
 internal interface TorDriver {
-    /** Arranca el proceso; vuelve tras conectar el control (el bootstrap sigue, ver `onState`). */
-    suspend fun startDaemon()
+    /**
+     * Arranca el proceso; vuelve tras conectar el control (el bootstrap sigue, ver `onState`). [bridges] se añade
+     * a [applyGhostConfig] en este arranque (vacía = sin puentes, la configuración de siempre; ver
+     * [bridgeSettings]).
+     */
+    suspend fun startDaemon(bridges: List<TorSetting>)
 
     /** Detiene el proceso (también interrumpe un arranque en curso). */
     suspend fun stopDaemon()
@@ -47,11 +52,19 @@ internal interface TorDriver {
  * la regla de [KmpTorTransport] de una sola instancia por proceso; dos transportes vivos sobre el mismo
  * directorio se quitarían los eventos entre sí. El destino se fija antes de suscribirse, así que no se
  * pierde ningún evento emitido justo al suscribir.
+ *
+ * Por lo mismo, la lambda `config {}` del **primer** driver de un `torDir` es la que kmp-tor usa para siempre en
+ * ese runtime (la vuelve a ejecutar en cada arranque). Por eso no captura nada del driver: lee los puentes de un
+ * [BridgeHolder] compartido por `torDir`, que [startDaemon] fija antes de arrancar.
  */
 internal class KmpTorDriver(torDir: File, onState: (RuntimeState) -> Unit) : TorDriver {
     private val runtime: TorRuntime
+    private val bridgeHolder: BridgeHolder = synchronized(bridgeHolders) {
+        bridgeHolders.getOrPut(torDir.absoluteFile) { BridgeHolder() }
+    }
 
     init {
+        val holder = bridgeHolder
         val environment = TorRuntime.Environment.Builder(
             workDirectory = File(torDir, "work"),
             cacheDirectory = File(torDir, "cache"),
@@ -62,7 +75,10 @@ internal class KmpTorDriver(torDir: File, onState: (RuntimeState) -> Unit) : Tor
         }
         environment.debug = false
         runtime = TorRuntime.Builder(environment) {
-            config { _ -> applyGhostConfig() }
+            config { _ ->
+                applyGhostConfig()
+                putAll(holder.settings)
+            }
         }
         synchronized(sinks) {
             val existing = sinks[runtime]
@@ -80,7 +96,8 @@ internal class KmpTorDriver(torDir: File, onState: (RuntimeState) -> Unit) : Tor
         }
     }
 
-    override suspend fun startDaemon() {
+    override suspend fun startDaemon(bridges: List<TorSetting>) {
+        bridgeHolder.settings = bridges
         runtime.startDaemonAsync()
     }
 
@@ -96,10 +113,16 @@ internal class KmpTorDriver(torDir: File, onState: (RuntimeState) -> Unit) : Tor
     /** Destino actual de los eventos `STATE` de un runtime ya suscrito. */
     private class StateSink(@Volatile var target: (RuntimeState) -> Unit)
 
+    /** Puentes del arranque actual de un `torDir` (vacía = sin puentes); la lee la lambda `config {}`. */
+    private class BridgeHolder(@Volatile var settings: List<TorSetting> = emptyList())
+
     private companion object {
         const val OBSERVER_TAG = "ghostp2"
 
         /** Runtimes ya suscritos (kmp-tor no los libera nunca: tampoco hace falta liberarlos aquí). */
         val sinks = IdentityHashMap<TorRuntime, StateSink>()
+
+        /** Un [BridgeHolder] por `torDir` (como el runtime de kmp-tor, vive lo que el proceso). */
+        val bridgeHolders = HashMap<File, BridgeHolder>()
     }
 }

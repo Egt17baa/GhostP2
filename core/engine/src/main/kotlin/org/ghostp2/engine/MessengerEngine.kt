@@ -49,9 +49,11 @@ import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Origen de un [EngineStatus.Error]: el almacenamiento cifrado, Tor atascado ([TorState.Error.stuck]:
- * hay que cerrar y volver a abrir la app) o cualquier otra cosa (Tor).
+ * hay que cerrar y volver a abrir la app), el puente ([BRIDGE_FAILED], R30: el transporte disfrazado no
+ * arrancó, falló o Tor no completó el arranque por puente a tiempo; nunca se reintenta sin puente) o
+ * cualquier otra cosa (Tor).
  */
-enum class EngineErrorKind { TOR, STORAGE, TOR_STUCK }
+enum class EngineErrorKind { TOR, STORAGE, TOR_STUCK, BRIDGE_FAILED }
 
 /** Estado visible del motor. */
 sealed interface EngineStatus {
@@ -95,8 +97,10 @@ const val MAX_CONTACT_NAME_CHARS = 64
  * EngineErrorKind.STORAGE)` (Tor no llega a arrancar si el fallo es anterior a él); cualquier otro
  * fallo es de `kind = TOR`. Tor falla si informa `Error`, si vuelve a `Off` durante el arranque o si
  * no está listo en `EngineConfig.torBootstrapTimeoutMillis`. Con el motor `Online`, si Tor pasa a
- * `Error`/`Off` se libera todo y se pasa a `Error` (regla R18). [start] y [stop] están serializados y
- * son idempotentes; [stop] cancela un [start] en curso (que termina en `Stopped` sin lanzar).
+ * `Error`/`Off` se libera todo y se pasa a `Error` (regla R18). Si Tor iba por puente (R30: `TorState.Error`
+ * con `bridge`, o el plazo agotado con [TorTransport.bridged]), el fallo es `BRIDGE_FAILED` (salvo atascado).
+ * [start] y [stop] están serializados y son idempotentes; [stop] cancela un [start] en curso (que termina en
+ * `Stopped` sin lanzar).
  */
 class MessengerEngine(
     private val tor: TorTransport,
@@ -460,12 +464,13 @@ class MessengerEngine(
         engineScope.launch {
             val lost = tor.state.first { it is TorState.Error || it == TorState.Off }
             val message = (lost as? TorState.Error)?.message ?: TOR_STOPPED
+            val kind = (lost as? TorState.Error)?.errorKind() ?: EngineErrorKind.TOR
             // En el scope externo: liberar cancela y espera a engineJob, y este colector cuelga de él.
-            scope.launch { onTorLost(job, message) }
+            scope.launch { onTorLost(job, message, kind) }
         }
     }
 
-    private suspend fun onTorLost(job: Job, message: String) {
+    private suspend fun onTorLost(job: Job, message: String, kind: EngineErrorKind) {
         lifecycle.withLock {
             if (!running || engineJob !== job) return@withLock // ya parado o es otra ejecución
             try {
@@ -473,9 +478,16 @@ class MessengerEngine(
             } catch (_: Exception) {
                 // Mejor esfuerzo: el estado final es Error igualmente.
             } finally {
-                mutableStatus.value = EngineStatus.Error(message)
+                mutableStatus.value = EngineStatus.Error(message, kind)
             }
         }
+    }
+
+    /** Atascado manda (hay que reiniciar la app); después, el puente (R30); si no, Tor. */
+    private fun TorState.Error.errorKind(): EngineErrorKind = when {
+        stuck -> EngineErrorKind.TOR_STUCK
+        bridge -> EngineErrorKind.BRIDGE_FAILED
+        else -> EngineErrorKind.TOR
     }
 
     /** Corta las esperas de reintento de todos los contactos, vuelve a la espera mínima y reintenta ya. */
@@ -895,9 +907,12 @@ class MessengerEngine(
                 tor.state.first { it is TorState.Ready || it is TorState.Error || it is TorState.Off }
             }
             when (final) {
-                null -> throw TorStartException("Tor no terminó de arrancar")
-                is TorState.Error ->
-                    throw TorStartException(final.message, if (final.stuck) EngineErrorKind.TOR_STUCK else EngineErrorKind.TOR)
+                // R30: con puente, el plazo agotado es un fallo del puente (nunca se reintenta sin él).
+                null -> throw TorStartException(
+                    "Tor no terminó de arrancar",
+                    if (tor.bridged) EngineErrorKind.BRIDGE_FAILED else EngineErrorKind.TOR,
+                )
+                is TorState.Error -> throw TorStartException(final.message, final.errorKind())
                 TorState.Off -> throw TorStartException("Tor se detuvo durante el arranque")
                 else -> Unit
             }

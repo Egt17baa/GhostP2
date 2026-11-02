@@ -364,6 +364,73 @@ class EngineStartTest {
     }
 
     @Test
+    fun bridgeErrorMapsToBridgeFailed() = runBlocking {
+        val tor = ControlledTor(FakeTorNetwork())
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        try {
+            val engine = MessengerEngine(tor, InMemoryIdentityRepository(), InMemoryContactRepository(), scope)
+            // Durante el arranque.
+            val starting = scope.launch { engine.start() }
+            tor.awaitStarted()
+            tor.mutableState.value = TorState.Error("No se pudo iniciar el transporte del puente", bridge = true)
+            withTimeout(5_000) { starting.join() }
+            assertEquals(
+                EngineStatus.Error("No se pudo iniciar el transporte del puente", EngineErrorKind.BRIDGE_FAILED),
+                engine.status.value,
+            )
+            assertTrue(tor.stopped)
+
+            // Atascado manda sobre el puente: hay que reiniciar la app.
+            val stuck = scope.launch { engine.start() }
+            tor.awaitStarted()
+            tor.mutableState.value = TorState.Error("atascado", stuck = true, bridge = true)
+            withTimeout(5_000) { stuck.join() }
+            assertEquals(EngineStatus.Error("atascado", EngineErrorKind.TOR_STUCK), engine.status.value)
+
+            // Con el motor Online (R18): el transporte cae.
+            tor.autoReady = true
+            engine.start()
+            assertEquals(EngineStatus.Online, engine.status.value)
+            tor.mutableState.value = TorState.Error("El transporte del puente ha fallado", bridge = true)
+            val lost = withTimeout(5_000) { engine.status.first { it is EngineStatus.Error } }
+            assertEquals(EngineStatus.Error("El transporte del puente ha fallado", EngineErrorKind.BRIDGE_FAILED), lost)
+
+            // Sin la marca, sigue siendo un error de Tor.
+            engine.start()
+            assertEquals(EngineStatus.Online, engine.status.value)
+            tor.mutableState.value = TorState.Error("Tor se ha detenido")
+            val plain = withTimeout(5_000) { engine.status.first { it is EngineStatus.Error } }
+            assertEquals(EngineStatus.Error("Tor se ha detenido", EngineErrorKind.TOR), plain)
+            engine.stop()
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun bridgeBootstrapTimeoutIsBridgeFailed() = runBlocking {
+        val tor = ControlledTor(FakeTorNetwork()).apply { bridgedRun = true }
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        try {
+            val engine = MessengerEngine(
+                tor, InMemoryIdentityRepository(), InMemoryContactRepository(), scope,
+                EngineConfig(torBootstrapTimeoutMillis = 200),
+            )
+            withTimeout(5_000) { engine.start() }
+            assertEquals(EngineStatus.Error("Tor no terminó de arrancar", EngineErrorKind.BRIDGE_FAILED), engine.status.value)
+            assertTrue(tor.stopped)
+            assertEquals(0, scope.coroutineContext[Job]!!.children.count())
+
+            // El mismo plazo sin puente sigue siendo un error de Tor.
+            tor.bridgedRun = false
+            withTimeout(5_000) { engine.start() }
+            assertEquals(EngineStatus.Error("Tor no terminó de arrancar", EngineErrorKind.TOR), engine.status.value)
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
     fun identitySaveFailureIsStorageError() = runBlocking {
         val tor = ControlledTor(FakeTorNetwork()).apply { autoReady = true }
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -520,6 +587,10 @@ private class ControlledTor(network: FakeTorNetwork) : TorTransport {
     @Volatile var failOnStart: Exception? = null
 
     @Volatile var startCalls = 0
+
+    /** [TorTransport.bridged] de la ejecución (lo fija la prueba). */
+    @Volatile var bridgedRun = false
+    override val bridged: Boolean get() = bridgedRun
 
     override suspend fun start() {
         startCalls++
