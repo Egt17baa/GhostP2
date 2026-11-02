@@ -10,6 +10,7 @@ import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.cbor.Cbor
 import org.ghostp2.engine.Identity
+import org.ghostp2.engine.bridges.BridgeMode
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -113,6 +114,117 @@ class SettingsRepositoryTest {
         assertEquals(AppSettings(onboardingDone = true, lockEnabled = true, lockAfterMinutes = 15, startOnBoot = true), read)
         assertEquals(0, read.disconnectAfterMinutes)
         assertEquals(identity(), StoredIdentityRepository(store()).load())
+    }
+
+    private val obfs4Line = "obfs4 37.218.245.14:38224 D9A82D2F9C2F65A18407B1D2B764F130847F8B5D " +
+        "cert=bjRaMrr1BRiAW8IE9U5z27fQaYgOhX1UCmOpg2pFpoMvo6ZgQMzLsaTzzQNTlm7hNcb+Sg iat-mode=0"
+    private val webtunnelLine = "webtunnel [2001:db8::5]:443 4F1C6A0D1B2E3F405162738495A6B7C8D9E0F1A2 " +
+        "url=https://cover.example.org/aB3dE5 ver=0.0.1"
+
+    @Test
+    fun bridgeDefaultsToNone() = runBlocking {
+        assertEquals(BridgeMode.NONE, AppSettings().bridgeMode)
+        assertEquals(emptyList<String>(), AppSettings().customBridges)
+        assertEquals(BridgeMode.NONE, StoredSettingsRepository(store()).get().bridgeMode)
+        assertEquals(BridgeMode.NONE.name, StoredSettings().bridgeMode)
+        assertEquals(emptyList<String>(), StoredSettings().customBridges)
+    }
+
+    /** Ajustes del formato 2 tal como se guardaban antes de los puentes (R30), ya con R29. */
+    @Serializable
+    private class StoredSettingsBeforeR30(
+        val onboardingDone: Boolean = false,
+        val lockEnabled: Boolean = false,
+        val lockAfterMinutes: Int = 1,
+        val hideNotificationNames: Boolean = false,
+        val maxPhotoSidePx: Int = 2048,
+        val startOnBoot: Boolean = false,
+        val disconnectAfterMinutes: Int = 0,
+    )
+
+    @Serializable
+    private class StoredDataBeforeR30(
+        val identity: StoredIdentity? = null,
+        val settings: StoredSettingsBeforeR30? = null,
+    )
+
+    @OptIn(ExperimentalSerializationApi::class)
+    @Test
+    fun format2FileWithoutBridgeFieldsReadsNone() = runBlocking {
+        val old = StoredDataBeforeR30(
+            StoredIdentity.from(identity()),
+            StoredSettingsBeforeR30(onboardingDone = true, lockEnabled = true, disconnectAfterMinutes = 5),
+        )
+        val plain = Cbor.encodeToByteArray(StoredDataBeforeR30.serializer(), old)
+        file().writeBytes(byteArrayOf(2) + aead.encrypt(plain, byteArrayOf(2) + "ghostp2-store-v1".toByteArray()))
+
+        val read = StoredSettingsRepository(store()).get()
+        assertEquals(AppSettings(onboardingDone = true, lockEnabled = true, disconnectAfterMinutes = 5), read)
+        assertEquals(BridgeMode.NONE, read.bridgeMode)
+        assertEquals(emptyList<String>(), read.customBridges)
+        assertEquals(identity(), StoredIdentityRepository(store()).load())
+    }
+
+    @Test
+    fun unknownModeReadsNone() = runBlocking {
+        store().update { it.withSettings(StoredSettings(lockEnabled = true, bridgeMode = "MEEK")) }
+        assertEquals(AppSettings(lockEnabled = true), StoredSettingsRepository(store()).get())
+        store().update { it.withSettings(StoredSettings(bridgeMode = "obfs4")) }
+        assertEquals(BridgeMode.NONE, StoredSettingsRepository(store()).get().bridgeMode)
+
+        // Con un modo desconocido las líneas guardadas se conservan, como con cualquier otro modo que no sea CUSTOM.
+        store().update { it.withSettings(StoredSettings(bridgeMode = "WEBTUNNEL", customBridges = listOf(obfs4Line))) }
+        assertEquals(AppSettings(customBridges = listOf(obfs4Line)), StoredSettingsRepository(store()).get())
+    }
+
+    @Test
+    fun customWithoutLinesSanitizesToNone() = runBlocking {
+        assertEquals(AppSettings(), AppSettings(bridgeMode = BridgeMode.CUSTOM).sanitized())
+        assertEquals(
+            AppSettings(),
+            AppSettings(bridgeMode = BridgeMode.CUSTOM, customBridges = listOf(obfs4Line, "obfs4 roto")).sanitized(),
+        )
+        val tooMany = (1..11).map { obfs4Line.replace(":38224", ":${1000 + it}") }
+        assertEquals(AppSettings(), AppSettings(bridgeMode = BridgeMode.CUSTOM, customBridges = tooMany).sanitized())
+        assertEquals(AppSettings(), AppSettings(bridgeMode = BridgeMode.CUSTOM, customBridges = listOf(" ")).sanitized())
+
+        val repo = StoredSettingsRepository(store())
+        repo.update { it.copy(lockEnabled = true, bridgeMode = BridgeMode.CUSTOM) }
+        assertEquals(AppSettings(lockEnabled = true), StoredSettingsRepository(store()).get())
+
+        // Líneas guardadas que ya no validan (p. ej. por otra versión) se sanean al leer.
+        store().update {
+            it.withSettings(StoredSettings(lockEnabled = true, bridgeMode = "CUSTOM", customBridges = listOf("meek_lite 1.2.3.4:80")))
+        }
+        val fresh = StoredSettingsRepository(store())
+        assertEquals(AppSettings(lockEnabled = true), fresh.get())
+        assertEquals(AppSettings(lockEnabled = true), fresh.settings.first())
+
+        // Con otro modo, las líneas guardadas se conservan aunque no validen.
+        val kept = AppSettings(bridgeMode = BridgeMode.OBFS4, customBridges = listOf("obfs4 roto"))
+        assertEquals(kept, kept.sanitized())
+    }
+
+    @Test
+    fun customLinesRoundTrip() = runBlocking {
+        val custom = AppSettings(bridgeMode = BridgeMode.CUSTOM, customBridges = listOf(obfs4Line, webtunnelLine))
+        StoredSettingsRepository(store()).update { custom }
+        assertEquals(custom, StoredSettingsRepository(store()).get())
+
+        // Cambiar de opción no pierde las líneas propias.
+        StoredSettingsRepository(store()).update { it.copy(bridgeMode = BridgeMode.OBFS4) }
+        assertEquals(custom.copy(bridgeMode = BridgeMode.OBFS4), StoredSettingsRepository(store()).get())
+        StoredSettingsRepository(store()).update { it.copy(bridgeMode = BridgeMode.SNOWFLAKE) }
+        assertEquals(custom.copy(bridgeMode = BridgeMode.SNOWFLAKE), StoredSettingsRepository(store()).get())
+        StoredSettingsRepository(store()).update { it.copy(bridgeMode = BridgeMode.NONE) }
+        assertEquals(custom.copy(bridgeMode = BridgeMode.NONE), StoredSettingsRepository(store()).get())
+        assertTrue("las líneas propias guardadas mantienen el archivo", file().exists())
+        StoredSettingsRepository(store()).update { it.copy(bridgeMode = BridgeMode.CUSTOM) }
+        assertEquals(custom, StoredSettingsRepository(store()).get())
+
+        StoredSettingsRepository(store()).wipe()
+        assertEquals(AppSettings(), StoredSettingsRepository(store()).get())
+        assertFalse(file().exists())
     }
 
     @Test

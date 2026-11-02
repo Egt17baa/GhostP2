@@ -8,6 +8,7 @@ import kotlinx.serialization.cbor.ByteString
 import org.ghostp2.engine.Contact
 import org.ghostp2.engine.ContactStatus
 import org.ghostp2.engine.Identity
+import org.ghostp2.engine.bridges.BridgeMode
 
 /**
  * Contenido completo de `ghostp2.bin`: identidad, contactos, ajustes y borrados pendientes en un único
@@ -63,6 +64,13 @@ internal class StoredSettings(
     val startOnBoot: Boolean = false,
     /** Añadido con R29: los archivos de formato 2 anteriores no lo tienen y se leen con "Nunca". */
     val disconnectAfterMinutes: Int = 0,
+    /**
+     * Añadido con R30, como nombre de [BridgeMode]: los archivos de formato 2 anteriores no lo tienen y se leen
+     * con "No", igual que un nombre desconocido.
+     */
+    val bridgeMode: String = BridgeMode.NONE.name,
+    /** Añadido con R30: las líneas de "Mis puentes"; los archivos anteriores se leen sin ninguna. */
+    val customBridges: List<String> = emptyList(),
 ) {
     fun toModel() = AppSettings(
         onboardingDone = onboardingDone,
@@ -72,6 +80,8 @@ internal class StoredSettings(
         maxPhotoSidePx = maxPhotoSidePx,
         startOnBoot = startOnBoot,
         disconnectAfterMinutes = disconnectAfterMinutes,
+        bridgeMode = BridgeMode.entries.firstOrNull { it.name == bridgeMode } ?: BridgeMode.NONE,
+        customBridges = customBridges,
     )
 
     companion object {
@@ -83,6 +93,8 @@ internal class StoredSettings(
             maxPhotoSidePx = s.maxPhotoSidePx,
             startOnBoot = s.startOnBoot,
             disconnectAfterMinutes = s.disconnectAfterMinutes,
+            bridgeMode = s.bridgeMode.name,
+            customBridges = s.customBridges,
         )
     }
 }
