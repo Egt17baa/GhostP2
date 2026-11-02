@@ -30,6 +30,12 @@ internal interface TorDriver {
     /** Detiene el proceso (también interrumpe un arranque en curso). */
     suspend fun stopDaemon()
 
+    /**
+     * El runtime está en `Off` ahora mismo (sin proceso de Tor). Para saber si un [stopDaemon] que lanzó detuvo Tor
+     * de todos modos.
+     */
+    fun isDaemonOff(): Boolean
+
     suspend fun <T : Any> execute(cmd: TorCmd.Unprivileged<T>): T
 
     /** Primer puerto SOCKS abierto ahora mismo, o `null` (kmp-tor solo los informa con Tor listo). */
@@ -104,6 +110,8 @@ internal class KmpTorDriver(torDir: File, onState: (RuntimeState) -> Unit) : Tor
     override suspend fun stopDaemon() {
         runtime.stopDaemonAsync()
     }
+
+    override fun isDaemonOff(): Boolean = runtime.state().daemon.isOff
 
     override suspend fun <T : Any> execute(cmd: TorCmd.Unprivileged<T>): T = runtime.executeAsync(cmd)
 

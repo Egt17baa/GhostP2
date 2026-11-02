@@ -1,6 +1,7 @@
 package org.ghostp2.tor
 
 import android.content.Context
+import io.matthewnelson.kmp.tor.runtime.core.config.TorOption
 import io.matthewnelson.kmp.tor.runtime.core.config.TorSetting
 import io.matthewnelson.kmp.tor.runtime.core.ctrl.Reply
 import io.matthewnelson.kmp.tor.runtime.core.ctrl.TorCmd
@@ -50,20 +51,28 @@ import io.matthewnelson.kmp.tor.runtime.TorState as RuntimeState
  *   kmp-tor está desactivado y la salida del proceso va a `/dev/null`; `SafeLogging` queda en su valor
  *   por defecto (activado). Ningún mensaje de error de esta clase incluye claves ni direcciones.
  *
- * Si Tor no se detiene en el plazo de [stop] (15 s), la instancia queda "envenenada" ([poisoned]):
- * [wipeState] lanza y cada [start] reintenta una vez detenerlo; si tampoco, `Error` con `stuck`.
+ * Si Tor no se detiene en el plazo de [stop] (15 s), o `stopDaemon` lanza y el runtime no está en `Off`, la
+ * instancia queda "envenenada" ([poisoned]): [wipeState] lanza y cada [start] reintenta una vez detenerlo; si
+ * tampoco, `Error` con `stuck`.
  *
  * Puentes (R30): en cada [start], `bridges()` da el ajuste guardado. Con `null` («No») todo sigue como antes: ni
  * IPtProxy ni archivos nuevos. Con puentes:
  * - antes de arrancar Tor se crea el marcador `noBackupFilesDir/tor-bridged`, se arrancan los transportes
  *   ([PtController], uno por arranque, en `noBackupFilesDir/pt`) y se añade [applyBridgeConfig]. Nunca se
- *   arranca Tor sin puente: sin líneas o si falla un transporte, `Error` con `bridge` sin llegar a arrancarlo;
+ *   arranca Tor sin puente: sin líneas o si falla un transporte (cualquier `Throwable`, también un
+ *   `LinkageError` de JNI), `Error` con `bridge` sin llegar a arrancarlo y con los transportes parados;
+ * - con Tor ya arrancado, `GETCONF UseBridges` debe dar `1` antes de publicar `Ready` (hasta entonces,
+ *   `Starting(100)`). Cualquier otra respuesta, o un fallo de la orden, es `Error` con `bridge` y se detiene Tor
+ *   en el acto: así nunca se usa un Tor que kmp-tor no reconfiguró (p. ej. uno anterior aún enganchado al runtime);
  * - cualquier `Error` de esa ejecución lleva `bridge` (salvo `stuck`), también un fallo del transporte con Tor
  *   en marcha ([PtController.failures]);
  * - cada parada para Tor y después los transportes, y borra `torDir` y el estado de IPtProxy; luego quita el
  *   marcador. Con Tor atascado borra lo que puede y deja el marcador: el siguiente [start] (con cualquier ajuste)
  *   ve el marcador, como tras la muerte del proceso, y lo borra todo antes de arrancar.
- * Ningún mensaje de error nombra el puente.
+ * Ningún mensaje de error nombra el puente. Si no se puede leer el ajuste, o con «No» no se puede borrar lo que dejó
+ * un arranque por puente, es un `Error` de Tor sin `bridge`: no se arranca, pero el puente no tiene la culpa. Si se
+ * cancela un [start] a medias, se paran los transportes, el estado queda en `Error` (nunca en `Starting`) y la
+ * cancelación se relanza.
  *
  * Debe haber **una sola instancia por proceso** (kmp-tor comparte el runtime por directorio de trabajo).
  * Sus corrutinas propias cuelgan de un `SupervisorJob() + Dispatchers.Default` (regla R7); [stop] espera
@@ -121,11 +130,20 @@ class KmpTorTransport internal constructor(
     /** Serializa [start], [stop] y [wipeState]. */
     private val lifecycle = Mutex()
 
-    /** Protege [running], [run], [processSeen] y [readyThisRun] frente al hilo de eventos de kmp-tor. */
+    /**
+     * Protege [running], [run], [processSeen], [readyThisRun], [bridgeCheckPending] y [runtimeReady] frente al hilo
+     * de eventos de kmp-tor.
+     */
     private val lock = Any()
     private var running = false
     private var run = 0L
     private var processSeen = false
+
+    /** Ejecución por puente que aún no confirmó `UseBridges 1`: el `Ready` del runtime se muestra como `Starting(100)`. */
+    private var bridgeCheckPending = false
+
+    /** El último estado del runtime en esta ejecución era `Ready` (aunque se muestre `Starting(100)`). */
+    private var runtimeReady = false
 
     /** Ya hubo `Ready` en esta ejecución: desde entonces Tor puede tener servicios y autorizaciones. */
     @Volatile private var readyThisRun = false
@@ -142,12 +160,13 @@ class KmpTorTransport internal constructor(
     private var ptWatch: Job? = null
 
     /**
-     * "Envenenado": un `stopDaemon` agotó su plazo y el proceso de Tor puede seguir vivo. Mientras dure,
-     * no se arranca otro Tor y [wipeState] informa de fallo. Cada [start] reintenta una vez detenerlo
-     * con el mismo plazo: si termina, se arranca con normalidad; si no, el estado queda en `Error` con
-     * `stuck` (la interfaz pide cerrar y volver a abrir la app). Solo vive en memoria.
+     * "Envenenado": un `stopDaemon` agotó su plazo, o lanzó sin que el runtime quedara en `Off`, y el proceso de
+     * Tor puede seguir vivo. Mientras dure, no se arranca otro Tor (ni se reutiliza ese) y [wipeState] informa de
+     * fallo. Cada [start] reintenta una vez detenerlo con el mismo plazo: si termina, se arranca con normalidad; si
+     * no, el estado queda en `Error` con `stuck` (la interfaz pide cerrar y volver a abrir la app). Solo vive en
+     * memoria. También lo fija la corrutina de arranque si no puede detener un Tor sin `UseBridges 1`.
      */
-    private var poisoned = false
+    @Volatile private var poisoned = false
 
     override suspend fun start() {
         lifecycle.withLock {
@@ -159,42 +178,66 @@ class KmpTorTransport internal constructor(
                 processSeen = false
                 readyThisRun = false
                 bridgedRun = false
+                bridgeCheckPending = false
+                runtimeReady = false
                 mutableState.value = TorState.Starting(0) // R13: nunca Off al volver
                 ++run
             }
-            // R30: el proceso murió (o Tor se atascó) con un arranque por puente: se borra todo antes de seguir.
-            if (withContext(Dispatchers.IO) { markerFile.exists() }) {
-                driver = null // como en wipeState: torDir va a desaparecer
-                if (!withContext(Dispatchers.IO) { wipeDisk(removeMarker = true) }) {
-                    failRun(myRun, WIPE_FAILED, bridge = true)
-                    return
-                }
+            try {
+                startRunLocked(myRun)
+            } catch (e: CancellationException) {
+                // Cancelado a mitad: sin transportes escuchando y sin quedarse en Starting(0) (un start() posterior
+                // parte de Error y limpia el intento). La cancelación se relanza siempre.
+                abortBridgesLocked()
+                failRun(myRun, START_CANCELLED)
+                throw e
+            } catch (e: Throwable) {
+                abortBridgesLocked()
+                failRun(myRun)
             }
-            val setup = try {
-                bridges()
+        }
+    }
+
+    /** El cuerpo de [start] tras fijar `Starting(0)`. Cualquier fallo termina en `Error` (ver [start]). */
+    private suspend fun startRunLocked(myRun: Long) {
+        val setup = try {
+            bridges()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            // Sin saber el ajuste no se arranca (podría ser con puente), pero no es un fallo del puente.
+            failRun(myRun, BRIDGES_UNREADABLE, bridge = false)
+            return
+        }
+        // R30: el proceso murió (o Tor se atascó) con un arranque por puente: se borra todo antes de seguir.
+        if (withContext(Dispatchers.IO) { markerFile.exists() }) {
+            driver = null // como en wipeState: torDir va a desaparecer
+            if (!withContext(Dispatchers.IO) { wipeDisk(removeMarker = true) }) {
+                // Con «No» es un fallo de Tor (su estado en disco), no del puente.
+                failRun(myRun, WIPE_FAILED, bridge = setup != null)
+                return
+            }
+        }
+        val bridgeConfig = if (setup == null) emptyList() else startBridgesLocked(myRun, setup) ?: return
+        val d = try {
+            withContext(Dispatchers.IO) { obtainDriver() }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            abortBridgesLocked()
+            failRun(myRun)
+            return
+        }
+        startJob = scope.launch {
+            try {
+                d.startDaemon(bridgeConfig)
             } catch (e: CancellationException) {
                 throw e
-            } catch (e: Exception) {
-                // Sin saber el ajuste no se arranca: podría ser con puente.
-                failRun(myRun, BRIDGES_UNREADABLE, bridge = true)
-                return
-            }
-            val bridgeConfig = if (setup == null) emptyList() else startBridgesLocked(myRun, setup) ?: return
-            val d = try {
-                withContext(Dispatchers.IO) { obtainDriver() }
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
                 failRun(myRun)
-                return
+                return@launch
             }
-            startJob = scope.launch {
-                try {
-                    d.startDaemon(bridgeConfig)
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Throwable) {
-                    failRun(myRun)
-                }
-            }
+            if (setup != null) verifyBridgesApplied(myRun, d)
         }
     }
 
@@ -203,7 +246,10 @@ class KmpTorTransport internal constructor(
      * configuración de puentes, o `null` si falló (el estado ya es `Error` con `bridge` y Tor no se arranca).
      */
     private suspend fun startBridgesLocked(myRun: Long, setup: BridgeSetup): List<TorSetting>? {
-        bridgedRun = true
+        synchronized(lock) {
+            bridgedRun = true
+            bridgeCheckPending = true
+        }
         if (setup.lines.isEmpty()) {
             failRun(myRun, NO_BRIDGES) // «Mis puentes» sin líneas válidas: falla cerrado
             return null
@@ -212,7 +258,7 @@ class KmpTorTransport internal constructor(
             try {
                 markerFile.parentFile?.mkdirs()
                 markerFile.exists() || markerFile.createNewFile()
-            } catch (e: IOException) {
+            } catch (e: Exception) {
                 false
             }
         }
@@ -220,14 +266,16 @@ class KmpTorTransport internal constructor(
             failRun(myRun, START_FAILED)
             return null
         }
-        val controller = ptFactory(ptStateDir)
-        pt = controller
+        val controller: PtController
         val settings = try {
+            controller = ptFactory(ptStateDir)
+            pt = controller
             bridgeSettings(setup, controller.start(setup.kinds))
         } catch (e: CancellationException) {
             stopPt()
             throw e
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
+            // También LinkageError (libgojni.so) o un fallo de kmp-tor al crear los ajustes: falla cerrado.
             stopPt()
             failRun(myRun, PT_FAILED)
             return null
@@ -236,6 +284,42 @@ class KmpTorTransport internal constructor(
             if (controller.failures.firstOrNull() != null) failRun(myRun, PT_LOST)
         }
         return settings
+    }
+
+    /**
+     * Tras arrancar Tor por puente (en la corrutina de arranque): `GETCONF UseBridges` debe ser `1`. Si lo es, deja
+     * pasar `Ready`. Si no (o la orden falla), `Error` con `bridge` y detiene Tor ya, sin esperar al [stop] del motor;
+     * si no se detiene, envenena (el siguiente [start] no lo reutiliza).
+     */
+    private suspend fun verifyBridgesApplied(myRun: Long, d: TorDriver) {
+        val applied = try {
+            val entries = d.command(TorCmd.Config.Get(TorOption.UseBridges))
+            entries.isNotEmpty() && entries.all { it.option == TorOption.UseBridges && it.setting == "1" }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            false
+        }
+        if (applied) {
+            synchronized(lock) {
+                if (!running || run != myRun || mutableState.value is TorState.Error) return
+                bridgeCheckPending = false
+                if (runtimeReady) {
+                    readyThisRun = true
+                    mutableState.value = TorState.Ready
+                }
+            }
+            return
+        }
+        if (!failRun(myRun, BRIDGES_NOT_APPLIED, bridge = true)) return // ya parado o en otro intento
+        if (!stopDaemonVerified(d)) poisoned = true
+    }
+
+    /** Para los transportes y su vigilancia de un arranque que no sigue adelante (no lanza). */
+    private fun abortBridgesLocked() {
+        ptWatch?.cancel()
+        ptWatch = null
+        stopPt()
     }
 
     override suspend fun stop() {
@@ -347,18 +431,31 @@ class KmpTorTransport internal constructor(
             if (!running || mutableState.value is TorState.Error) return
             if (s.daemon.isStarting || s.daemon.isOn) processSeen = true
             mapRuntimeState(s.daemon, s.network, processSeen)?.let {
-                if (it == TorState.Ready) readyThisRun = true
-                mutableState.value = if (it is TorState.Error && bridgedRun) it.copy(bridge = true) else it
+                runtimeReady = it == TorState.Ready
+                val shown = when {
+                    it == TorState.Ready && bridgeCheckPending -> TorState.Starting(100) // falta GETCONF UseBridges
+                    it is TorState.Error && bridgedRun -> it.copy(bridge = true)
+                    else -> it
+                }
+                if (shown == TorState.Ready) readyThisRun = true
+                mutableState.value = shown
             }
         }
     }
 
-    /** `Error` de la ejecución [myRun] si sigue siendo la actual; con puente, siempre con `bridge`. */
-    private fun failRun(myRun: Long, message: String = START_FAILED, bridge: Boolean = bridgedRun) {
+    /**
+     * `Error` de la ejecución [myRun] si sigue siendo la actual (`true` si lo fijó); con puente, por defecto con
+     * `bridge`.
+     */
+    private fun failRun(myRun: Long, message: String = START_FAILED, bridge: Boolean = bridgedRun): Boolean =
         synchronized(lock) {
-            if (running && run == myRun) mutableState.value = TorState.Error(message, bridge = bridge)
+            if (running && run == myRun) {
+                mutableState.value = TorState.Error(message, bridge = bridge)
+                true
+            } else {
+                false
+            }
         }
-    }
 
     /** Para los transportes de la ejecución, si los hay (no lanza). */
     private fun stopPt() {
@@ -368,7 +465,7 @@ class KmpTorTransport internal constructor(
             controller.stop()
         } catch (e: CancellationException) {
             throw e
-        } catch (_: Exception) {
+        } catch (_: Throwable) {
             // Mejor esfuerzo: PtController.stop no debería lanzar.
         }
     }
@@ -404,18 +501,38 @@ class KmpTorTransport internal constructor(
             return false
         }
         val finished = try {
-            withTimeoutOrNull(stopTimeoutMillis) { runCatching { d.stopDaemon() } }
+            stopDaemonVerified(d)
         } catch (e: CancellationException) {
             mutableState.value = stuckError()
             throw e
         }
-        if (finished == null) {
+        if (!finished) {
             mutableState.value = stuckError()
             return false
         }
         poisoned = false
         return true
     }
+
+    /**
+     * Detiene Tor con el plazo de [stop]. `true` solo si se detuvo: `stopDaemon` terminó, o lanzó pero el runtime
+     * ya está en `Off`. Con el plazo agotado, o si lanzó con Tor aún en marcha, `false` (quien llama envenena).
+     */
+    private suspend fun stopDaemonVerified(d: TorDriver): Boolean =
+        withTimeoutOrNull(stopTimeoutMillis) {
+            try {
+                d.stopDaemon()
+                true
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Throwable) {
+                try {
+                    d.isDaemonOff()
+                } catch (_: Throwable) {
+                    false
+                }
+            }
+        } ?: false
 
     private fun stuckError() = TorState.Error(STOP_TIMED_OUT, stuck = true)
 
@@ -427,12 +544,11 @@ class KmpTorTransport internal constructor(
         ptWatch?.cancel()
         ptWatch = null
         // Interrumpe también un arranque en curso. Acotado: un Tor colgado no bloquea al motor, pero
-        // envenena el transporte (ver [poisoned]). Un fallo que no sea por tiempo no envenena. Ya
-        // envenenado no hay nada en marcha: no se vuelve a esperar (solo [start] lo reintenta).
+        // envenena el transporte (ver [poisoned]). Un fallo que no sea por tiempo solo envenena si Tor
+        // sigue en marcha. Ya envenenado no se vuelve a esperar (solo [start] lo reintenta).
         val d = driver
         if (d != null && !poisoned) {
-            val finished = withTimeoutOrNull(stopTimeoutMillis) { runCatching { d.stopDaemon() } }
-            if (finished == null) poisoned = true
+            if (!stopDaemonVerified(d)) poisoned = true
         }
         startJob?.cancelAndJoin()
         startJob = null
@@ -505,6 +621,8 @@ class KmpTorTransport internal constructor(
         const val PT_FAILED = "No se pudo iniciar el transporte del puente"
         const val PT_LOST = "El transporte del puente ha fallado"
         const val BRIDGES_UNREADABLE = "No se pudo leer el ajuste de puentes"
+        const val BRIDGES_NOT_APPLIED = "Tor no aplicó la configuración del puente"
+        const val START_CANCELLED = "Arranque de Tor cancelado"
         const val WIPE_FAILED = "No se pudo borrar el estado de Tor"
         const val STOP_TIMED_OUT = "Tor no se detuvo a tiempo; hay que reiniciar la app"
         const val STOP_TIMEOUT_MILLIS = 15_000L

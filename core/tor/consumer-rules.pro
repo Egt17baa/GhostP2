@@ -19,7 +19,8 @@
 
 # Puentes (R30), kmp-tor: KmpTorSupport.kt (torSetting) crea los TorSetting de UseBridges, Bridge y
 # ClientTransportPlugin por reflexión con estas funciones internas de runtime-core-jvm 2.6.0 (kmp-tor no tiene
-# API pública para ellas). R8 debe conservar el campo y los dos métodos con su nombre.
+# API pública para ellas). R8 debe conservar el campo y los dos métodos con su nombre. No se pueden quitar con una
+# llamada directa desde Java: kmp-tor marca esas funciones @JvmSynthetic y javac no las ve (ver torSetting).
 -keepclassmembers class io.matthewnelson.kmp.tor.runtime.core.config.TorSetting$LineItem {
     public static final io.matthewnelson.kmp.tor.runtime.core.config.TorSetting$LineItem$Companion Companion;
 }

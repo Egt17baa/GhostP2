@@ -93,7 +93,13 @@ internal fun bridgeSettings(setup: BridgeSetup, ports: Map<PtKind, Int>): List<T
  * una sola línea) y `LineItem.toSetting`; kmp-tor manda luego la línea `opción argumento` a Tor en `LOADCONF`, como
  * las demás. Los nombres JVM son los de `runtime-core-jvm` 2.6.0 (fijada en `libs.versions.toml`); las reglas de R8
  * de `consumer-rules.pro` los conservan y `BridgeConfigTest` falla si cambian. Cualquier fallo es
- * [IllegalArgumentException] o [IllegalStateException]: el arranque por puente falla cerrado.
+ * [IllegalArgumentException] o [IllegalStateException] (y [KmpTorTransport] trata cualquier otro `Throwable` igual):
+ * el arranque por puente falla cerrado.
+ *
+ * No se puede llamar a estas funciones desde un archivo Java (lo que haría que un cambio de nombre rompiera la
+ * compilación): kmp-tor las marca `@JvmSynthetic` (`ACC_SYNTHETIC` en el bytecode, igual que los constructores
+ * públicos de `TorSetting` y `LineItem`, y sus variantes `$default`), y javac no resuelve miembros sintéticos
+ * («cannot find symbol»). Comprobado con javac contra `runtime-core-jvm` 2.6.0.
  */
 private fun torSetting(option: TorOption, argument: String): TorSetting {
     val internals = KmpTorInternals.instance ?: throw IllegalStateException("kmp-tor sin soporte para ${option.name}")
