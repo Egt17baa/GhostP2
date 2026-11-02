@@ -42,9 +42,13 @@ class BridgeSetupTest {
     }
 
     @Test
-    fun customWithoutLinesIsNull() {
-        assertNull(bridgeSetupFor(BridgeMode.CUSTOM, emptyList()))
-        assertNull(bridgeSetupFor(BridgeMode.CUSTOM, listOf("", "  ")))
-        assertNull(bridgeSetupFor(BridgeMode.CUSTOM, listOf(obfs4, "obfs4 roto")))
+    fun customWithoutLinesIsEmptySetup() {
+        // Falla cerrado: «Mis puentes» sin líneas válidas nunca es «sin puentes» (null), sino un arranque por puente
+        // sin puentes, que el transporte convierte en error de puente sin llegar a arrancar Tor.
+        val empty = BridgeSetup(emptyList())
+        assertEquals(empty, bridgeSetupFor(BridgeMode.CUSTOM, emptyList()))
+        assertEquals(empty, bridgeSetupFor(BridgeMode.CUSTOM, listOf("", "  ")))
+        assertEquals(empty, bridgeSetupFor(BridgeMode.CUSTOM, listOf(obfs4, "obfs4 roto")))
+        assertEquals(emptySet<PtKind>(), bridgeSetupFor(BridgeMode.CUSTOM, emptyList())?.kinds)
     }
 }

@@ -9,16 +9,13 @@ data class BridgeSetup(val lines: List<BridgeLine>) {
 }
 
 /**
- * Puentes de [mode]; `null` = sin puentes. Con [BridgeMode.CUSTOM], [custom] son las líneas guardadas, y si no
- * pasan [BridgeLines.parse] o no hay ninguna también da `null`: los ajustes guardados nunca llegan así, porque
- * `AppSettings.sanitized()` lo convierte en [BridgeMode.NONE].
+ * Puentes de [mode]; `null` **solo** con [BridgeMode.NONE] (sin puentes). Con [BridgeMode.CUSTOM], [custom] son las
+ * líneas guardadas: si no pasan [BridgeLines.parse] o no hay ninguna, el resultado es un [BridgeSetup] **vacío**, que
+ * falla cerrado (el transporte lo da como error de puente sin arrancar Tor). Nunca se convierte en conexión directa.
  */
 fun bridgeSetupFor(mode: BridgeMode, custom: List<String>): BridgeSetup? = when (mode) {
     BridgeMode.NONE -> null
     BridgeMode.OBFS4 -> BridgeSetup(BuiltInBridges.OBFS4)
     BridgeMode.SNOWFLAKE -> BridgeSetup(BuiltInBridges.SNOWFLAKE)
-    BridgeMode.CUSTOM -> (BridgeLines.parse(custom.joinToString("\n")) as? ParseResult.Ok)
-        ?.lines
-        ?.takeIf { it.isNotEmpty() }
-        ?.let(::BridgeSetup)
+    BridgeMode.CUSTOM -> BridgeSetup((BridgeLines.parse(custom.joinToString("\n")) as? ParseResult.Ok)?.lines.orEmpty())
 }

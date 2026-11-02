@@ -93,6 +93,51 @@ class BridgeLineTest {
     }
 
     @Test
+    fun webtunnelUrlIsPrintableAsciiWithValidPort() {
+        val base = "webtunnel 192.0.2.7:443 $fpA url="
+        val bad = listOf(
+            "https://cover.example.org/p#x ver=0.0.1", // `#` empieza un comentario en torrc
+            "https://cover.example.org/a\u200Bb", // espacio de anchura cero
+            "https://cover.example.org/a\u202Eb", // inversión bidireccional
+            "https://cover.example.org/a\uFEFFb",
+            "https://cover.example.org/caf\u00e9",
+            "https://cover.example.org/a\"b",
+            "https://cover.example.org/a'b",
+            "https://cover.example.org/a\\b",
+            "https://cover.example.org:70000/x",
+            "https://cover.example.org:0/x",
+        )
+        for (url in bad) {
+            assertEquals(ParseResult.Invalid(listOf(2), false), BridgeLines.parse("$a\n$base$url"), url)
+        }
+        val good = "${base}https://cover.example.org:8443/aB3-dE5_~.x?q=1&r=%20"
+        assertEquals(ok(BridgeLine(PtKind.WEBTUNNEL, good)), BridgeLines.parse(good))
+        val maxPort = "${base}https://cover.example.org:65535/x"
+        assertEquals(ok(BridgeLine(PtKind.WEBTUNNEL, maxPort)), BridgeLines.parse(maxPort))
+    }
+
+    @Test
+    fun ipv6IsCanonicalBeforeDedup() {
+        val long = "obfs4 [2001:0DB8:0:0:0:0:0:1]:443 $fpA cert=$certA iat-mode=2"
+        val mixed = "obfs4 [2001:0db8:0:0::1]:443 $fpA cert=$certA iat-mode=2"
+        assertEquals(ok(obfs4(v6)), BridgeLines.parse("$v6\n$long\n$mixed"))
+        assertEquals(
+            ok(obfs4("obfs4 [2001:db8::1:0:0:1]:443 $fpA cert=$certA iat-mode=2")),
+            BridgeLines.parse("obfs4 [2001:db8:0:0:1:0:0:1]:443 $fpA cert=$certA iat-mode=2"),
+            "el tramo de ceros más largo; con empate, el primero",
+        )
+        assertEquals(
+            ok(obfs4("obfs4 [2001:db8:0:1:1:1:1:1]:443 $fpA cert=$certA iat-mode=2")),
+            BridgeLines.parse("obfs4 [2001:db8::1:1:1:1:1]:443 $fpA cert=$certA iat-mode=2"),
+            "un solo grupo de ceros no se comprime",
+        )
+        assertEquals(
+            ok(obfs4("obfs4 [::]:443 $fpA cert=$certA iat-mode=2"), obfs4("obfs4 [fe80::]:443 $fpA cert=$certA iat-mode=2")),
+            BridgeLines.parse("obfs4 [0:0::0]:443 $fpA cert=$certA iat-mode=2\nobfs4 [FE80:0:0:0:0:0:0:0]:443 $fpA cert=$certA iat-mode=2"),
+        )
+    }
+
+    @Test
     fun parsesQrArray() {
         assertEquals(ok(obfs4(a), obfs4(b)), BridgeLines.parseQr("['$a', '$b']"))
         assertEquals(ok(obfs4(a), obfs4(b)), BridgeLines.parseQr(" [ \"$a\" ,\n\"$b\" ] "))

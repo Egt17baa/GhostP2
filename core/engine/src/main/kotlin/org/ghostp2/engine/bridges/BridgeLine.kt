@@ -34,6 +34,7 @@ object BridgeLines {
     private val IPV4_OCTET = Regex("0|[1-9][0-9]{0,2}")
     private val PORT = Regex("[1-9][0-9]{0,4}")
     private val HEX_GROUP = Regex("[0-9A-Fa-f]{1,4}")
+    private const val URL_FORBIDDEN = "#\"'\\"
 
     /** Texto pegado, una línea por puente. Los números de [ParseResult.Invalid] son los de las líneas del texto. */
     fun parse(text: String): ParseResult = parseItems(text.split(NEWLINE))
@@ -116,13 +117,20 @@ object BridgeLines {
         (args.size == 1 || (args.size == 2 && VERSION.matches(args[1]))) &&
             args[0].startsWith("url=") && isHttpsUrl(args[0].removePrefix("url="))
 
+    /**
+     * URL `https://` con host y, si lo lleva, puerto entre 1 y 65535. Antes de `URI` (que solo extrae host y puerto),
+     * una lista blanca explícita, igual en la JVM y en Android: ASCII imprimible sin espacios, sin `#` (en torrc
+     * empieza un comentario) y sin comillas ni barra invertida. Así no pasan caracteres invisibles ni de control bidireccional.
+     */
     private fun isHttpsUrl(value: String): Boolean {
         if (!value.startsWith("https://")) return false
-        return try {
-            !URI(value).host.isNullOrEmpty()
+        if (!value.all { it in '!'..'~' && it !in URL_FORBIDDEN }) return false
+        val uri = try {
+            URI(value)
         } catch (_: URISyntaxException) {
-            false
+            return false
         }
+        return !uri.host.isNullOrEmpty() && (uri.port == -1 || uri.port in 1..65_535)
     }
 
     /** `IPv4:puerto` o `[IPv6]:puerto` normalizado; `null` si no es válido (nunca un nombre de host). */
@@ -143,7 +151,37 @@ object BridgeLines {
             if (!isIpv4(host)) return null
         }
         if (!PORT.matches(port) || port.toInt() > 65_535) return null
-        return if (value.startsWith("[")) "[${host.lowercase()}]:$port" else "$host:$port"
+        return if (value.startsWith("[")) "[${canonicalIpv6(host)}]:$port" else "$host:$port"
+    }
+
+    /**
+     * Forma canónica (RFC 5952) de una IPv6 ya validada por [isIpv6]: minúsculas, sin ceros a la izquierda y con
+     * `::` en el tramo de ceros más largo (de 2 grupos o más; con empate, el primero). Así se quitan los duplicados.
+     */
+    private fun canonicalIpv6(host: String): String {
+        val halves = host.split("::")
+        val head = if (halves[0].isEmpty()) emptyList() else halves[0].split(':')
+        val tail = if (halves.size < 2 || halves[1].isEmpty()) emptyList() else halves[1].split(':')
+        val groups = (head + List(8 - head.size - tail.size) { "0" } + tail).map { it.toInt(16).toString(16) }
+        var bestStart = -1
+        var bestLength = 1
+        var i = 0
+        while (i < groups.size) {
+            if (groups[i] != "0") {
+                i++
+                continue
+            }
+            var end = i
+            while (end < groups.size && groups[end] == "0") end++
+            if (end - i > bestLength) {
+                bestStart = i
+                bestLength = end - i
+            }
+            i = end
+        }
+        if (bestStart < 0) return groups.joinToString(":")
+        return groups.subList(0, bestStart).joinToString(":") + "::" +
+            groups.subList(bestStart + bestLength, groups.size).joinToString(":")
     }
 
     private fun isIpv4(host: String): Boolean {

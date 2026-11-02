@@ -4,7 +4,6 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import org.ghostp2.engine.bridges.BridgeMode
-import org.ghostp2.engine.bridges.bridgeSetupFor
 
 /**
  * Ajustes de la app, guardados en `ghostp2.bin` junto a la identidad y los contactos (formato 2, R21).
@@ -34,26 +33,17 @@ data class AppSettings(
     val customBridges: List<String> = emptyList(),
 ) {
     /**
-     * Los mismos ajustes con cada valor fuera de su lista sustituido por el de por defecto. [BridgeMode.CUSTOM] sin
-     * [customBridges] válidas (vacías o que no pasan `BridgeLines.parse`) pasa a [BridgeMode.NONE] sin líneas.
+     * Los mismos ajustes con cada valor fuera de su lista sustituido por el de por defecto. Los puentes no se tocan:
+     * [BridgeMode.CUSTOM] sin [customBridges] válidas se conserva tal cual (con sus líneas, para poder corregirlas) y
+     * falla cerrado al arrancar (`bridgeSetupFor` da un `BridgeSetup` vacío): nunca pasa a [BridgeMode.NONE].
      */
     fun sanitized(): AppSettings {
         val lock = if (lockAfterMinutes in LOCK_MINUTES) lockAfterMinutes else DEFAULT.lockAfterMinutes
         val side = if (maxPhotoSidePx in PHOTO_SIDES) maxPhotoSidePx else DEFAULT.maxPhotoSidePx
         val disconnect =
             if (disconnectAfterMinutes in DISCONNECT_MINUTES) disconnectAfterMinutes else DEFAULT.disconnectAfterMinutes
-        val bridgesOk = bridgeMode != BridgeMode.CUSTOM || bridgeSetupFor(bridgeMode, customBridges) != null
-        return if (lock == lockAfterMinutes && side == maxPhotoSidePx && disconnect == disconnectAfterMinutes && bridgesOk) {
-            this
-        } else {
-            copy(
-                lockAfterMinutes = lock,
-                maxPhotoSidePx = side,
-                disconnectAfterMinutes = disconnect,
-                bridgeMode = if (bridgesOk) bridgeMode else DEFAULT.bridgeMode,
-                customBridges = if (bridgesOk) customBridges else DEFAULT.customBridges,
-            )
-        }
+        return if (lock == lockAfterMinutes && side == maxPhotoSidePx && disconnect == disconnectAfterMinutes) this
+        else copy(lockAfterMinutes = lock, maxPhotoSidePx = side, disconnectAfterMinutes = disconnect)
     }
 
     companion object {

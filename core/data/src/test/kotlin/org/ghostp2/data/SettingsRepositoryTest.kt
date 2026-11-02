@@ -11,6 +11,8 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.cbor.Cbor
 import org.ghostp2.engine.Identity
 import org.ghostp2.engine.bridges.BridgeMode
+import org.ghostp2.engine.bridges.BridgeSetup
+import org.ghostp2.engine.bridges.bridgeSetupFor
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -178,27 +180,29 @@ class SettingsRepositoryTest {
     }
 
     @Test
-    fun customWithoutLinesSanitizesToNone() = runBlocking {
-        assertEquals(AppSettings(), AppSettings(bridgeMode = BridgeMode.CUSTOM).sanitized())
-        assertEquals(
-            AppSettings(),
-            AppSettings(bridgeMode = BridgeMode.CUSTOM, customBridges = listOf(obfs4Line, "obfs4 roto")).sanitized(),
-        )
+    fun customWithoutLinesStaysCustomAndFailsClosed() = runBlocking {
+        // «Mis puentes» nunca se cambia a «No» (conexión directa): se conserva con sus líneas y el arranque falla
+        // cerrado (bridgeSetupFor da un BridgeSetup vacío → error de puente).
         val tooMany = (1..11).map { obfs4Line.replace(":38224", ":${1000 + it}") }
-        assertEquals(AppSettings(), AppSettings(bridgeMode = BridgeMode.CUSTOM, customBridges = tooMany).sanitized())
-        assertEquals(AppSettings(), AppSettings(bridgeMode = BridgeMode.CUSTOM, customBridges = listOf(" ")).sanitized())
+        for (lines in listOf(emptyList(), listOf(obfs4Line, "obfs4 roto"), tooMany, listOf(" "))) {
+            val custom = AppSettings(bridgeMode = BridgeMode.CUSTOM, customBridges = lines)
+            assertEquals(custom, custom.sanitized())
+            assertEquals(BridgeSetup(emptyList()), bridgeSetupFor(custom.bridgeMode, custom.customBridges))
+        }
 
         val repo = StoredSettingsRepository(store())
         repo.update { it.copy(lockEnabled = true, bridgeMode = BridgeMode.CUSTOM) }
-        assertEquals(AppSettings(lockEnabled = true), StoredSettingsRepository(store()).get())
+        assertEquals(AppSettings(lockEnabled = true, bridgeMode = BridgeMode.CUSTOM), StoredSettingsRepository(store()).get())
 
-        // Líneas guardadas que ya no validan (p. ej. por otra versión) se sanean al leer.
+        // Líneas guardadas que ya no validan (p. ej. por otra versión) se conservan tal cual al leer.
         store().update {
             it.withSettings(StoredSettings(lockEnabled = true, bridgeMode = "CUSTOM", customBridges = listOf("meek_lite 1.2.3.4:80")))
         }
         val fresh = StoredSettingsRepository(store())
-        assertEquals(AppSettings(lockEnabled = true), fresh.get())
-        assertEquals(AppSettings(lockEnabled = true), fresh.settings.first())
+        val expected = AppSettings(lockEnabled = true, bridgeMode = BridgeMode.CUSTOM, customBridges = listOf("meek_lite 1.2.3.4:80"))
+        assertEquals(expected, fresh.get())
+        assertEquals(expected, fresh.settings.first())
+        assertEquals(BridgeSetup(emptyList()), bridgeSetupFor(expected.bridgeMode, expected.customBridges))
 
         // Con otro modo, las líneas guardadas se conservan aunque no validen.
         val kept = AppSettings(bridgeMode = BridgeMode.OBFS4, customBridges = listOf("obfs4 roto"))
