@@ -123,6 +123,47 @@ posible, muy hermético**.
 - **Notificación y pantalla de inicio:** sin nombre del puente, solo «por puente».
 - **R30**, nueva regla en PROTOCOLO §14: «Puentes».
 
+## Decisiones tras la revisión del constructor
+
+- **Datos de Tor en disco (usuario: «Borrar al desconectar»).** Con cualquier opción de puente
+  distinta de «No», cada vez que se para Tor se borran:
+  - su estado (`state`) y sus cachés de descriptores del DataDirectory/CacheDirectory;
+  - el `stateDir` de IPtProxy.
+
+  Esto se aplica al «Desconectar», a R29, a `onDestroy`, al cambio de ajuste y a Tor atascado. No
+  se borran los recursos de kmp-tor (geoip) ni nada de GhostP2. También se borran al cambiar el
+  ajuste de puentes, incluido pasar a «No». Coste aceptado: cada conexión por puente arranca en
+  frío (unos 30–60 s más). Con «No» se mantiene el comportamiento actual. Si el proceso muere sin
+  pasar por la parada, el borrado se hace al siguiente arranque, antes de lanzar Tor.
+- **F-Droid (usuario: «No por ahora»).** IPtProxy precompilado de Maven Central, con versión
+  exacta y comprobación de huella (verification-metadata de Gradle si el proyecto la usa; si no,
+  la suma documentada en DESARROLLO.md). Adaptarlo a F-Droid queda para más adelante.
+- **Snowflake (decisión del diseñador).**
+  - Sin AMP cache: es de Google (`cdn.ampproject.org`).
+  - Rendezvous solo por domain fronting, con los frentes y el intermediario de Tor Browser.
+    Si alguno de los frentes es de Google, se quita.
+  - STUN sin servidores de Google.
+  - El aviso menciona también a los voluntarios: «Snowflake contacta con un intermediario
+    a través de una red de distribución de contenidos, con servidores STUN públicos y con
+    voluntarios que hacen de puente. No ven tus mensajes, pero sí tu dirección IP. Úsalo solo si
+    los otros no funcionan.»
+- **DNS fuera de Tor (decisión del diseñador).** Los transportes resuelven con el DNS normal del
+  móvil los nombres que necesitan, y es inevitable:
+  - el host `url=` de WebTunnel;
+  - los frentes y los STUN de Snowflake.
+
+  Se acepta y se documenta en R30: el operador ve una consulta a un dominio de cobertura, que es
+  justo lo que el disfraz pretende. obfs4 usa IP y no hace DNS. El constructor comprueba que la
+  resolución funciona en Android (el resolutor de Go puede no encontrar servidor DNS). Si hace
+  falta un apaño, que no añada terceros.
+- **Cambio de ajuste con el motor en error (decisión del diseñador).**
+  - En `Error`, incluido `BRIDGE_FAILED`, cambiar el ajuste reconecta enseguida, sin diálogo
+    (no hay conversaciones que perder).
+  - `recoverOnNetworkReturn` sigue reintentando al volver la red, pero siempre con el ajuste
+    guardado (el mismo puente), nunca en directo.
+  - «Queda en error hasta que el usuario actúe» se entiende como «nunca se conecta sin
+    puente».
+
 ## Lo que queda al constructor
 
 - Opciones exactas de kmp-tor (`TorOption.UseBridges`, `Bridge`, `ClientTransportPlugin`) y en
